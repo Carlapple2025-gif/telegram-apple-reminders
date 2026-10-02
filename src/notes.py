@@ -262,6 +262,30 @@ class Notes:
                 return Note(id=nid, name=nm, plaintext=text)
         return None
 
+    def delete(self, note_id: str) -> bool:
+        """
+        按 id 删除条目。返回是否真的删掉了（删除后复查 id 不再出现）。
+
+        为什么只按 id 删：**过滤逻辑放在 Python 里**，AppleScript 只接受一个
+        具体的 id 字符串。这样避免在 bash/AppleScript 里拼条件表达式 ——
+        那种拼法反复因为引号转义出错（-2741 语法错），已放弃。
+        """
+        out = run_applescript(
+            'tell application "Notes"\n'
+            f'  set hits to (every note of folder id {_as_literal(self.folder_id)} '
+            f'whose id is {_as_literal(note_id)})\n'
+            '  if (count of hits) is 0 then return "NOTFOUND"\n'
+            '  delete item 1 of hits\n'
+            '  return "deleted"\n'
+            'end tell'
+        )
+        if out == "NOTFOUND":
+            raise NotesError(f"要删除的条目不存在：{note_id}")
+        if out != "deleted":
+            raise NotesError(f"删除命令返回异常：{out}")
+        # 复查：id 应该不再出现
+        return note_id not in self.all_ids()
+
     # ── 写（全部带读回验证）
 
     def create(self, body_lines: list[str]) -> Note:

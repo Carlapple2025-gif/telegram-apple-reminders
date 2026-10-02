@@ -237,9 +237,31 @@ check("反斜杠先于引号转义",
       _notes._as_literal('\\"'))
 
 
-# ── 6. shell 脚本静态检查：bash 3.2 的全角字符陷阱
+# ── 6. 清理判据（哪些能删、哪些必须留）
 
-print("\n── 6. shell 脚本检查 ──")
+print("\n── 6. 清理判据检查 ──")
+import datetime as _dt  # noqa: E402
+import importlib.util as _ilu  # noqa: E402
+
+_spec = _ilu.spec_from_file_location("_cleanup", SRC / "cleanup.py")
+_cleanup = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(_cleanup)
+
+_today = _dt.date(2026, 10, 2)
+# 这些**必须删**（历次探测的残留 + 提前生成的页面）
+for _n in ["FMT-TEST-1　x", "STRUCT-PROBE-2", "DIAG-OSA-3", "# PDCA probe 页",
+           "2026-10-03", "2026-12-31"]:
+    check(f"应删：{_n[:24]}", _cleanup.classify(_n, _today) is not None)
+
+# 这些**必须留**（真实数据！误删不可恢复）
+for _n in ["2026-10-02", "2026-10-01", "国际象棋", "2026-10-02 备注",
+           "孙宇晨经常说，普通人没有战略"]:
+    check(f"应留：{_n[:24]}", _cleanup.classify(_n, _today) is None)
+
+
+# ── 7. shell 脚本静态检查：bash 3.2 的全角字符陷阱
+
+print("\n── 7. shell 脚本检查 ──")
 
 # macOS 自带 bash 3.2 会把**全角字符的字节**当成变量名的一部分。
 # 于是 `echo "「$TARGET」"` 会去找名为 `TARGET」` 的变量，报
