@@ -212,6 +212,34 @@ check("留档含解析段", "## 解析结果" in md)
 check("留档含日期", "date: 2026-10-02" in md)
 
 
+# ── 5. shell 脚本静态检查：bash 3.2 的全角字符陷阱
+
+print("\n── 5. shell 脚本检查 ──")
+
+import re as _re  # noqa: E402
+
+# macOS 自带 bash 3.2 会把**全角字符的字节**当成变量名的一部分。
+# 于是 `echo "「$TARGET」"` 会去找名为 `TARGET」` 的变量，报
+# `TARGET?: unbound variable` —— 报错信息还会把变量名截断得看不出真相。
+#
+# 这个坑在本项目里踩了三次（两次探测脚本 + 一次 delete-day.sh），
+# 所以固化成检查：$VAR 后面紧跟非 ASCII 字节就是危险写法，必须写 ${VAR}。
+_danger = _re.compile(rb"\$([A-Za-z_][A-Za-z0-9_]*)(?=[\x80-\xff])")
+_shell_files = sorted((ROOT / "deploy").glob("*.sh"))
+_bad: list[str] = []
+for _p in _shell_files:
+    _hits = _danger.findall(_p.read_bytes())
+    if _hits:
+        _vars = ", ".join(sorted({h.decode() for h in _hits}))
+        _bad.append(f"{_p.name}: ${_vars}")
+
+check(
+    f"{len(_shell_files)} 个 shell 脚本无「$VAR 后紧跟全角字符」写法",
+    not _bad,
+    "；".join(_bad) + "  → 改用 ${VAR}",
+)
+
+
 # ── 汇总
 
 print()

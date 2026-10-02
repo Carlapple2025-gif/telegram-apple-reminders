@@ -38,7 +38,7 @@ print(json.load(open('$CONFIG'))['folder_id'])
 
 run() { osascript -e "$1" 2>&1; }
 
-echo "删除当天页：「$TARGET」"
+echo "删除当天页：「${TARGET}」"
 echo "════════════════════════════════════════"
 
 # 先确认文件夹有效
@@ -63,7 +63,7 @@ FOUND=$(run "tell application \"Notes\"
   repeat with n in notes of folder id \"$FOLDER_ID\"
     if (name of n) is \"$TARGET\" then set out to out & \"  找到：\" & (name of n) & linefeed
   end repeat
-  if out is \"\" then return \"  （没有标题正好是「$TARGET」的条目）\"
+  if out is \"\" then return \"  （没有标题正好是「${TARGET}」的条目）\"
   return out
 end tell")
 echo "$FOUND"
@@ -99,7 +99,7 @@ echo "── 结果 ──"
 echo "  条数：$BEFORE → $AFTER"
 
 echo
-echo "── 复核：还有没有标题正好是「$TARGET」的 ──"
+echo "── 复核：还有没有标题正好是「${TARGET}」的 ──"
 run "tell application \"Notes\"
   set out to \"\"
   repeat with n in notes of folder id \"$FOLDER_ID\"

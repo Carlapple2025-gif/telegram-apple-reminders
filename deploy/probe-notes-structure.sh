@@ -101,4 +101,4 @@ CL=$(run "tell application \"Notes\"
   end repeat
   return (n as string) & \" -> \" & ((count of notes) as string)
 end tell")
-echo "   $CL（基线应为 $BASELINE）"
+echo "   ${CL}（基线应为 ${BASELINE}）"
