@@ -265,24 +265,33 @@ for _n in ["2026-10-02", "2026-10-01", "国际象棋", "2026-10-02 备注",
 print("\n── 7. 提醒事项同步规则 ──")
 import importlib.util as _ilu2  # noqa: E402
 
-def _load(name, path):
+def _load(path):
     """
-    动态加载模块。
+    按**规范模块名**加载 src 下的模块（不要另起别名）。
 
-    注意：必须先把模块注册进 sys.modules —— 否则 @dataclass 在解析类型标注时
-    会去 sys.modules 找本模块的命名空间，拿不到就报
-    `'NoneType' object has no attribute '__dict__'`。
-    这是个很容易踩的坑，写在这里免得下次再查。
+    两个坑，都是实际踩出来的：
+      1. 必须注册进 sys.modules —— 否则 @dataclass 解析类型标注时找不到
+         本模块命名空间，报 `'NoneType' object has no attribute '__dict__'`。
+      2. **必须用模块本名**（`reminders` 而不是 `_reminders`）。因为模块内部会
+         `import reminders`，若外部用的是别名，就会加载出**第二份**，
+         于是 `RemindersError` 变成两个不同的类，`except` 捕获不到 ——
+         表现为异常"穿透"了本该处理它的代码。
     """
     import sys as _sys
-    _s = _ilu2.spec_from_file_location(name, path)
+    import importlib as _il
+    _name = path.stem
+    if str(SRC) not in _sys.path:
+        _sys.path.insert(0, str(SRC))
+    if _name in _sys.modules:
+        return _sys.modules[_name]
+    _s = _ilu2.spec_from_file_location(_name, path)
     _m = _ilu2.module_from_spec(_s)
-    _sys.modules[name] = _m
+    _sys.modules[_name] = _m
     _s.loader.exec_module(_m)
     return _m
 
-_rems = _load("_reminders", SRC / "reminders.py")
-_push = _load("_push", SRC / "push_tasks.py")
+_rems = _load(SRC / "reminders.py")
+_push = _load(SRC / "push_tasks.py")
 
 _NOTE = "x-coredata://TEST/ICNote/p1"
 
@@ -329,9 +338,65 @@ check("改文字后视为新内容",
       _rems.make_key(_NOTE, 2, "甲") != _rems.make_key(_NOTE, 2, "甲改过了"))
 
 
-# ── 8. AppleScript 语法校验（osacompile，只编译不执行）
+# ── 8. 完成状态合并（权威 = 提醒事项）
 
-print("\n── 8. AppleScript 语法校验 ──")
+print("\n── 8. 完成状态合并规则 ──")
+_completion = _load(SRC / "completion.py")
+
+_CNOTE = "x-coredata://TEST/ICNote/p1"
+
+
+class _FakeReminders:
+    """桩对象：让合并逻辑可以完全离线测试。"""
+    def __init__(self, reminders=None, fail=False):
+        self._r = reminders or []
+        self._fail = fail
+        self.list_name = "PDCA"
+
+    def all_reminders(self):
+        if self._fail:
+            raise _rems.RemindersError("模拟不可用")
+        return self._r
+
+
+def _r2(name, completed, line_no):
+    return _rems.Reminder(id=f"r{line_no}", name=name, completed=completed,
+                          body=_rems.make_key(_CNOTE, line_no, name), due="")
+
+
+_pg = parser.parse("2026-10-02\n- [ ] 甲\n- [ ] 乙\n- [ ] 丙\n* 备忘")
+
+# 提醒事项里已完成 → 计入完成
+_res = _completion.resolve(_pg, _CNOTE, _FakeReminders([_r2("乙", True, 3)]))
+check("提醒事项已完成计入完成", len(_res.done) == 1 and _res.done[0].source == "reminders")
+check("未完成的计数正确", len(_res.open) == 2)
+
+# 备忘录打钩、提醒事项未完成 → **倾向完成**
+_pg2 = parser.parse("2026-10-02\n- [ ] 甲\n- [x] 乙\n- [ ] 丙")
+_res = _completion.resolve(_pg2, _CNOTE, _FakeReminders([_r2("乙", False, 3)]))
+check("倾向完成：备忘录 [x] 也算完成", len(_res.done) == 1 and _res.done[0].source == "notes")
+
+# 两处都完成 → 不重复计数
+_res = _completion.resolve(_pg2, _CNOTE, _FakeReminders([_r2("乙", True, 3)]))
+check("两处都完成不重复计数", len(_res.done) == 1)
+
+# 尚未同步到提醒事项的条目要被标出
+_res = _completion.resolve(_pg, _CNOTE, _FakeReminders([]))
+check("未同步条目被标出", len(_res.not_pushed) == 3)
+
+# 提醒事项不可用 → 退化，不崩，且如实标注
+_res = _completion.resolve(_pg2, _CNOTE, _FakeReminders(fail=True))
+check("提醒事项不可用时不崩且退化", _res.reminders_available is False and len(_res.done) == 1)
+
+# 回填留档
+_pg3 = parser.parse("2026-10-02\n- [ ] 甲\n- [ ] 乙\n- [ ] 丙")
+_n = _completion.write_back(_pg3, _completion.resolve(_pg3, _CNOTE, _FakeReminders([_r2("乙", True, 3)])))
+check("回填留档只改有差异的条目", _n == 1 and [e.completed for e in _pg3.todos] == [False, True, False])
+
+
+# ── 9. AppleScript 语法校验（osacompile，只编译不执行）
+
+print("\n── 9. AppleScript 语法校验 ──")
 
 import subprocess as _sp  # noqa: E402
 
@@ -367,9 +432,9 @@ check(f"{len(_as_templates)} 个 AppleScript 模板语法正确",
       not _as_fail, "；".join(_as_fail))
 
 
-# ── 9. 系统 Python 3.9 兼容性
+# ── 10. 系统 Python 3.9 兼容性
 
-print("\n── 9. 系统 Python 兼容性 ──")
+print("\n── 10. 系统 Python 兼容性 ──")
 
 # 为什么单独查这个：launchd 任务用的是 **/usr/bin/python3（3.9）**，
 # 而我平时用自带运行时（3.12）。若代码用了运行时求值的类型标注
@@ -381,7 +446,7 @@ import subprocess as _sp2  # noqa: E402
 
 _SYS_PY = "/usr/bin/python3"
 _modules = ["parse", "notes", "sync", "notify", "reminders", "push_tasks",
-            "cleanup", "daily_report", "read_day"]
+            "cleanup", "daily_report", "read_day", "completion"]
 
 if not os.path.exists(_SYS_PY):
     check("系统 python3 存在", False, f"找不到 {_SYS_PY}")
@@ -400,9 +465,9 @@ else:
           not _bad, "；".join(_bad))
 
 
-# ── 10. shell 脚本静态检查：bash 3.2 的全角字符陷阱
+# ── 11. shell 脚本静态检查：bash 3.2 的全角字符陷阱
 
-print("\n── 10. shell 脚本检查 ──")
+print("\n── 11. shell 脚本检查 ──")
 
 # macOS 自带 bash 3.2 会把**全角字符的字节**当成变量名的一部分。
 # 于是 `echo "「$TARGET」"` 会去找名为 `TARGET」` 的变量，报

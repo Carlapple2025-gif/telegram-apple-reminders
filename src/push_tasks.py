@@ -103,6 +103,70 @@ def build_plan(result: parser.ParseResult, existing: list[Reminder],
     return plan
 
 
+def sync_day(date_str: str, apply: bool = False, refresh: bool = False,
+             quiet: bool = False) -> int:
+    """
+    执行一次同步。返回退出码。
+
+    抽成函数而不是只留在 main 里，是为了让 daily_report 能直接调用 ——
+    否则日报会出现"待办还没同步到提醒事项，所以查不到完成状态"的盲区。
+    """
+    say = (lambda *a: None) if quiet else print
+
+    if refresh:
+        try:
+            s = sync.sync_day(date_str)
+        except NotesError as e:
+            print(f"❌ 读取备忘录失败：{e}", file=sys.stderr)
+            return 2
+        if s is None:
+            print(f"⚠️  {date_str} 没有当天页")
+            return 1
+        result, note_id = s.result, s.note_id
+    else:
+        result = sync.load_archive(date_str)
+        if result is None:
+            print(f"没有 {date_str} 的留档", file=sys.stderr)
+            return 1
+        note_id = sync.archive_meta(date_str).get("note_id", "")
+
+    try:
+        rem = Reminders()
+        rem.ensure_list()
+        existing = rem.all_reminders()
+    except RemindersError as e:
+        print(f"❌ 提醒事项访问失败：{e}", file=sys.stderr)
+        return 2
+
+    plan = build_plan(result, existing, note_id)
+
+    if plan.total_changes == 0:
+        say(f"✅ 无需改动（幂等）")
+        return 0
+
+    if not apply:
+        say(f"【干跑】新建 {len(plan.create)}，置完成 {len(plan.complete)} —— 未执行")
+        return 0
+
+    ok_c = ok_m = 0
+    for entry, k in plan.create:
+        due = "1 * days" if entry.slot else None
+        try:
+            rem.create(name=entry.text, body=k, due=due)
+            ok_c += 1
+        except RemindersError as e:
+            print(f"  ❌ 新建失败「{entry.text}」：{e}", file=sys.stderr)
+    for r, _ in plan.complete:
+        try:
+            rem.set_completed(r.id, True)
+            ok_m += 1
+        except RemindersError as e:
+            print(f"  ❌ 置完成失败「{r.name}」：{e}", file=sys.stderr)
+
+    say(f"同步完成：新建 {ok_c}/{len(plan.create)}，置完成 {ok_m}/{len(plan.complete)}")
+    return 0 if (ok_c == len(plan.create) and ok_m == len(plan.complete)) else 3
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="把当天页的待办同步到提醒事项")
     ap.add_argument("date", nargs="?", help="日期 YYYY-MM-DD，默认今天")
