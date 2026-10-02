@@ -216,6 +216,22 @@ class Notes:
         nm = self.name_of(note_id) or ""
         return Note(id=note_id, name=nm, plaintext=text)
 
+    def body_of(self, note_id: str) -> str | None:
+        """按 id 取原始 HTML（body 属性）。
+
+        需要它的场景：判断某种 HTML 结构写进去后会不会被备忘录改写 ——
+        plaintext 看不出这层信息。
+        """
+        out = run_applescript(
+            'tell application "Notes"\n'
+            f'  set hits to (every note of folder id {_as_literal(self.folder_id)} '
+            f'whose id is {_as_literal(note_id)})\n'
+            '  if (count of hits) is 0 then return "NOTFOUND"\n'
+            '  return body of item 1 of hits\n'
+            'end tell'
+        )
+        return None if out == "NOTFOUND" else out
+
     def name_of(self, note_id: str) -> str | None:
         out = run_applescript(
             'tell application "Notes"\n'
@@ -257,6 +273,7 @@ class Notes:
         """
         html = "".join(f"<div>{_html_escape(line)}</div>" for line in body_lines)
         title = body_lines[0] if body_lines else ""
+        before = self.all_ids()   # 创建前快照
 
         out = run_applescript(
             f'tell application "Notes"\n'
@@ -268,14 +285,49 @@ class Notes:
         if out != "made":
             raise NotesError(f"创建失败，返回：{out}")
 
-        # 读回验证 —— 备忘录存在"不报错但没建成"，不能只看返回值
-        note = self.get_by_name(title)
-        if note is None:
+        # 用 **id 差集**判断是否真的建成，而不是按标题 ——
+        # 备忘录的 name 是正文首行的规范化结果，可能与预期标题不等，
+        # 按标题判断会把成功的写入误报成失败（这是实测踩到的坑）。
+        new_ids = [nid for nid, _ in self.list_notes() if nid not in before]
+        if not new_ids:
+            raise NotesError("创建命令没报错，但 id 集合没有新增 —— 写入未生效。")
+        nid = new_ids[0]
+        return Note(id=nid, name=self.name_of(nid) or title,
+                    plaintext=self.plaintext_of(nid) or "")
+
+    def all_ids(self) -> set[str]:
+        """该文件夹内所有条目的 id 集合。用于「创建前后取差集」定位新条目。"""
+        return {nid for nid, _ in self.list_notes()}
+
+    def create_html(self, html: str) -> Note:
+        """
+        用**自定义 HTML** 新建条目，并用「id 差集」定位它。
+
+        为什么不复用 create()：那个方法原先用**标题**读回验证，而备忘录的
+        `name` 是正文首行的规范化结果 —— 正文里带全角空格或后缀文字时与
+        预期标题并不相等，于是把成功的写入误判成失败。
+        实测教训：**创建后定位新条目只能用 id，不能用标题。**
+        """
+        before = self.all_ids()
+        out = run_applescript(
+            'tell application "Notes"\n'
+            f'  make new note at folder id {_as_literal(self.folder_id)} '
+            f'with properties {{body:{_as_literal(html)}}}\n'
+            '  return "made"\n'
+            'end tell'
+        )
+        if out != "made":
+            raise NotesError(f"创建命令返回异常：{out}")
+
+        new_ids = [nid for nid, _ in self.list_notes() if nid not in before]
+        if not new_ids:
             raise NotesError(
-                f"创建命令没报错，但读回找不到标题为「{title}」的条目 —— "
-                f"写入未生效（备忘录的静默失败）"
+                "创建命令没报错，但 id 集合没有新增 —— 写入确实未生效。"
+                "（本判断用 id 差集，不依赖标题，结论可靠）"
             )
-        return note
+        nid = new_ids[0]
+        return Note(id=nid, name=self.name_of(nid) or "",
+                    plaintext=self.plaintext_of(nid) or "")
 
     def append_lines(self, note_id: str, lines: list[str]) -> Note:
         """

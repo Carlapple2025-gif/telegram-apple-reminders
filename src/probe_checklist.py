@@ -23,7 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from notes import Notes, NotesError, run_applescript, _as_literal  # noqa: E402
+from notes import Notes, NotesError  # noqa: E402
 
 
 def build_candidates(title: str) -> list[tuple[str, str]]:
@@ -69,42 +69,23 @@ def main() -> int:
 
     body = "".join(html for _, html in build_candidates(title))
 
-    # 用 notes.create 的核心逻辑，但正文需要自定义 HTML（不是逐行 <div> 包裹），
-    # 所以直接调底层，并复用 _as_literal 做转义 —— 这正是上一版 bash 脚本漏掉的。
+    # 用 create_html：它内部做好转义，并用 **id 差集** 定位新条目。
+    # 上一版这里用「按标题读回」验证，而正文首行含全角空格+后缀文字，
+    # 与备忘录规范化后的 name 不相等 → 把成功的写入误判成失败。
     try:
-        run_applescript(
-            'tell application "Notes"\n'
-            f'  make new note at folder id {_as_literal(notes.folder_id)} '
-            f'with properties {{body:{_as_literal(body)}}}\n'
-            '  return "made"\n'
-            'end tell'
-        )
+        note = notes.create_html(body)
     except NotesError as e:
         print(f"❌ 创建失败：{e}", file=sys.stderr)
         return 3
 
-    # 读回验证
-    note = notes.get(title)
-    if note is None:
-        print("❌ 创建命令没报错，但读回找不到 —— 写入未生效", file=sys.stderr)
-        return 3
-
-    print("✅ 已创建")
+    print(f"✅ 已创建（id 差集定位，name=「{note.name}」）")
     print()
     print("── plaintext（读回的样子）──")
     print(note.plaintext)
     print()
     print("── body（备忘录如何改写我们的 HTML）──")
 
-    body_back = run_applescript(
-        'tell application "Notes"\n'
-        f'  set hits to (every note of folder id {_as_literal(notes.folder_id)} '
-        f'whose id is {_as_literal(note.id)})\n'
-        '  if (count of hits) is 0 then return "NOTFOUND"\n'
-        '  return body of item 1 of hits\n'
-        'end tell'
-    )
-    print(body_back)
+    print(notes.body_of(note.id) or "(读不到 body)")
 
     print()
     print("═" * 56)
