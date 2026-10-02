@@ -67,6 +67,7 @@ CODE_TO_SLOT = {c: s for s, c in SLOT_CODES}
 class Answer:
     line_no: int
     text: str
+    date: str = ""               # 属于哪一天（支持跨天补齐）
     slot: str | None = None      # None = 还没定
     decided: bool = False        # 是否被显式选择过（含"不指定"）
     as_note: bool = False        # 你判定"这条不是待办" → 改成备忘
@@ -210,6 +211,12 @@ def frame_keyboard(sess: Session) -> list[list[tuple[str, str]]]:
     nav: list[tuple[str, str]] = []
     if i > 0:
         nav.append(("◀ 上一条", "p"))
+    # 只有"还有下一条"时才显示翻页按钮。
+    #
+    # 原先在最后一条会显示"✅ 完成"，但在**只有一条**的场景下
+    # 前面还会有个孤零零的"下一条 ▶" —— 点了没反应（因为本来就没有下一条），
+    # 用户会以为按钮坏了。而且用户在最后一条若因重绘延迟点到旧帧的"下一条"，
+    # 也会出现"点了没反应"的错觉。
     if i < len(sess.answers) - 1:
         nav.append(("下一条 ▶", "n"))
     else:
@@ -339,87 +346,110 @@ def run_session(items: list[Answer], timeout_sec: int = 600,
     return sess
 
 
-def apply_answers(date_str: str, sess: Session) -> tuple[int, Path | None]:
+def apply_answers(date_str: str, sess: Session) -> tuple[int, list[Path]]:
     """
-    把选择写回留档 JSON 的条目 slot 字段。
+    把选择写回留档 JSON 的 slot/kind 字段。
 
-    注意：**不回写备忘录原文**。理由：备忘录里那一行是你写的，
-    机器改它会让"原文逐字保留"的保证失效；而 slot 属于解析结果，
+    支持跨天：按 Answer.date 分组写入（--all 模式下会一次问多天的条目）。
+
+    注意：**不回写备忘录原文**。备忘录里那一行是你写的，机器改它会让
+    "原文逐字保留"的保证失效；而 slot/kind 属于解析结果，
     落在留档里就够了，后续日报/顺延都读留档。
     """
-    p = sync.DAYS_DIR / f"{date_str}.json"
-    if not p.is_file():
-        return 0, None
-    data = json.loads(p.read_text(encoding="utf-8"))
-    by_line = {a.line_no: a for a in sess.answers if a.decided}
-
-    changed = 0
-    for e in data.get("entries", []):
-        a = by_line.get(e.get("line_no"))
-        if a is None:
+    by_date: dict[str, dict[int, Answer]] = {}
+    for a in sess.answers:
+        if not a.decided:
             continue
+        d = a.date or date_str
+        by_date.setdefault(d, {})[a.line_no] = a
 
-        if a.as_note:
-            # 你判定"这不是待办" → 改成备忘。
-            # 只改留档里的解析结果，**不动备忘录原文**（原文逐字保留是核对的基础）。
-            if e.get("kind") != "note":
-                e["kind"] = "note"
-                e["completed"] = None
-                e["slot"] = None
-                e["issues"] = ["由用户标记：这条不是待办"]
+    changed_total = 0
+    touched: list[Path] = []
+
+    for d, line_map in by_date.items():
+        p = sync.DAYS_DIR / f"{d}.json"
+        if not p.is_file():
+            continue
+        data = json.loads(p.read_text(encoding="utf-8"))
+        changed = 0
+        for e in data.get("entries", []):
+            a = line_map.get(e.get("line_no"))
+            if a is None:
+                continue
+
+            if a.as_note:
+                if e.get("kind") != "note":
+                    e["kind"] = "note"
+                    e["completed"] = None
+                    e["slot"] = None
+                    e["issues"] = ["由用户标记：这条不是待办"]
+                    changed += 1
+                continue
+
+            if e.get("slot") != a.slot:
+                e["slot"] = a.slot
                 changed += 1
-            continue
-
-        new_slot = a.slot
-        if e.get("slot") != new_slot:
-            e["slot"] = new_slot
-            changed += 1
-            issues = e.get("issues") or []
-            # 显式选了"不指定"也算已决定，把提示去掉；
-            # 只有真的没选（decided=False）才保留提示。
             if a.decided:
+                issues = e.get("issues") or []
                 e["issues"] = [x for x in issues if "时段未指定" not in x]
 
-    if changed:
-        p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    return changed, p
+        if changed:
+            p.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                         encoding="utf-8")
+            changed_total += changed
+            touched.append(p)
+
+    return changed_total, touched
+
+
+def collect_pending(dates: list[str]) -> list[Answer]:
+    """从若干天的留档里收集「未完成且时段未指定」的条目。"""
+    out: list[Answer] = []
+    for d in dates:
+        result = sync.load_archive(d)
+        if result is None:
+            continue
+        for e in result.todos:
+            if e.completed is not True and e.slot is None:
+                out.append(Answer(line_no=e.line_no, text=e.text, date=d))
+    return out
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="用按钮询问时段")
     ap.add_argument("--date", help="日期 YYYY-MM-DD，默认今天")
-    ap.add_argument("--dry", action="store_true", help="只打印将要问什么，不发送")
-    ap.add_argument("--timeout", type=int, default=600, help="等待总时长（秒）")
+    ap.add_argument("--all", action="store_true",
+                    help="补齐所有历史留档里待指定时段的条目（跨天一起问）")
+    ap.add_argument("--dry", action="store_true", help="只本地预览界面，不发送")
+    ap.add_argument("--timeout", type=int, default=900, help="等待总时长（秒）")
     ap.add_argument("--verbose", action="store_true",
                     help="打印每次按钮回调（排查「点了没反应」用）")
     args = ap.parse_args()
 
-    date_str = args.date or dt.date.today().isoformat()
-    try:
-        dt.date.fromisoformat(date_str)
-    except ValueError:
-        print(f"❌ 日期格式不对：{date_str}", file=sys.stderr)
-        return 1
+    if args.all:
+        dates = sorted(p.stem for p in sync.DAYS_DIR.glob("*.json"))
+        items = collect_pending(dates)
+        scope = f"全部留档（{len(dates)} 天）"
+    else:
+        date_str = args.date or dt.date.today().isoformat()
+        try:
+            dt.date.fromisoformat(date_str)
+        except ValueError:
+            print(f"❌ 日期格式不对：{date_str}", file=sys.stderr)
+            return 1
+        items = collect_pending([date_str])
+        scope = date_str
 
-    result = sync.load_archive(date_str)
-    if result is None:
-        print(f"没有 {date_str} 的留档", file=sys.stderr)
-        return 1
-
-    pending = [e for e in result.todos if e.slot is None]
-    if not pending:
-        print(f"✅ {date_str} 没有「时段未指定」的条目，无需询问")
+    if not items:
+        print(f"✅ {scope}：没有「时段未指定」的条目，无需询问")
         return 0
 
-    items = [Answer(line_no=e.line_no, text=e.text) for e in pending]
-
-    print(f"待询问 {len(items)} 条：")
+    print(f"待询问 {len(items)} 条（{scope}）：")
     for i, a in enumerate(items, 1):
-        print(f"  {i}. {a.text}")
+        prefix = f"[{a.date}] " if args.all else ""
+        print(f"  {i}. {prefix}{a.text}")
 
     if args.dry:
-        # 本地预览界面：把每一屏都画出来，不发 Telegram。
-        # 这样"界面长什么样"可以直接在这里看，不必先发出去再撤回。
         print()
         sess = Session(answers=items)
         for i in range(len(items)):
@@ -439,9 +469,6 @@ def main() -> int:
     sess = run_session(items, timeout_sec=args.timeout, verbose=args.verbose)
 
     print()
-    if sess.skipped_all:
-        print("你选择了「全部跳过」——不写入任何时段。")
-        return 0
     if sess.timed_out:
         print(f"⏱️ 超时（未完成全部）。已确定 {sess.decided_count}/{len(items)} 条，"
               f"这部分仍会写入。")
@@ -454,16 +481,21 @@ def main() -> int:
             mark = a.slot or "不指定"
         else:
             mark = "（未定，保持原样）"
-        print(f"  · {a.text}  →  {mark}")
+        prefix = f"[{a.date}] " if args.all else ""
+        print(f"  · {prefix}{a.text}  →  {mark}")
     if sess.undecided:
         print(f"  ⚠️ 有 {len(sess.undecided)} 条未选择，保持原样（时段仍未指定）")
 
-    changed, p = apply_answers(date_str, sess)
+    changed, touched = apply_answers("", sess)
+    print()
     if changed:
-        print()
-        print(f"✅ 已写入留档 {changed} 条：{p.relative_to(ROOT)}")
+        print(f"✅ 已写入留档 {changed} 条：")
+        for p in touched:
+            try:
+                print(f"   {p.relative_to(ROOT)}")
+            except ValueError:
+                print(f"   {p}")
     else:
-        print()
         print("（没有变化，未写文件）")
     return 0
 
