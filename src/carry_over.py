@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from notes import Notes, NotesError  # noqa: E402
 import parse as parser  # noqa: E402
+import sync  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 DAYS_DIR = ROOT / "data" / "days"
@@ -122,27 +123,6 @@ def build_plan(prev: parser.ParseResult, next_text: str | None) -> tuple[list[st
     return plan, skipped
 
 
-def load_archive(date_str: str) -> parser.ParseResult | None:
-    """优先读留档 JSON（比重新解析备忘录快，且不受备忘录变动影响）。"""
-    p = DAYS_DIR / f"{date_str}.json"
-    if not p.is_file():
-        return None
-    data = json.loads(p.read_text(encoding="utf-8"))
-    entries = [
-        parser.Entry(
-            line_no=e["line_no"],
-            raw=e["raw"],
-            kind=e["kind"],
-            text=e["text"],
-            completed=e.get("completed"),
-            slot=e.get("slot"),
-            issues=list(e.get("issues") or []),
-        )
-        for e in data["entries"]
-    ]
-    return parser.ParseResult(date=data.get("date"), entries=entries)
-
-
 def main() -> int:
     ap = argparse.ArgumentParser(description="把未完成事项顺延到次日页")
     ap.add_argument("date", nargs="?", help="来源日期 YYYY-MM-DD，默认今天")
@@ -167,7 +147,7 @@ def main() -> int:
     print("═" * 56)
 
     # ── 取来源
-    prev = load_archive(src_date_str)
+    prev = sync.load_archive(src_date_str)
     source_desc = "留档 JSON"
     if prev is None:
         print(f"（没有 {src_date_str} 的留档，改为直接读备忘录）")

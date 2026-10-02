@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  每天 07:00 顺延：把昨天未完成的事项追加到今天的页面。
+
+  为什么放在早上而不是凌晨：
+    你早上打开备忘录时，昨天没做完的事已经在今天的页面里了 ——
+    这正是「一天一页 + 未完顺延」想要的效果。凌晨跑你也不会看到。
+
+  这是**唯一会写入备忘录**的任务，所以：
+    · 幂等（重复跑不会写重复内容）
+    · 写入后逐条读回验证
+    · 只在当天页不存在时才新建，已存在则追加，绝不覆盖
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.carl.pdca.carryover</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>__PYTHON__</string>
+		<string>__PROJECT__/src/carry_over.py</string>
+		<string>--apply</string>
+	</array>
+
+	<key>WorkingDirectory</key>
+	<string>__PROJECT__</string>
+
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>7</integer>
+		<key>Minute</key>
+		<integer>0</integer>
+	</dict>
+
+	<key>StandardOutPath</key>
+	<string>__PROJECT__/logs/carryover.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>__PROJECT__/logs/carryover.err.log</string>
+
+	<key>ProcessType</key>
+	<string>Background</string>
+</dict>
+</plist>

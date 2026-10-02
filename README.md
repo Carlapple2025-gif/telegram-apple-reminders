@@ -70,6 +70,14 @@ python3 src/carry_over.py 2026-10-02            # 干跑：只看计划写什么
 python3 src/carry_over.py 2026-10-02 --offline  # 不查备忘录，纯离线验证计划
 python3 src/carry_over.py 2026-10-02 --apply    # 真正写入
 
+# 4. 日报：汇总当天并推送（默认读留档，--refresh 先从备忘录重读）
+python3 src/daily_report.py --refresh        # 生成并推送
+python3 src/daily_report.py --no-push        # 只看内容，不推送
+
+# 5. 装成定时任务（21:30 日报 + 07:00 顺延）
+bash deploy/install_launchd.sh install
+bash deploy/install_launchd.sh test          # 立即触发一次，验证 launchd 下能否跑通
+
 # 查看备忘录访问状态
 python3 src/notes.py verify
 python3 src/notes.py list
@@ -119,7 +127,11 @@ TCC 授权绑定调用进程身份。`osascript` 用的是**终端**的授权，
 于是同一条被顺延了第二遍，幂等性失效。所以去重键要先剥掉 `⟳` 再归一化。
 这个 bug 是在离线测试里发现的 —— 它证明了「能离线验证的逻辑就该离线验证」。
 
-### 8. 留档独立于备忘录
+### 8. 写与读分成两个任务
+`21:30 report` 只读 + 推送；`07:00 carryover` 是**唯一**会写备忘录的任务。
+分开的好处：写入路径只有一个入口，出问题时排查面小得多。
+
+### 9. 留档独立于备忘录
 备忘录是书写界面，不是数据库。它可能因授权失效、iCloud 不同步、误删而读不到。
 每天一份独立副本，出问题时你能看见丢了什么。
 
@@ -133,9 +145,16 @@ pdca/
 ├── src/
 │   ├── notes.py         备忘录访问（限定文件夹、id 定位、读回验证）
 │   ├── parse.py         解析器（纯函数，可离线测试）
-│   └── read_day.py      读取 → 解析 → 留档
+│   ├── sync.py          读取 → 解析 → 留档（三处共用的同步步骤）
+│   ├── notify.py        Bark 推送（复用 ltc-spider 的 key，不复制密钥）
+│   ├── read_day.py      手动读取某天
+│   ├── carry_over.py    顺延（默认干跑，--apply 才写入）
+│   ├── daily_report.py  日报 + 推送
+│   └── selftest.py      39 项离线自检（含静态契约检查）
 ├── deploy/
 │   ├── init.sh          初始化：定位文件夹、记下 id
+│   ├── install_launchd.sh   定时任务安装（install/status/test/reload）
+│   ├── com.carl.pdca.*.plist
 │   └── probe-*.sh       能力探测脚本（历史存档，见 docs）
 ├── docs/
 │   ├── CONCEPT.md       概念澄清：这件事到底要做什么
@@ -153,7 +172,7 @@ pdca/
 | 优先级 | 功能 | 说明 |
 |---|---|---|
 | ~~P0~~ | ~~顺延~~ | ✅ 已实现：`src/carry_over.py`（默认干跑，`--apply` 才写入，幂等） |
-| P0 | 日报 | 22:30 汇总当天，推送 Bark 提醒补打钩 |
+| ~~P0~~ | ~~日报~~ | ✅ 已实现：`src/daily_report.py`，21:30 推送（`deploy/com.carl.pdca.report.plist`） |
 | P1 | 时段询问 | 渐进式披露：同时段 ≥2 条或裸行无时段时问一次 |
 | P2 | 周报 | 完成率、连续天数 |
 | P3 | 智能体诊断 | 任务失败时交给 headless 智能体先定位 |

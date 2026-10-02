@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""
+sync_day：把某天的当天页从备忘录同步到留档。
+
+抽成独立模块的原因：`read_day`（手动读）、`daily_report`（日报前刷新）、
+`carry_over`（顺延前确认状态）三处都需要同一步骤。重复实现三遍必然会漂移，
+而"三处对同一天的理解不一致"是这类系统最难查的 bug。
+
+留档写两个文件：
+  data/days/<日期>.md     人可读、可手工修正
+  data/days/<日期>.json   机器读（日报、顺延都读它）
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import json
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from notes import Notes, NotesError  # noqa: E402
+import parse as parser  # noqa: E402
+
+ROOT = Path(__file__).resolve().parent.parent
+DAYS_DIR = ROOT / "data" / "days"
+
+
+@dataclass
+class SyncResult:
+    date: str
+    note_name: str
+    note_id: str
+    folder_name: str
+    result: parser.ParseResult
+    md_path: Path
+    json_path: Path
+
+
+def sync_day(date_str: str, notes: Notes | None = None) -> SyncResult | None:
+    """
+    读取指定日期的当天页并写留档。返回 None 表示该日期没有当天页。
+
+    抛 NotesError 表示访问失败（权限、文件夹失效等）。
+    """
+    notes = notes or Notes()
+    folder_name, _ = notes.verify_folder()
+
+    note = notes.find_daily_page(date_str)
+    if note is None:
+        return None
+
+    result = parser.parse(note.plaintext)
+    if result.date is None:
+        result.date = date_str
+
+    DAYS_DIR.mkdir(parents=True, exist_ok=True)
+    md_path = DAYS_DIR / f"{date_str}.md"
+    json_path = DAYS_DIR / f"{date_str}.json"
+
+    meta = {
+        "date": date_str,
+        "source": f"备忘录 [{folder_name}] / {note.name}",
+        "note_id": note.id,
+        "read_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+    md_path.write_text(parser.render_archive(result, meta), encoding="utf-8")
+
+    payload = result.to_dict()
+    payload["_meta"] = meta
+    json_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    return SyncResult(
+        date=date_str,
+        note_name=note.name,
+        note_id=note.id,
+        folder_name=folder_name,
+        result=result,
+        md_path=md_path,
+        json_path=json_path,
+    )
+
+
+def load_archive(date_str: str) -> parser.ParseResult | None:
+    """
+    从留档 JSON 读取（不访问备忘录）。
+
+    与 sync_day 的分工：需要**当前真实状态**时用 sync_day；
+    只是想看"上次读到的快照"时用 load_archive（更快，且不受备忘录变动影响）。
+    """
+    p = DAYS_DIR / f"{date_str}.json"
+    if not p.is_file():
+        return None
+    data = json.loads(p.read_text(encoding="utf-8"))
+    entries = [
+        parser.Entry(
+            line_no=e["line_no"],
+            raw=e["raw"],
+            kind=e["kind"],
+            text=e["text"],
+            completed=e.get("completed"),
+            slot=e.get("slot"),
+            issues=list(e.get("issues") or []),
+        )
+        for e in data["entries"]
+    ]
+    return parser.ParseResult(date=data.get("date"), entries=entries)
+
+
+def archive_meta(date_str: str) -> dict:
+    p = DAYS_DIR / f"{date_str}.json"
+    if not p.is_file():
+        return {}
+    return json.loads(p.read_text(encoding="utf-8")).get("_meta", {})

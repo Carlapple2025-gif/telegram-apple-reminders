@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  每天 21:30 日报：汇总当天进度并推送，提醒你补打钩。
+
+  这条推送是整条链路的**数据质量保障**：顺延依赖准确的完成状态，
+  而完成状态只能由你手动打钩产生（程序不推断）。
+
+  注意：21:30 只做「汇总 + 推送」，**不写入你的备忘录**。
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.carl.pdca.report</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>__PYTHON__</string>
+		<string>__PROJECT__/src/daily_report.py</string>
+		<string>--refresh</string>
+	</array>
+
+	<key>WorkingDirectory</key>
+	<string>__PROJECT__</string>
+
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>21</integer>
+		<key>Minute</key>
+		<integer>30</integer>
+	</dict>
+
+	<key>StandardOutPath</key>
+	<string>__PROJECT__/logs/report.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>__PROJECT__/logs/report.err.log</string>
+
+	<key>ProcessType</key>
+	<string>Background</string>
+</dict>
+</plist>
