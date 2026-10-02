@@ -17,6 +17,7 @@ selftest.py —— 不需要备忘录访问权限的自检。
 from __future__ import annotations
 
 import ast
+import os
 import sys
 from pathlib import Path
 
@@ -259,9 +260,47 @@ for _n in ["2026-10-02", "2026-10-01", "国际象棋", "2026-10-02 备注",
     check(f"应留：{_n[:24]}", _cleanup.classify(_n, _today) is None)
 
 
-# ── 7. shell 脚本静态检查：bash 3.2 的全角字符陷阱
+# ── 7. AppleScript 语法校验（osacompile，只编译不执行）
 
-print("\n── 7. shell 脚本检查 ──")
+print("\n── 7. AppleScript 语法校验 ──")
+
+import subprocess as _sp  # noqa: E402
+
+# 为什么要这一步：AppleScript 的语法错（引号未转义、条件表达式拼错）
+# 只有真正交给 osascript 才会暴露，而我本地没有备忘录/提醒事项权限，
+# 一跑就是 -10004 —— 于是语法错会伪装成权限错，被忽略。
+# `osacompile` 只编译不执行，**不触发授权**，所以能在这里把语法验掉。
+_as_templates = [
+    ('提醒事项：列出所有列表',
+     'tell application "Reminders" to get name of every list'),
+    ('提醒事项：新建列表',
+     'tell application "Reminders"\n make new list with properties {name:"X"}\n return "ok"\nend tell'),
+    ('提醒事项：新建条目（含到期）',
+     'tell application "Reminders"\n set L to list "X"\n make new reminder at L with properties {name:"Y", body:"Z", due date:(current date) + 1 * hours}\n return "ok"\nend tell'),
+    ('提醒事项：设置完成状态',
+     'tell application "Reminders"\n set hits to (every reminder whose id is "Z")\n set completed of item 1 of hits to true\n return "ok"\nend tell'),
+    ('提醒事项：按完成状态过滤',
+     'tell application "Reminders"\n set L to list "X"\n return (count of (every reminder of L whose completed is false)) as string\nend tell'),
+    ('备忘录：按 id 取纯文本',
+     'tell application "Notes"\n set hits to (every note of folder id "F" whose id is "N")\n return plaintext of item 1 of hits\nend tell'),
+    ('备忘录：新建条目',
+     'tell application "Notes"\n make new note at folder id "F" with properties {body:"B"}\n return "made"\nend tell'),
+]
+
+_as_fail = []
+for _label, _src in _as_templates:
+    _r = _sp.run(["osacompile", "-o", os.devnull, "-e", _src],
+                 capture_output=True, text=True)
+    if _r.returncode != 0:
+        _as_fail.append(f"{_label}：{_r.stderr.strip()[:80]}")
+
+check(f"{len(_as_templates)} 个 AppleScript 模板语法正确",
+      not _as_fail, "；".join(_as_fail))
+
+
+# ── 8. shell 脚本静态检查：bash 3.2 的全角字符陷阱
+
+print("\n── 8. shell 脚本检查 ──")
 
 # macOS 自带 bash 3.2 会把**全角字符的字节**当成变量名的一部分。
 # 于是 `echo "「$TARGET」"` 会去找名为 `TARGET」` 的变量，报
