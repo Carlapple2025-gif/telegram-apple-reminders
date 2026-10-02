@@ -1,6 +1,13 @@
 # 忽略运行产物与本地配置
 data/
 config.json
+
+# 密钥。**必须有这一行** —— Telegram token 一旦被提交，等于把 bot 交给别人。
+# 这个文件是后补的：写 telegram.py 时才发现 .env 没被忽略，
+# 而下一步就要往里面放 token 了。
+.env
+.env.*
+!.env.example
 *.log
 __pycache__/
 *.pyc

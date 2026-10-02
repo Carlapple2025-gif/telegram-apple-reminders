@@ -446,7 +446,7 @@ import subprocess as _sp2  # noqa: E402
 
 _SYS_PY = "/usr/bin/python3"
 _modules = ["parse", "notes", "sync", "notify", "reminders", "push_tasks",
-            "cleanup", "daily_report", "read_day", "completion"]
+            "cleanup", "daily_report", "read_day", "completion", "telegram"]
 
 if not os.path.exists(_SYS_PY):
     check("系统 python3 存在", False, f"找不到 {_SYS_PY}")
@@ -465,9 +465,27 @@ else:
           not _bad, "；".join(_bad))
 
 
-# ── 11. shell 脚本静态检查：bash 3.2 的全角字符陷阱
+# ── 11. 密钥不进版本库
 
-print("\n── 11. shell 脚本检查 ──")
+print("\n── 11. 密钥保护检查 ──")
+
+# 为什么值得单独查：Telegram token 一旦被提交，等于把 bot 交给别人。
+# 加 telegram.py 时就发现 .gitignore 里**没有 .env** —— 而下一步就要往
+# 里面放 token 了。所以这里固化成检查。
+_r = _sp2.run(["git", "check-ignore", ".env"], cwd=str(ROOT),
+              capture_output=True, text=True)
+check(".env 被 gitignore 排除",
+      _r.returncode == 0, "危险：.env 未被忽略，密钥可能被提交")
+
+# 反向确认：.env.example 应当**能**被提交（它是模板，供他人参考）
+_r = _sp2.run(["git", "check-ignore", ".env.example"], cwd=str(ROOT),
+              capture_output=True, text=True)
+check(".env.example 可被提交（它是模板）", _r.returncode != 0)
+
+
+# ── 12. shell 脚本静态检查：bash 3.2 的全角字符陷阱
+
+print("\n── 12. shell 脚本检查 ──")
 
 # macOS 自带 bash 3.2 会把**全角字符的字节**当成变量名的一部分。
 # 于是 `echo "「$TARGET」"` 会去找名为 `TARGET」` 的变量，报
