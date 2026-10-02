@@ -291,6 +291,7 @@ def _load(path):
     return _m
 
 _rems = _load(SRC / "reminders.py")
+_tg = _load(SRC / "telegram.py")
 _push = _load(SRC / "push_tasks.py")
 
 _NOTE = "x-coredata://TEST/ICNote/p1"
@@ -444,9 +445,77 @@ for _e in _fresh2.entries:
 check("备忘录里的 @时段 优先于留档里旧的", _fresh2.entries[1].slot == "下午")
 
 
-# ── 11. AppleScript 语法校验（osacompile，只编译不执行）
+# ── 11. 按钮选择器的状态机
 
-print("\n── 9. AppleScript 语法校验 ──")
+print("\n── 11. 按钮选择器状态机 ──")
+_ask = _load(SRC / "ask_slots.py")
+
+
+def _sess(*texts):
+    return _ask.Session(answers=[
+        _ask.Answer(line_no=i, text=t) for i, t in enumerate(texts, start=2)])
+
+
+# 回调编码必须在 64 字节限制内（实测硬限制）
+_bad_cb = []
+_s2 = _sess("甲", "乙", "丙")
+for _i2 in range(len(_s2.answers)):
+    _s2.index = _i2
+    for _row in _ask.frame_keyboard(_s2):
+        for _lbl, _data in _row:
+            if len(_data.encode("utf-8")) > _tg.CALLBACK_MAX_BYTES:
+                _bad_cb.append(_data)
+check("按钮回调数据均在 64 字节内", not _bad_cb, str(_bad_cb[:3]))
+
+# 正文必须回显"已定"情况 —— 用户反馈"点完成只记录一条"，
+# 根因是看不到进度；正文回显是最直接的证据。
+_s3 = _sess("甲", "乙")
+_s3.answers[0].slot = "中午"
+_s3.answers[0].decided = True
+_txt = _ask.frame_text(_s3)
+check("正文回显已定条数", "已定 1/2" in _txt)
+check("正文列出已做的选择", "甲→中午" in _txt)
+
+# 最后一条的"下一条"应变成"完成"
+_s4 = _sess("甲", "乙")
+_s4.index = 1
+_labels = [l for row in _ask.frame_keyboard(_s4) for l, _ in row]
+check("最后一条显示「完成」而非「下一条」", any("完成" in l for l in _labels))
+
+# 确认屏必须警告未选项 —— 这是防"静默丢答案"的关键
+_s5 = _sess("甲", "乙")
+_s5.answers[0].slot = "上午"
+_s5.answers[0].decided = True
+_s5.confirming = True
+_ctxt = _ask.confirm_text(_s5)
+check("确认屏列出全部选择", "甲" in _ctxt and "乙" in _ctxt)
+check("确认屏警告未选项", "还有 1 条没选" in _ctxt)
+_kb5 = [l for row in _ask.confirm_keyboard(_s5) for l, _ in row]
+check("确认屏提供回跳入口", any("回去补" in l for l in _kb5))
+
+# 全部已选时不警告
+_s6 = _sess("甲")
+_s6.answers[0].slot = "上午"
+_s6.answers[0].decided = True
+_s6.confirming = True
+check("全部已选时不显示警告", "没选" not in _ask.confirm_text(_s6))
+
+# ["全部跳过"] 已按用户要求换成"这不是待办"
+_s7 = _sess("甲")
+_labels7 = [l for row in _ask.frame_keyboard(_s7) for l, _ in row]
+check("已移除「全部跳过」按钮", not any("全部跳过" in l for l in _labels7))
+check("提供「这不是待办」按钮", any("不是待办" in l for l in _labels7))
+
+# 备忘标记：选了之后不应再被当作待办参与时段询问
+_s8 = _sess("甲")
+_s8.answers[0].as_note = True
+_s8.answers[0].decided = True
+check("标记备忘后仍算已决定", _s8.decided_count == 1)
+
+
+# ── 12. AppleScript 语法校验（osacompile，只编译不执行）
+
+print("\n── 12. AppleScript 语法校验 ──")
 
 import subprocess as _sp  # noqa: E402
 
@@ -482,9 +551,9 @@ check(f"{len(_as_templates)} 个 AppleScript 模板语法正确",
       not _as_fail, "；".join(_as_fail))
 
 
-# ── 12. 系统 Python 3.9 兼容性
+# ── 13. 系统 Python 3.9 兼容性
 
-print("\n── 12. 系统 Python 兼容性 ──")
+print("\n── 13. 系统 Python 兼容性 ──")
 
 # 为什么单独查这个：launchd 任务用的是 **/usr/bin/python3（3.9）**，
 # 而我平时用自带运行时（3.12）。若代码用了运行时求值的类型标注
@@ -518,7 +587,7 @@ else:
 
 # ── 11. 密钥不进版本库
 
-print("\n── 13. 密钥保护检查 ──")
+print("\n── 14. 密钥保护检查 ──")
 
 # 为什么值得单独查：Telegram token 一旦被提交，等于把 bot 交给别人。
 # 加 telegram.py 时就发现 .gitignore 里**没有 .env** —— 而下一步就要往
@@ -534,9 +603,9 @@ _r = _sp2.run(["git", "check-ignore", ".env.example"], cwd=str(ROOT),
 check(".env.example 可被提交（它是模板）", _r.returncode != 0)
 
 
-# ── 14. shell 脚本静态检查：bash 3.2 的全角字符陷阱
+# ── 15. shell 脚本静态检查：bash 3.2 的全角字符陷阱
 
-print("\n── 14. shell 脚本检查 ──")
+print("\n── 15. shell 脚本检查 ──")
 
 # macOS 自带 bash 3.2 会把**全角字符的字节**当成变量名的一部分。
 # 于是 `echo "「$TARGET」"` 会去找名为 `TARGET」` 的变量，报

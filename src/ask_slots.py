@@ -69,6 +69,7 @@ class Answer:
     text: str
     slot: str | None = None      # None = 还没定
     decided: bool = False        # 是否被显式选择过（含"不指定"）
+    as_note: bool = False        # 你判定"这条不是待办" → 改成备忘
 
 
 @dataclass
@@ -78,6 +79,12 @@ class Session:
     message_id: int | None = None
     timed_out: bool = False
     skipped_all: bool = False
+    verbose: bool = False
+    confirming: bool = False     # 是否停在"提交确认"屏
+
+    @property
+    def undecided(self) -> list[Answer]:
+        return [a for a in self.answers if not a.decided]
 
     @property
     def current(self) -> Answer:
@@ -88,19 +95,96 @@ class Session:
         return sum(1 for a in self.answers if a.decided)
 
 
+def _ack_text(data: str, sess: Session) -> str:
+    """按钮点击后客户端顶部的小提示文字。"""
+    if data == "n":
+        return "下一条"
+    if data == "p":
+        return "上一条"
+    if data == "d":
+        return "完成"
+    if data == "m":
+        return "已标记为备忘"
+    if data.startswith("s:"):
+        parts = data.split(":")
+        if len(parts) == 3:
+            return f"已选：{CODE_TO_SLOT.get(parts[2], parts[2])}"
+    return "已收到"
+
+
+def confirm_text(sess: Session) -> str:
+    """提交前的确认屏。"""
+    lines = ["📋 请确认这次的选择：", ""]
+    for i, a in enumerate(sess.answers, 1):
+        if a.as_note:
+            mark = "→ 备忘"
+        elif a.decided:
+            mark = f"→ {a.slot or '不指定'}"
+        else:
+            mark = "→ ⚠️ 未选择"
+        lines.append(f"{i}. {a.text}  {mark}")
+
+    if sess.undecided:
+        lines.append("")
+        lines.append(f"⚠️ 还有 {len(sess.undecided)} 条没选。")
+        lines.append("点「⬅️ 回去补」继续，或点「就这样提交」按现状写入。")
+    else:
+        lines.append("")
+        lines.append("全部已选，点「✅ 提交」写入。")
+    return "\n".join(lines)
+
+
+def confirm_keyboard(sess: Session) -> list[list[tuple[str, str]]]:
+    rows: list[list[tuple[str, str]]] = []
+    if sess.undecided:
+        # 只回跳到第一条未选的，避免在确认屏和编辑屏之间来回绕
+        first_undecided = sess.answers.index(sess.undecided[0])
+        rows.append([("⬅️ 回去补", f"g:{first_undecided}")])
+        rows.append([("就这样提交", "d")])
+    else:
+        rows.append([("✅ 提交", "d")])
+        rows.append([("⬅️ 继续修改", "p")])
+    return rows
+
+
 def frame_text(sess: Session) -> str:
-    """渲染当前这一屏的文字。"""
+    """
+    渲染当前这一屏的文字。
+
+    刻意把「当前选择」写进正文（而不是只靠按钮上的 ●）：
+    按钮上的标记在客户端上不够醒目，容易让人怀疑"我到底点上没有"。
+    正文里有一行明确回显，点完立刻能看到结果。
+    """
     a = sess.current
     total = len(sess.answers)
     done = sess.decided_count
-    slot_line = f"当前选择：{a.slot}" if a.decided else "尚未选择"
+
+    if a.as_note:
+        chosen = "已改为「备忘」"
+    elif a.decided:
+        chosen = f"当前选择：{a.slot}"
+    else:
+        chosen = "尚未选择"
+
+    # 已定的条目列表（一行一条，让你一眼看到进度）
+    settled = [x for x in sess.answers if x.decided]
+    if settled:
+        brief = "、".join(
+            f"{x.text[:8]}→{'备忘' if x.as_note else (x.slot or '不指定')}"
+            for x in settled
+        )
+        settled_line = f"\n已定：{brief}\n"
+    else:
+        settled_line = ""
+
     return (
         f"第 {sess.index + 1}/{total} 条 · 时段待指定\n"
         f"（已定 {done}/{total}）\n"
+        f"{settled_line}"
         f"\n"
         f"{a.text}\n"
         f"\n"
-        f"{slot_line}"
+        f"{chosen}"
     )
 
 
@@ -132,30 +216,44 @@ def frame_keyboard(sess: Session) -> list[list[tuple[str, str]]]:
         nav.append(("✅ 完成", "d"))
 
     slots.append(nav)
-    slots.append([("⏭ 全部跳过", "x")])
+    # 用户反馈："全部跳过"使用率应该不高；更需要的是"这条其实不是待办"。
+    # 后者能把误记成待办的条目纠正为备忘 —— 这是唯一需要人工判断的事，
+    # 正好交回给用户（agent 不猜）。
+    note_label = "● 这不是待办" if a.as_note else "这不是待办 → 改备忘"
+    slots.append([(note_label, "m")])
     return slots
 
 
 def render(sess: Session) -> None:
     """把当前屏画到 Telegram（首次发送，之后原地重绘）。"""
-    if sess.message_id is None:
-        r = tg.send_with_buttons(frame_text(sess), frame_keyboard(sess))
-        sess.message_id = r.get("message_id")
+    if sess.confirming:
+        text, kb = confirm_text(sess), confirm_keyboard(sess)
     else:
+        text, kb = frame_text(sess), frame_keyboard(sess)
+
+    if sess.message_id is None:
+        r = tg.send_with_buttons(text, kb)
+        sess.message_id = r.get("message_id")
+        return
+
+    # 重试一次：网络抖动导致的瞬时失败很常见，一次退避就能救回来。
+    # 仍然失败才退化为发新消息（至少界面是对的）。
+    for attempt in (1, 2):
         try:
-            tg.edit_with_buttons(sess.message_id, frame_text(sess),
-                                 frame_keyboard(sess))
-        except tg.TelegramError:
-            # 重绘失败（少数情况下 Telegram 会拒绝无变化的编辑）时，
-            # 退化为发新消息，至少界面是对的。
-            r = tg.send_with_buttons(frame_text(sess), frame_keyboard(sess))
-            sess.message_id = r.get("message_id")
+            tg.edit_with_buttons(sess.message_id, text, kb)
+            return
+        except tg.TelegramError as e:
+            if sess.verbose:
+                print(f"    [重绘失败 {attempt}] {str(e)[:80]}", flush=True)
+            time.sleep(0.6)
+    r = tg.send_with_buttons(text, kb)
+    sess.message_id = r.get("message_id")
 
 
 def run_session(items: list[Answer], timeout_sec: int = 600,
-                poll_interval: int = 2) -> Session:
+                poll_interval: int = 2, verbose: bool = False) -> Session:
     """跑一轮问答。返回最终 Session（含每题的选择）。"""
-    sess = Session(answers=items)
+    sess = Session(answers=items, verbose=verbose)
     render(sess)
 
     deadline = time.time() + timeout_sec
@@ -166,11 +264,23 @@ def run_session(items: list[Answer], timeout_sec: int = 600,
             continue
 
         data = cb["data"]
-        tg.answer_callback(cb["callback_id"])
+        # 即时反馈：客户端顶部会弹一小行。这是"点没点上"最直接的证据 ——
+        # 没有它，用户只能盯着按钮变化猜，网络慢时就显得像没反应。
+        tg.answer_callback(cb["callback_id"], text=_ack_text(data, sess))
 
-        if data == "x":
-            sess.skipped_all = True
-            break
+        if sess.verbose:
+            print(f"    [按钮] data={data!r} index={sess.index} "
+                  f"decided={sess.decided_count}/{len(sess.answers)}", flush=True)
+
+        if data == "m":
+            a = sess.answers[sess.index]
+            a.as_note = True
+            a.slot = None
+            a.decided = True
+            if sess.index < len(sess.answers) - 1:
+                sess.index += 1
+            render(sess)
+            continue
 
         if data == "n":
             if sess.index < len(sess.answers) - 1:
@@ -185,7 +295,24 @@ def run_session(items: list[Answer], timeout_sec: int = 600,
             continue
 
         if data == "d":
+            if not sess.confirming:
+                # 第一次点"完成"：不直接提交，先给确认屏 ——
+                # 用户反馈过"点完成后只记录了一条"，根因是看不到还差几条。
+                # 把差额摆明，比什么都强。
+                sess.confirming = True
+                render(sess)
+                continue
             break
+
+        if data.startswith("g:"):
+            # 从确认屏回跳到指定条目
+            try:
+                sess.index = int(data.split(":", 1)[1])
+            except ValueError:
+                pass
+            sess.confirming = False
+            render(sess)
+            continue
 
         if data.startswith("s:"):
             parts = data.split(":")
@@ -231,12 +358,27 @@ def apply_answers(date_str: str, sess: Session) -> tuple[int, Path | None]:
         a = by_line.get(e.get("line_no"))
         if a is None:
             continue
+
+        if a.as_note:
+            # 你判定"这不是待办" → 改成备忘。
+            # 只改留档里的解析结果，**不动备忘录原文**（原文逐字保留是核对的基础）。
+            if e.get("kind") != "note":
+                e["kind"] = "note"
+                e["completed"] = None
+                e["slot"] = None
+                e["issues"] = ["由用户标记：这条不是待办"]
+                changed += 1
+            continue
+
         new_slot = a.slot
         if e.get("slot") != new_slot:
             e["slot"] = new_slot
             changed += 1
             issues = e.get("issues") or []
-            e["issues"] = [x for x in issues if "时段未指定" not in x]
+            # 显式选了"不指定"也算已决定，把提示去掉；
+            # 只有真的没选（decided=False）才保留提示。
+            if a.decided:
+                e["issues"] = [x for x in issues if "时段未指定" not in x]
 
     if changed:
         p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -248,6 +390,8 @@ def main() -> int:
     ap.add_argument("--date", help="日期 YYYY-MM-DD，默认今天")
     ap.add_argument("--dry", action="store_true", help="只打印将要问什么，不发送")
     ap.add_argument("--timeout", type=int, default=600, help="等待总时长（秒）")
+    ap.add_argument("--verbose", action="store_true",
+                    help="打印每次按钮回调（排查「点了没反应」用）")
     args = ap.parse_args()
 
     date_str = args.date or dt.date.today().isoformat()
@@ -292,7 +436,7 @@ def main() -> int:
 
     print()
     print("已在 Telegram 发出按钮，等你选择…")
-    sess = run_session(items, timeout_sec=args.timeout)
+    sess = run_session(items, timeout_sec=args.timeout, verbose=args.verbose)
 
     print()
     if sess.skipped_all:
@@ -304,8 +448,15 @@ def main() -> int:
 
     print("你的选择：")
     for a in sess.answers:
-        mark = a.slot if a.decided else "（未定）"
+        if a.as_note:
+            mark = "备忘（不是待办）"
+        elif a.decided:
+            mark = a.slot or "不指定"
+        else:
+            mark = "（未定，保持原样）"
         print(f"  · {a.text}  →  {mark}")
+    if sess.undecided:
+        print(f"  ⚠️ 有 {len(sess.undecided)} 条未选择，保持原样（时段仍未指定）")
 
     changed, p = apply_answers(date_str, sess)
     if changed:
