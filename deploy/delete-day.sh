@@ -19,9 +19,11 @@ ROOT="$(cd "$HERE/.." && pwd)"
 CONFIG="$ROOT/config.json"
 TARGET="2026-10-03"
 
+MODE="exact"
 while [ $# -gt 0 ]; do
   case "$1" in
-    --title) TARGET="${2:-}"; shift 2 ;;
+    --title)  TARGET="${2:-}"; shift 2 ;;
+    --prefix) TARGET="${2:-}"; MODE="prefix"; shift 2 ;;
     *) echo "未知参数: $1" >&2; exit 1 ;;
   esac
 done
@@ -38,8 +40,16 @@ print(json.load(open('$CONFIG'))['folder_id'])
 
 run() { osascript -e "$1" 2>&1; }
 
-echo "删除当天页：「${TARGET}」"
+echo "删除条目（${MATCH_DESC:-模式待定}）"
 echo "════════════════════════════════════════"
+
+if [ "$MODE" = "prefix" ]; then
+  MATCH_EXPR="(name of n) starts with \"${TARGET}\""
+  MATCH_DESC="前缀「${TARGET}」"
+else
+  MATCH_EXPR="(name of n) is \"${TARGET}\""
+  MATCH_DESC="标题正好是「${TARGET}」"
+fi
 
 # 先确认文件夹有效
 CHECK=$(run "tell application \"Notes\"
