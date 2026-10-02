@@ -152,6 +152,45 @@ class Notes:
             rows.append((lines[i], lines[i + 1]))
         return rows
 
+    def names(self) -> list[str]:
+        """该文件夹内所有条目的标题。"""
+        return [nm for _, nm in self.list_notes()]
+
+    def note_id_for(self, name: str) -> str | None:
+        """
+        按标题取 id。标题需**精确匹配**（备忘录的 name 就是正文首行）。
+
+        补充一点实测结论：不能用 `every note whose name is "..."` 来查
+        （那样查到 0 条），但**在循环里逐个比较 name 是可行的** ——
+        这个区别很反直觉，所以这里刻意写成循环。
+        """
+        out = run_applescript(
+            'tell application "Notes"\n'
+            f'  repeat with n in notes of folder id {_as_literal(self.folder_id)}\n'
+            f'    if (name of n) is {_as_literal(name)} then return id of n\n'
+            '  end repeat\n'
+            '  return "NOTFOUND"\n'
+            'end tell'
+        )
+        return None if out == "NOTFOUND" else out
+
+    def plaintext_of(self, note_id: str) -> str | None:
+        """
+        按 id 取正文纯文本。
+
+        id 是唯一可靠的定位方式 —— 实测 `whose id is` 能命中，
+        而按 name 查会返回 0 条。
+        """
+        out = run_applescript(
+            'tell application "Notes"\n'
+            f'  set hits to (every note of folder id {_as_literal(self.folder_id)} '
+            f'whose id is {_as_literal(note_id)})\n'
+            '  if (count of hits) is 0 then return "NOTFOUND"\n'
+            '  return plaintext of item 1 of hits\n'
+            'end tell'
+        )
+        return None if out == "NOTFOUND" else out
+
     def get_by_name(self, name: str) -> Note | None:
         """按名称取条目。名称需精确匹配（备忘录的 name 就是正文首行）。"""
         nid = self.note_id_for(name)
