@@ -152,9 +152,59 @@ res = parser.parse(raw)
 check("原文逐字保留", res.entries[1].raw == "- [ ] 甲 乙  丙")
 
 
-# ── 3. 留档渲染
+# ── 3. 顺延逻辑（离线可测 —— 这些分支在沙箱里必须能验掉）
 
-print("\n── 3. 留档渲染检查 ──")
+print("\n── 3. 顺延逻辑检查 ──")
+import carry_over  # noqa: E402
+
+
+def plan_of(prev_text: str, next_text: str | None) -> tuple[list[str], list[str]]:
+    prev = parser.parse(prev_text)
+    return carry_over.build_plan(prev, next_text)
+
+
+# 基本顺延
+plan, _ = plan_of("2026-10-02\n- [ ] 甲\n- [x] 乙\n- [ ] 丙", None)
+check("只顺延未完成项", len(plan) == 2 and any("甲" in l for l in plan) and any("丙" in l for l in plan))
+check("已完成项被排除", not any("乙" in l for l in plan))
+
+# 备忘不参与
+plan, _ = plan_of("2026-10-02\n- [ ] 甲\n* 备忘丙", None)
+check("备忘不被顺延", len(plan) == 1)
+
+# 顺延行的格式
+plan, _ = plan_of("2026-10-02\n- [ ] 甲", None)
+check("顺延行带 ⟳ 标记", plan and plan[0].endswith(carry_over.CARRY_MARK))
+check("顺延行是未完成复选框", plan and plan[0].startswith("- [ ] "))
+
+# 幂等性 —— 这是实测踩到的 bug：次日页里是「甲 ⟳」，来源是「甲」，
+# 不剥标记就比不相等，于是同一条被顺延第二遍。
+plan, skipped = plan_of("2026-10-02\n- [ ] 甲", "2026-10-03\n- [ ] 甲 ⟳\n")
+check("幂等：已有「甲 ⟳」时不重复顺延", len(plan) == 0, f"实际 {plan}")
+
+plan, _ = plan_of("2026-10-02\n- [ ] 甲", "2026-10-03\n- [ ] 甲\n")
+check("幂等：次日页有无标记的同名项也不重复", len(plan) == 0)
+
+# 相似但不同 → 保留
+plan, _ = plan_of("2026-10-02\n- [ ] 提交结算单A", "2026-10-03\n- [ ] 提交结算单B\n")
+check("相似但不同的事项被保留", len(plan) == 1)
+
+# 高相似 → 跳过并说明（不静默丢弃）
+plan, skipped = plan_of("2026-10-02\n- [ ] 提交结算单", "2026-10-03\n- [ ] 提交结算单\n")
+check("高相似时跳过并给出说明", len(plan) == 0 and len(skipped) >= 1)
+
+# 全部完成 → 无动作
+plan, _ = plan_of("2026-10-02\n- [x] 甲\n- [x] 乙", None)
+check("全部完成时无事可做", len(plan) == 0)
+
+# ⟳ 不能被 NFKC 归一化改掉（否则去重键会失效）
+check("⟳ 标记在归一化后保持不变",
+      carry_over.CARRY_MARK in parser.normalize_line(f"甲 {carry_over.CARRY_MARK}"))
+
+
+# ── 4. 留档渲染
+
+print("\n── 4. 留档渲染检查 ──")
 res = parser.parse("2026-10-02\n- [ ] 甲\n* 乙")
 md = parser.render_archive(res, {"date": "2026-10-02", "source": "test"})
 check("留档含原文段", "## 原文（逐字保留）" in md)
