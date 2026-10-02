@@ -54,10 +54,14 @@ if notes_cls is None:
 
 methods = {m.name for m in notes_cls.body if isinstance(m, ast.FunctionDef)}
 
-# 从 read_day.py 收集对 notes 对象的方法调用
+# 收集**全部** src/*.py 里对 notes 对象的方法调用。
+#
+# 这一点被两次教训逼出来：早先只扫 read_day.py，结果 probe_checklist.py
+# 调用了被重构删掉的 get()，静态检查没发现，错误又流到用户那里。
+# 检查范围必须覆盖所有调用方，否则等于没检查。
 called: set[str] = set()
-for fname in ("read_day.py", "notes.py"):
-    tree = ast.parse((SRC / fname).read_text(encoding="utf-8"))
+for _f in sorted(SRC.glob("*.py")):
+    tree = ast.parse(_f.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if (
             isinstance(node, ast.Attribute)
@@ -75,9 +79,9 @@ our_api = {
 expected = called & our_api
 missing = expected - methods
 check(
-    f"上层调用的 {len(expected)} 个方法全部存在",
+    f"全部 src/*.py 调用的 {len(expected)} 个方法都存在",
     not missing,
-    f"缺失：{sorted(missing)}（这正是上次把 names/note_id_for 删掉时暴露的问题）",
+    f"缺失：{sorted(missing)} —— 重构时删掉了方法，但调用方还在引用",
 )
 
 

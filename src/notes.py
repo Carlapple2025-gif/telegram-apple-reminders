@@ -201,6 +201,14 @@ class Notes:
             return None
         return Note(id=nid, name=name, plaintext=text)
 
+    def get(self, name: str) -> Note | None:
+        """按标题取条目（get_by_name 的简名）。
+
+        之所以保留两个名字：`get` 更短、在调用处更自然；但语义上与
+        get_by_name 完全相同，所以实现里直接委托，避免逻辑分叉。
+        """
+        return self.get_by_name(name)
+
     def get_by_id(self, note_id: str) -> Note | None:
         text = self.plaintext_of(note_id)
         if text is None:
