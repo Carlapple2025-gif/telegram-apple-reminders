@@ -212,11 +212,30 @@ check("留档含解析段", "## 解析结果" in md)
 check("留档含日期", "date: 2026-10-02" in md)
 
 
-# ── 5. shell 脚本静态检查：bash 3.2 的全角字符陷阱
+# ── 5. AppleScript 字面量转义
 
-print("\n── 5. shell 脚本检查 ──")
-
+print("\n── 5. AppleScript 转义检查 ──")
 import re as _re  # noqa: E402
+import notes as _notes  # noqa: E402
+
+# 这是一次真实故障：bash 脚本里手写 AppleScript 字符串，HTML 中的双引号
+# （class="..."）没转义，直接终止了字面量 → AppleScript 报 -2741 语法错。
+# 现在统一走 _as_literal，这里验证它对各类输入都正确。
+for _raw in ['class="x"', 'a"b"c', 'C:\\path', '中文"引号"测试', 'back\\slash"mix']:
+    _lit = _notes._as_literal(_raw)
+    _inner = _lit[1:-1]
+    _bad = _re.findall(r'(?<!\\)"', _inner)
+    check(f"转义 {_raw!r} 后无裸引号", not _bad, f"字面量={_lit}")
+
+# 反斜杠必须最先转义，否则会把后续插入的转义再转一次
+check("反斜杠先于引号转义",
+      _notes._as_literal('\\"') == '"\\\\\\""',
+      _notes._as_literal('\\"'))
+
+
+# ── 6. shell 脚本静态检查：bash 3.2 的全角字符陷阱
+
+print("\n── 6. shell 脚本检查 ──")
 
 # macOS 自带 bash 3.2 会把**全角字符的字节**当成变量名的一部分。
 # 于是 `echo "「$TARGET」"` 会去找名为 `TARGET」` 的变量，报
