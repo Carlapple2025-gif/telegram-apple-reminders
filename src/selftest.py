@@ -260,9 +260,78 @@ for _n in ["2026-10-02", "2026-10-01", "国际象棋", "2026-10-02 备注",
     check(f"应留：{_n[:24]}", _cleanup.classify(_n, _today) is None)
 
 
-# ── 7. AppleScript 语法校验（osacompile，只编译不执行）
+# ── 7. 提醒事项同步规则
 
-print("\n── 7. AppleScript 语法校验 ──")
+print("\n── 7. 提醒事项同步规则 ──")
+import importlib.util as _ilu2  # noqa: E402
+
+def _load(name, path):
+    """
+    动态加载模块。
+
+    注意：必须先把模块注册进 sys.modules —— 否则 @dataclass 在解析类型标注时
+    会去 sys.modules 找本模块的命名空间，拿不到就报
+    `'NoneType' object has no attribute '__dict__'`。
+    这是个很容易踩的坑，写在这里免得下次再查。
+    """
+    import sys as _sys
+    _s = _ilu2.spec_from_file_location(name, path)
+    _m = _ilu2.module_from_spec(_s)
+    _sys.modules[name] = _m
+    _s.loader.exec_module(_m)
+    return _m
+
+_rems = _load("_reminders", SRC / "reminders.py")
+_push = _load("_push", SRC / "push_tasks.py")
+
+_NOTE = "x-coredata://TEST/ICNote/p1"
+
+
+def _rem(rid, name, completed, body=""):
+    return _rems.Reminder(id=rid, name=name, completed=completed, body=body, due="")
+
+
+_page = parser.parse("2026-10-02\n- [ ] 甲\n- [ ] 乙")
+_keyA = _rems.make_key(_NOTE, 2, "甲")
+_keyB = _rems.make_key(_NOTE, 3, "乙")
+
+# 空列表 → 全部新建（备忘不参与）
+_p = _push.build_plan(_page, [], _NOTE)
+check("空列表时新建全部待办", len(_p.create) == 2)
+
+# 幂等：已有同键条目 → 不重复建
+_p = _push.build_plan(_page, [_rem("r1", "甲", False, _keyA)], _NOTE)
+check("已有同键条目不重复新建", len(_p.create) == 1 and len(_p.unchanged) == 1)
+
+# 重复运行 → 无改动（这一步最关键：每天都会跑）
+_p = _push.build_plan(_page, [_rem("r1", "甲", False, _keyA),
+                             _rem("r2", "乙", False, _keyB)], _NOTE)
+check("重复运行无改动（幂等）", _p.total_changes == 0)
+
+# 备忘录打了钩 → 同步为完成
+_p = _push.build_plan(parser.parse("2026-10-02\n- [x] 甲"), [_rem("r1", "甲", False, _keyA)], _NOTE)
+check("备忘录 [x] 同步为完成", len(_p.complete) == 1)
+
+# **绝不回退**：提醒事项已完成，备忘录仍写 [ ]
+_p = _push.build_plan(_page, [_rem("r1", "甲", True, _keyA)], _NOTE)
+check("已完成的条目绝不回退", len(_p.complete) == 0 and len(_p.already_done) == 1)
+
+# 换一天 → 不误判为重复（key 含 note_id）
+_p = _push.build_plan(_page, [_rem("r1", "甲", False, _keyA)], "x-coredata://TEST/ICNote/p2")
+check("跨天不误判为重复", len(_p.create) == 2)
+
+# 孤儿条目只报告（可能是你手动加的），不自动删
+_p = _push.build_plan(_page, [_rem("r9", "手动加的", False)], _NOTE)
+check("孤儿条目只报告不自动删", len(_p.orphan) == 1)
+
+# 去重键要能区分内容
+check("改文字后视为新内容",
+      _rems.make_key(_NOTE, 2, "甲") != _rems.make_key(_NOTE, 2, "甲改过了"))
+
+
+# ── 8. AppleScript 语法校验（osacompile，只编译不执行）
+
+print("\n── 8. AppleScript 语法校验 ──")
 
 import subprocess as _sp  # noqa: E402
 
@@ -298,9 +367,42 @@ check(f"{len(_as_templates)} 个 AppleScript 模板语法正确",
       not _as_fail, "；".join(_as_fail))
 
 
-# ── 8. shell 脚本静态检查：bash 3.2 的全角字符陷阱
+# ── 9. 系统 Python 3.9 兼容性
 
-print("\n── 8. shell 脚本检查 ──")
+print("\n── 9. 系统 Python 兼容性 ──")
+
+# 为什么单独查这个：launchd 任务用的是 **/usr/bin/python3（3.9）**，
+# 而我平时用自带运行时（3.12）。若代码用了运行时求值的类型标注
+# （如 dataclass 字段上的 `str | None`），本地测得好好的，
+# 定时任务里却 import 失败 —— 那是最难查的一类问题。
+# 所以这里**真的用系统 python3 导入一遍**，而不是只做语法解析
+# （ast.parse 只验语法、不求值注解，抓不到这类问题）。
+import subprocess as _sp2  # noqa: E402
+
+_SYS_PY = "/usr/bin/python3"
+_modules = ["parse", "notes", "sync", "notify", "reminders", "push_tasks",
+            "cleanup", "daily_report", "read_day"]
+
+if not os.path.exists(_SYS_PY):
+    check("系统 python3 存在", False, f"找不到 {_SYS_PY}")
+else:
+    _bad = []
+    for _m in _modules:
+        _r = _sp2.run(
+            [_SYS_PY, "-c",
+             f"import sys; sys.path.insert(0, {str(SRC)!r}); import {_m}"],
+            capture_output=True, text=True,
+        )
+        if _r.returncode != 0:
+            _err = (_r.stderr.strip().splitlines() or ["?"])[-1]
+            _bad.append(f"{_m}: {_err[:70]}")
+    check(f"{len(_modules)} 个模块可被系统 python3 (3.9) 导入",
+          not _bad, "；".join(_bad))
+
+
+# ── 10. shell 脚本静态检查：bash 3.2 的全角字符陷阱
+
+print("\n── 10. shell 脚本检查 ──")
 
 # macOS 自带 bash 3.2 会把**全角字符的字节**当成变量名的一部分。
 # 于是 `echo "「$TARGET」"` 会去找名为 `TARGET」` 的变量，报
