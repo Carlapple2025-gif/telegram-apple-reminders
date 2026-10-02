@@ -288,7 +288,30 @@ def run_session(items: list[Answer], timeout_sec: int = 600,
     else:
         sess.timed_out = True
 
+    # 收尾：**主动撤掉按钮**。
+    # 不撤的话，会话结束后你再点那些按钮不会有任何响应（没有进程在听），
+    # 客户端上按钮会一直转圈 —— 实测用户被这个坑过（点了 11 次没反应）。
+    finish_ui(sess)
     return sess
+
+
+def finish_ui(sess: Session) -> None:
+    """把最后那条消息改成"已结束"的样子：去掉按钮、补一行结论。"""
+    if sess.message_id is None:
+        return
+    try:
+        tail = "✅ 已完成" if sess.decided_count == len(sess.answers) else \
+               f"已结束（{sess.decided_count}/{len(sess.answers)} 条已选）"
+        base = confirm_text(sess) if sess.confirming else frame_text(sess)
+        token, chat = tg.load_config()
+        tg._call(token, "editMessageText", {
+            "chat_id": chat,
+            "message_id": sess.message_id,
+            "text": f"{base}\n\n{tail}",
+        })
+    except tg.TelegramError:
+        # 收尾失败不影响结果：数据已经拿到，按钮顶多留一会儿。
+        pass
 
 
 def handle_click(sess: Session, cb: dict) -> bool:

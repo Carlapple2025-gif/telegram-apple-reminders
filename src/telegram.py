@@ -283,6 +283,72 @@ def wait_for_callback(chat_id: str | None = None, timeout_sec: int = 300,
     return None
 
 
+# ── 收尾：处理掉"过期的按钮点击"
+#
+# 为什么需要：按钮只在**有进程监听时**才有响应。会话结束后你再点，
+# 那个点击没有任何人接收 —— 客户端上按钮会一直转圈，用户以为坏了。
+# 实测踩到过：演示消息的按钮被点了 11 次都没反应。
+#
+# 做法不是"忽略"，而是**回应 + 撤掉按钮**：明确告诉用户这个按钮过期了，
+# 并把键盘去掉，避免继续误点。这比沉默好得多。
+
+
+def drain_stale_callbacks(chat_id: str | None = None,
+                          note: str = "（这条已过期，按钮不再有效）",
+                          limit: int = 100) -> int:
+    """
+    把积压的按钮点击全部回应掉，并在原消息上补一行说明、去掉按钮。
+    返回处理掉的点击数量。
+    """
+    token, cfg_chat = load_config()
+    chat = chat_id or cfg_chat
+    try:
+        updates = get_updates(limit=limit)
+    except TelegramError:
+        return 0
+
+    handled = 0
+    styled: set[int] = set()
+    max_id = 0
+    for u in updates:
+        max_id = max(max_id, u.get("update_id", 0))
+        cb = u.get("callback_query")
+        if not cb:
+            continue
+        msg = cb.get("message") or {}
+        m_chat = str(msg.get("chat", {}).get("id", ""))
+        if chat and m_chat and m_chat != str(chat):
+            continue
+
+        # 1. 先回应点击（止住转圈）
+        answer_callback(cb.get("id", ""), text="这条已过期")
+        handled += 1
+
+        # 2. 在原消息上标注过期，并撤掉按钮（同一条只做一次）
+        mid = msg.get("message_id")
+        if mid and mid not in styled:
+            styled.add(mid)
+            base = (msg.get("text") or "").rstrip()
+            try:
+                _call(token, "editMessageText", {
+                    "chat_id": m_chat or chat,
+                    "message_id": mid,
+                    "text": f"{base}\n\n{note}",
+                    "reply_markup": {"inline_keyboard": []},
+                })
+            except TelegramError:
+                pass
+
+    # 3. 推进读取位置：这些点击已经处理过，不该在下次被当成新输入
+    if max_id:
+        try:
+            get_updates(offset=max_id + 1, limit=1)
+        except TelegramError:
+            pass
+
+    return handled
+
+
 # ── 接收
 
 def get_updates(offset: int | None = None, timeout: int = 0,
@@ -363,6 +429,8 @@ def main() -> int:
     p_send = sub.add_parser("send", help="发一条测试消息")
     p_send.add_argument("text")
 
+    sub.add_parser("drain", help="处理掉积压的过期按钮点击（回应并撤掉按钮）")
+
     p_wait = sub.add_parser("wait", help="发提问并等待回复（100 秒）")
     p_wait.add_argument("prompt")
 
@@ -410,6 +478,11 @@ def main() -> int:
                 print()
                 print("把下面这行加进 .env（然后 chmod 600 .env）：")
                 print(f"  TELEGRAM_CHAT_ID={cid}")
+            return 0
+
+        if args.cmd == "drain":
+            n = drain_stale_callbacks()
+            print(f"已处理 {n} 个积压点击（已回应并撤掉按钮）")
             return 0
 
         if args.cmd == "updates":

@@ -565,7 +565,24 @@ _src = inspect.getsource(_tg.wait_for_callback)
 check("回调返回整批而非单个", '"batch"' in _src)
 
 
-# ── 13. AppleScript 语法校验（osacompile，只编译不执行）
+# ── 13. 过期按钮必须有响应
+
+print("\n── 13. 过期按钮的处理 ──")
+
+# 用户实测踩到：会话结束后再点按钮，没有任何响应、按钮一直转圈
+# （演示消息的按钮被点了 11 次）。这里验证两件事：
+#   ① 会话结束时会主动收尾（撤掉按钮）
+#   ② 提供了清理积压点击的入口
+check("telegram 提供 drain_stale_callbacks",
+      hasattr(_tg, "drain_stale_callbacks"))
+check("ask_slots 会话结束会收尾",
+      hasattr(_ask, "finish_ui"))
+_src_finish = inspect.getsource(_ask.finish_ui)
+check("收尾会去掉按钮（不传 reply_markup）",
+      "reply_markup" not in _src_finish)
+
+
+# ── 14. AppleScript 语法校验（osacompile，只编译不执行）
 
 print("\n── 12. AppleScript 语法校验 ──")
 
@@ -603,9 +620,9 @@ check(f"{len(_as_templates)} 个 AppleScript 模板语法正确",
       not _as_fail, "；".join(_as_fail))
 
 
-# ── 14. 系统 Python 3.9 兼容性
+# ── 15. 系统 Python 3.9 兼容性
 
-print("\n── 14. 系统 Python 兼容性 ──")
+print("\n── 15. 系统 Python 兼容性 ──")
 
 # 为什么单独查这个：launchd 任务用的是 **/usr/bin/python3（3.9）**，
 # 而我平时用自带运行时（3.12）。若代码用了运行时求值的类型标注
@@ -639,7 +656,7 @@ else:
 
 # ── 11. 密钥不进版本库
 
-print("\n── 15. 密钥保护检查 ──")
+print("\n── 16. 密钥保护检查 ──")
 
 # 为什么值得单独查：Telegram token 一旦被提交，等于把 bot 交给别人。
 # 加 telegram.py 时就发现 .gitignore 里**没有 .env** —— 而下一步就要往
@@ -655,9 +672,9 @@ _r = _sp2.run(["git", "check-ignore", ".env.example"], cwd=str(ROOT),
 check(".env.example 可被提交（它是模板）", _r.returncode != 0)
 
 
-# ── 16. shell 脚本静态检查：bash 3.2 的全角字符陷阱
+# ── 17. shell 脚本静态检查：bash 3.2 的全角字符陷阱
 
-print("\n── 16. shell 脚本检查 ──")
+print("\n── 17. shell 脚本检查 ──")
 
 # macOS 自带 bash 3.2 会把**全角字符的字节**当成变量名的一部分。
 # 于是 `echo "「$TARGET」"` 会去找名为 `TARGET」` 的变量，报
