@@ -17,6 +17,7 @@ selftest.py —— 不需要备忘录访问权限的自检。
 from __future__ import annotations
 
 import ast
+import inspect
 import os
 import sys
 from pathlib import Path
@@ -513,7 +514,43 @@ _s8.answers[0].decided = True
 check("标记备忘后仍算已决定", _s8.decided_count == 1)
 
 
-# ── 12. AppleScript 语法校验（osacompile，只编译不执行）
+# ── 12. 按钮回调不丢失（两次实测踩坑）
+
+print("\n── 12. 按钮回调不丢失 ──")
+
+_tg.answer_callback = lambda *a, **k: None   # 离线时静默
+
+# 坑 1：`d` 是两步操作 —— 第一次进确认屏，第二次才提交。
+# 早先 offset 没有跨调用续传，导致第二次点击被当成"历史"跳过，
+# 用户表现为"点了提交没反应"。
+_s9 = _sess("甲", "乙")
+_s9.answers[0].slot = "上午"
+_s9.answers[0].decided = True
+_r1 = _ask.handle_click(_s9, {"data": "d", "callback_id": "c1", "message_id": 1})
+check("第一次点完成 → 进确认屏（不结束）", _r1 is True and _s9.confirming is True)
+_r2 = _ask.handle_click(_s9, {"data": "d", "callback_id": "c2", "message_id": 1})
+check("第二次点完成 → 真正结束", _r2 is False)
+
+# 坑 2：一次返回多个点击时，必须逐个处理。
+# 只处理第一个的话，offset 会推进到整批之后，剩下的点击被永久跳过。
+_s10 = _sess("甲", "乙")
+_ask.handle_click(_s10, {"data": "s:0:am", "callback_id": "a", "message_id": 1})
+_ask.handle_click(_s10, {"data": "s:1:pm", "callback_id": "b", "message_id": 1})
+check("连续两次点击都被处理", _s10.decided_count == 2
+      and _s10.answers[0].slot == "上午" and _s10.answers[1].slot == "下午")
+
+# wait_for_callback 必须支持 offset 续传与整批返回
+import inspect as _insp  # noqa: E402
+_sig = _insp.signature(_tg.wait_for_callback)
+check("wait_for_callback 支持 offset 续传", "offset" in _sig.parameters)
+check("wait_for_callback 支持跳过历史", "skip_history" in _sig.parameters)
+
+# 返回结构里要有 batch（整批）与 offset（续传位置）
+_src = inspect.getsource(_tg.wait_for_callback)
+check("回调返回整批而非单个", '"batch"' in _src)
+
+
+# ── 13. AppleScript 语法校验（osacompile，只编译不执行）
 
 print("\n── 12. AppleScript 语法校验 ──")
 
@@ -551,9 +588,9 @@ check(f"{len(_as_templates)} 个 AppleScript 模板语法正确",
       not _as_fail, "；".join(_as_fail))
 
 
-# ── 13. 系统 Python 3.9 兼容性
+# ── 14. 系统 Python 3.9 兼容性
 
-print("\n── 13. 系统 Python 兼容性 ──")
+print("\n── 14. 系统 Python 兼容性 ──")
 
 # 为什么单独查这个：launchd 任务用的是 **/usr/bin/python3（3.9）**，
 # 而我平时用自带运行时（3.12）。若代码用了运行时求值的类型标注
@@ -587,7 +624,7 @@ else:
 
 # ── 11. 密钥不进版本库
 
-print("\n── 14. 密钥保护检查 ──")
+print("\n── 15. 密钥保护检查 ──")
 
 # 为什么值得单独查：Telegram token 一旦被提交，等于把 bot 交给别人。
 # 加 telegram.py 时就发现 .gitignore 里**没有 .env** —— 而下一步就要往
@@ -603,9 +640,9 @@ _r = _sp2.run(["git", "check-ignore", ".env.example"], cwd=str(ROOT),
 check(".env.example 可被提交（它是模板）", _r.returncode != 0)
 
 
-# ── 15. shell 脚本静态检查：bash 3.2 的全角字符陷阱
+# ── 16. shell 脚本静态检查：bash 3.2 的全角字符陷阱
 
-print("\n── 15. shell 脚本检查 ──")
+print("\n── 16. shell 脚本检查 ──")
 
 # macOS 自带 bash 3.2 会把**全角字符的字节**当成变量名的一部分。
 # 于是 `echo "「$TARGET」"` 会去找名为 `TARGET」` 的变量，报

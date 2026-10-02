@@ -217,21 +217,30 @@ def _send_payload(text: str, keyboard: list[list[tuple[str, str]]] | None,
 
 
 def wait_for_callback(chat_id: str | None = None, timeout_sec: int = 300,
-                      poll_interval: int = 2) -> dict | None:
+                      poll_interval: int = 2, offset: int | None = None,
+                      skip_history: bool = False) -> dict | None:
     """
-    等一次按钮点击。返回 {'data', 'callback_id', 'message_id'}；超时返回 None。
+    等一次按钮点击。返回 {'data', 'callback_id', 'message_id', 'offset'}；超时返回 None。
 
-    与 wait_for_reply 一样，**先消费历史更新**再等待 ——
-    否则会把几天前点过的按钮当成这次的输入。
+    `offset` / `skip_history` 这两个参数是**实际踩坑后加的**：
+
+    原先每次调用都"先把历史更新消费掉再等待"，但那只在**单次调用内部**成立 ——
+    跨调用没有推进读取位置。于是出现这种诡异现象：用户点了两次"完成"
+    （第一次进确认屏、第二次提交），第二次点击**丢失**了，
+    因为它在下一轮又被当成"历史"跳过了。
+
+    正确做法：把读取位置（offset）在调用之间传递，
+    首次调用时用 skip_history 跳过一次历史，之后一路推进。
     """
     token, cfg_chat = load_config()
     chat = chat_id or cfg_chat
 
-    try:
-        history = get_updates(limit=100)
-        offset = (max(u["update_id"] for u in history) + 1) if history else None
-    except TelegramError:
-        offset = None
+    if offset is None and not skip_history:
+        try:
+            history = get_updates(limit=100)
+            offset = (max(u["update_id"] for u in history) + 1) if history else None
+        except TelegramError:
+            offset = None
 
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
@@ -248,11 +257,28 @@ def wait_for_callback(chat_id: str | None = None, timeout_sec: int = 300,
             msg_chat = str((cb.get("message") or {}).get("chat", {}).get("id", ""))
             if chat and msg_chat and msg_chat != str(chat):
                 continue
-            return {
-                "data": cb.get("data") or "",
-                "callback_id": cb.get("id") or "",
-                "message_id": (cb.get("message") or {}).get("message_id"),
-            }
+            # 把**这一批里的所有点击**都返回，而不是只返回第一个。
+            # 只返第一个的话，offset 会推进到整批之后，剩下的点击被永久跳过 ——
+            # 用户快速连点两下就会丢一下。
+            batch = []
+            for u2 in updates[updates.index(u):]:
+                cb2 = u2.get("callback_query")
+                if not cb2:
+                    continue
+                m2 = str((cb2.get("message") or {}).get("chat", {}).get("id", ""))
+                if chat and m2 and m2 != str(chat):
+                    continue
+                batch.append({
+                    "data": cb2.get("data") or "",
+                    "callback_id": cb2.get("id") or "",
+                    "message_id": (cb2.get("message") or {}).get("message_id"),
+                })
+            for u2 in updates:
+                offset = max(offset or 0, u2["update_id"] + 1)
+            return {"batch": batch, "offset": offset,
+                    "data": batch[0]["data"] if batch else "",
+                    "callback_id": batch[0]["callback_id"] if batch else "",
+                    "message_id": batch[0]["message_id"] if batch else None}
         time.sleep(poll_interval)
     return None
 
@@ -292,6 +318,8 @@ def wait_for_reply(chat_id: str | None = None, timeout_sec: int = 300,
         raise TelegramError("没有 chat_id，无法提问")
 
     # 1. 消费掉历史，定位到"现在"
+    # 注意：这里只在**单次提问**的入口做一次，之后在循环内持续推进 offset。
+    # 不这样做的话，同一批 update 会被反复读到（曾导致"第二次点击丢失"）。
     try:
         history = get_updates(limit=100)
         offset = (max(u["update_id"] for u in history) + 1) if history else None

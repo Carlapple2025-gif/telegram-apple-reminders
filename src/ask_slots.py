@@ -263,87 +263,108 @@ def run_session(items: list[Answer], timeout_sec: int = 600,
     sess = Session(answers=items, verbose=verbose)
     render(sess)
 
+    offset: int | None = None
+    first_poll = True
+
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
+        # 关键：把 offset 在循环间续传。否则同一批 update 会被反复读到，
+        # 表现为"第二次点击丢失"（第一次进确认屏、第二次提交时点不动）。
         cb = tg.wait_for_callback(timeout_sec=min(poll_interval * 2, 10),
-                                  poll_interval=poll_interval)
+                                  poll_interval=poll_interval,
+                                  offset=offset, skip_history=first_poll)
+        first_poll = False
         if cb is None:
             continue
+        offset = cb.get("offset")
 
-        data = cb["data"]
-        # 即时反馈：客户端顶部会弹一小行。这是"点没点上"最直接的证据 ——
-        # 没有它，用户只能盯着按钮变化猜，网络慢时就显得像没反应。
-        tg.answer_callback(cb["callback_id"], text=_ack_text(data, sess))
-
-        if sess.verbose:
-            print(f"    [按钮] data={data!r} index={sess.index} "
-                  f"decided={sess.decided_count}/{len(sess.answers)}", flush=True)
-
-        if data == "m":
-            a = sess.answers[sess.index]
-            a.as_note = True
-            a.slot = None
-            a.decided = True
-            if sess.index < len(sess.answers) - 1:
-                sess.index += 1
-            render(sess)
+        # 逐个处理这一批点击，一个都不丢
+        for one in (cb.get("batch") or [cb]):
+            if not handle_click(sess, one):
+                break
+        else:
             continue
-
-        if data == "n":
-            if sess.index < len(sess.answers) - 1:
-                sess.index += 1
-            render(sess)
-            continue
-
-        if data == "p":
-            if sess.index > 0:
-                sess.index -= 1
-            render(sess)
-            continue
-
-        if data == "d":
-            if not sess.confirming:
-                # 第一次点"完成"：不直接提交，先给确认屏 ——
-                # 用户反馈过"点完成后只记录了一条"，根因是看不到还差几条。
-                # 把差额摆明，比什么都强。
-                sess.confirming = True
-                render(sess)
-                continue
-            break
-
-        if data.startswith("g:"):
-            # 从确认屏回跳到指定条目
-            try:
-                sess.index = int(data.split(":", 1)[1])
-            except ValueError:
-                pass
-            sess.confirming = False
-            render(sess)
-            continue
-
-        if data.startswith("s:"):
-            parts = data.split(":")
-            if len(parts) == 3:
-                try:
-                    idx = int(parts[1])
-                except ValueError:
-                    continue
-                code = parts[2]
-                if 0 <= idx < len(sess.answers):
-                    slot = CODE_TO_SLOT.get(code)
-                    a = sess.answers[idx]
-                    a.slot = slot
-                    a.decided = True
-                    # 选完自动前进一条，省一次点击；最后一条则停留在原地（等"完成"）
-                    if idx == sess.index and idx < len(sess.answers) - 1:
-                        sess.index = idx + 1
-                    render(sess)
-            continue
-
+        break
     else:
         sess.timed_out = True
 
     return sess
+
+
+def handle_click(sess: Session, cb: dict) -> bool:
+    """
+    处理一次按钮点击。返回 False 表示会话应当结束。
+
+    抽成独立函数，是为了让"整批点击逐个处理"的循环读起来清楚 ——
+    原来所有分支都堆在一个 while 里，加一层批处理就成了一团。
+    """
+    data = cb.get("data") or ""
+    tg.answer_callback(cb.get("callback_id", ""), text=_ack_text(data, sess))
+
+    if sess.verbose:
+        print(f"    [按钮] data={data!r} index={sess.index} "
+              f"decided={sess.decided_count}/{len(sess.answers)}", flush=True)
+
+    if data == "n":
+        if sess.index < len(sess.answers) - 1:
+            sess.index += 1
+        render(sess)
+        return True
+
+    if data == "p":
+        if sess.index > 0:
+            sess.index -= 1
+        render(sess)
+        return True
+
+    if data == "d":
+        if not sess.confirming:
+            # 第一次点"完成"：不直接提交，先给确认屏 ——
+            # 用户反馈过"点完成后只记录了一条"，根因是看不到还差几条。
+            sess.confirming = True
+            render(sess)
+            return True
+        return False   # 确认屏上再点一次才是真提交
+
+    if data.startswith("g:"):
+        try:
+            sess.index = int(data.split(":", 1)[1])
+        except ValueError:
+            pass
+        sess.confirming = False
+        render(sess)
+        return True
+
+    if data == "m":
+        a = sess.answers[sess.index]
+        a.as_note = True
+        a.slot = None
+        a.decided = True
+        if sess.index < len(sess.answers) - 1:
+            sess.index += 1
+        render(sess)
+        return True
+
+    if data.startswith("s:"):
+        parts = data.split(":")
+        if len(parts) == 3:
+            try:
+                idx = int(parts[1])
+            except ValueError:
+                return True
+            code = parts[2]
+            if 0 <= idx < len(sess.answers):
+                a = sess.answers[idx]
+                a.slot = CODE_TO_SLOT.get(code)
+                a.as_note = False
+                a.decided = True
+                # 选完自动前进（用户确认要这个行为）；最后一条停原地等"完成"
+                if idx == sess.index and idx < len(sess.answers) - 1:
+                    sess.index = idx + 1
+                render(sess)
+        return True
+
+    return True
 
 
 def apply_answers(date_str: str, sess: Session) -> tuple[int, list[Path]]:
