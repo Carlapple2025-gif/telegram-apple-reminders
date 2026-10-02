@@ -1,0 +1,10 @@
+# 忽略运行产物与本地配置
+data/
+config.json
+*.log
+__pycache__/
+*.pyc
+.DS_Store
+
+# 顺延/日报的中间产物
+data/days/
