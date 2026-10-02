@@ -62,12 +62,30 @@ def sync_day(date_str: str, notes: Notes | None = None) -> SyncResult | None:
     # ② 你通过 Telegram 按钮选的（落在留档 JSON 里，备忘录原文不动）。
     # 重新解析只能看到 ①，于是每次 --refresh 都会把 ② 清掉，
     # 表现为"你设的时段过一会儿自己没了"。实测踩到过。
+    #
+    # ⚠️ 键**不能用行号**，只能用正文。
+    #
+    # 这是踩了两次才定下来的：
+    #   ① 只用行号 → 你编辑备忘录（删一行、加一行）后行号整体位移，
+    #      上一行号的时段被错套到别的条目上。实测出现过"已完成、且原文
+    #      根本没有 @时段 的条目，留档里却带着一个时段"。
+    #   ② 用「行号+正文」→ 行号一变就找不到，正确选择被丢掉。
+    #      实测出现过"删掉一行后，另一条的按钮选择消失了"。
+    # 结论：行号只是位置，不是身份；**内容才是身份**。
+    # 单条内容重复的极端情况下可能歧义，但那种情况本来就该问你，
+    # 而不是静默套用。
     prev = load_archive(date_str)
     if prev is not None:
-        prev_slots = {e.line_no: e.slot for e in prev.entries if e.slot}
+        prev_slots: dict[str, str] = {}
+        for e in prev.entries:
+            if e.slot:
+                prev_slots.setdefault(parser.normalize_line(e.text), e.slot)
         for e in result.entries:
-            if e.slot is None and e.line_no in prev_slots:
-                e.slot = prev_slots[e.line_no]
+            if e.slot is not None:
+                continue
+            key = parser.normalize_line(e.text)
+            if key in prev_slots:
+                e.slot = prev_slots[key]
                 e.issues = [x for x in e.issues if "时段未指定" not in x]
 
     DAYS_DIR.mkdir(parents=True, exist_ok=True)

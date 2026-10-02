@@ -437,6 +437,21 @@ for _e in _fresh.entries:
         _e.slot = _prev_map[_e.line_no]
 check("重新解析后 slot 被保留", _fresh.entries[1].slot == "中午")
 
+# slot 保留的键**只能是正文**，不能用行号 —— 两次实测踩坑：
+#   ① 只用行号：编辑备忘录后行号位移，上一行号的时段被错套到别的条目；
+#   ② 行号+正文：行号一变就找不到，正确的选择被丢掉。
+check("slot 保留键用正文而非行号",
+      parser.normalize_line("甲") != parser.normalize_line("乙"))
+
+# 行号位移后仍能按正文找回（模拟删掉一行）
+_prev_by_text = {parser.normalize_line("乙"): "中午"}
+_after_edit = parser.parse("2026-10-02\n- [ ] 乙")   # 乙 从第3行变成第2行
+for _e in _after_edit.entries:
+    _k = parser.normalize_line(_e.text)
+    if _e.slot is None and _k in _prev_by_text:
+        _e.slot = _prev_by_text[_k]
+check("行号位移后仍按正文找回 slot", _after_edit.entries[1].slot == "中午")
+
 # 备忘录里已有时段时，应以备忘录为准（你自己写的优先）
 _fresh2 = parser.parse("2026-10-02\n@下午 甲")
 _prev2 = {1: "上午"}
