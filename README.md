@@ -76,7 +76,11 @@ python3 src/daily_report.py --no-push        # 只看内容，不推送
 
 # 5. 装成定时任务（21:30 日报 + 07:00 顺延）
 bash deploy/install_launchd.sh install
-bash deploy/install_launchd.sh test          # 立即触发一次，验证 launchd 下能否跑通
+bash deploy/install_launchd.sh test          # 验证链路（**不写入备忘录**）
+bash deploy/install_launchd.sh test --write  # 只在需要验证写入链路时用（会改备忘录）
+
+# 删掉误建的某天页面（精确匹配标题，多一个字都不删）
+bash deploy/delete-day.sh --title 2026-10-03
 
 # 查看备忘录访问状态
 python3 src/notes.py verify
@@ -136,6 +140,25 @@ TCC 授权绑定调用进程身份。`osascript` 用的是**终端**的授权，
 每天一份独立副本，出问题时你能看见丢了什么。
 
 ---
+
+## ⚠️ 一次真实事故：验证命令写入了数据
+
+安装完定时任务后，我让你跑 `install_launchd.sh test` 验证链路。当时的
+`test` 实现是无差别 `kickstart` 两个任务 —— 而顺延任务带 `--apply`，
+于是它**立即新建了「次日页」（2026-10-03）**，可 10-02 当天还没过完。
+
+后果不是数据损坏，而是**顺延清单基于不完整状态**：当晚你若再打钩完成某项，
+那条已经被写进次日页了，不会被撤回。
+
+两处修正：
+
+1. `test` 默认**不产生副作用**：手动以干跑方式跑一遍（只读 + 计划预览），
+   只有显式 `--write` 才通过 kickstart 触发真实的写入任务。
+2. 新增 `deploy/delete-day.sh` 用于精确删除误建的页面
+   （用 `is` 精确匹配标题，不是 `contains`/`starts with`）。
+
+教训：**"看似无害的检查"也可能有真实副作用**。凡是会写用户数据的任务，
+验证入口必须默认安全。
 
 ## 目录
 
