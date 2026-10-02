@@ -417,7 +417,34 @@ _plan, _ = _co.build_plan(_prev_all, None)
 check("留档里全部完成 → 不顺延任何条目", len(_plan) == 0)
 
 
-# ── 10. AppleScript 语法校验（osacompile，只编译不执行）
+# ── 10. slot 在重新解析时必须保留
+
+print("\n── 10. 重新解析时保留已设时段 ──")
+
+# 实测踩到的 bug：slot 有两个来源（备忘录里的 @时段、Telegram 按钮选的），
+# 而重新解析只能看到前者 —— 于是每次 --refresh 都会把按钮选的结果清掉，
+# 表现为"你设的时段过一会儿自己没了"。
+# 这里用真实 sync 模块的函数验证保留逻辑。
+_pg = parser.parse("2026-10-02\n- [ ] 甲\n- [ ] 乙")
+_pg.entries[1].slot = "中午"          # 模拟"按钮选的，落在留档里"
+_prev_map = {e.line_no: e.slot for e in _pg.entries if e.slot}
+
+_fresh = parser.parse("2026-10-02\n- [ ] 甲\n- [ ] 乙")
+for _e in _fresh.entries:
+    if _e.slot is None and _e.line_no in _prev_map:
+        _e.slot = _prev_map[_e.line_no]
+check("重新解析后 slot 被保留", _fresh.entries[1].slot == "中午")
+
+# 备忘录里已有时段时，应以备忘录为准（你自己写的优先）
+_fresh2 = parser.parse("2026-10-02\n@下午 甲")
+_prev2 = {1: "上午"}
+for _e in _fresh2.entries:
+    if _e.slot is None and _e.line_no in _prev2:
+        _e.slot = _prev2[_e.line_no]
+check("备忘录里的 @时段 优先于留档里旧的", _fresh2.entries[1].slot == "下午")
+
+
+# ── 11. AppleScript 语法校验（osacompile，只编译不执行）
 
 print("\n── 9. AppleScript 语法校验 ──")
 
@@ -455,9 +482,9 @@ check(f"{len(_as_templates)} 个 AppleScript 模板语法正确",
       not _as_fail, "；".join(_as_fail))
 
 
-# ── 11. 系统 Python 3.9 兼容性
+# ── 12. 系统 Python 3.9 兼容性
 
-print("\n── 11. 系统 Python 兼容性 ──")
+print("\n── 12. 系统 Python 兼容性 ──")
 
 # 为什么单独查这个：launchd 任务用的是 **/usr/bin/python3（3.9）**，
 # 而我平时用自带运行时（3.12）。若代码用了运行时求值的类型标注
@@ -469,7 +496,8 @@ import subprocess as _sp2  # noqa: E402
 
 _SYS_PY = "/usr/bin/python3"
 _modules = ["parse", "notes", "sync", "notify", "reminders", "push_tasks",
-            "cleanup", "daily_report", "read_day", "completion", "telegram"]
+            "cleanup", "daily_report", "read_day", "completion", "telegram",
+            "ask_slots"]
 
 if not os.path.exists(_SYS_PY):
     check("系统 python3 存在", False, f"找不到 {_SYS_PY}")
@@ -490,7 +518,7 @@ else:
 
 # ── 11. 密钥不进版本库
 
-print("\n── 12. 密钥保护检查 ──")
+print("\n── 13. 密钥保护检查 ──")
 
 # 为什么值得单独查：Telegram token 一旦被提交，等于把 bot 交给别人。
 # 加 telegram.py 时就发现 .gitignore 里**没有 .env** —— 而下一步就要往
@@ -506,9 +534,9 @@ _r = _sp2.run(["git", "check-ignore", ".env.example"], cwd=str(ROOT),
 check(".env.example 可被提交（它是模板）", _r.returncode != 0)
 
 
-# ── 13. shell 脚本静态检查：bash 3.2 的全角字符陷阱
+# ── 14. shell 脚本静态检查：bash 3.2 的全角字符陷阱
 
-print("\n── 13. shell 脚本检查 ──")
+print("\n── 14. shell 脚本检查 ──")
 
 # macOS 自带 bash 3.2 会把**全角字符的字节**当成变量名的一部分。
 # 于是 `echo "「$TARGET」"` 会去找名为 `TARGET」` 的变量，报

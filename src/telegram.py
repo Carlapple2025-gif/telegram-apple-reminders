@@ -125,6 +125,138 @@ def send(text: str, chat_id: str | None = None,
     return _call(token, "sendMessage", params)
 
 
+# ── 内联按钮（inline keyboard）
+#
+# 为什么用它：让用户在聊天里**逐个打字回复**太慢，条目多了根本受不了。
+# 按钮点一下就是一个决策，且能原地重绘（editMessageText）——
+# 于是可以做成"一屏一条 + 翻页"的选择器，而不是刷一长串消息。
+#
+# ⚠️ 实测硬限制：`callback_data` **最多 64 字节**（65 会被 API 拒绝）。
+# 所以回调编码必须紧凑，不能塞长文本或中文（中文一个字符占 3 字节）。
+
+CALLBACK_MAX_BYTES = 64
+
+
+def send_with_buttons(text: str, keyboard: list[list[tuple[str, str]]],
+                      chat_id: str | None = None) -> dict:
+    """
+    发一条带按钮的消息。
+
+    keyboard 形如 [[("上午", "s:0:am"), ("中午", "s:0:noon")], ...]，
+    每个按钮是 (显示文字, 回调数据)。
+    """
+    return _send_payload(text, keyboard, chat_id=chat_id)
+
+
+def edit_with_buttons(message_id: int, text: str,
+                      keyboard: list[list[tuple[str, str]]],
+                      chat_id: str | None = None) -> dict:
+    """
+    就地重绘一条消息（文字 + 按钮）。
+
+    这是"翻页"能成立的关键：改的是同一条消息，不产生新消息，
+    所以 4 条、40 条都只占一屏。
+    """
+    token, cfg_chat = load_config()
+    chat = chat_id or cfg_chat
+    payload = {
+        "chat_id": chat,
+        "message_id": message_id,
+        "text": text,
+        "reply_markup": _build_keyboard(keyboard),
+    }
+    return _call(token, "editMessageText", payload)
+
+
+def answer_callback(callback_id: str, text: str | None = None,
+                    alert: bool = False) -> None:
+    """
+    回应按钮点击。
+
+    **必须调用**：否则客户端上那个按钮会一直转圈，用户以为卡住了。
+    text 会在客户端顶部弹一个小提示（用于"已选：上午"这种即时反馈）。
+    """
+    token, _ = load_config()
+    params: dict = {"callback_query_id": callback_id}
+    if text:
+        params["text"] = text
+        params["show_alert"] = alert
+    try:
+        _call(token, "answerCallbackQuery", params, timeout=10)
+    except TelegramError:
+        # 回应失败不该中断主流程：用户至少还能看到界面已更新。
+        pass
+
+
+def _build_keyboard(keyboard: list[list[tuple[str, str]]]) -> dict:
+    rows = []
+    for row in keyboard:
+        btns = []
+        for label, data in row:
+            if len(data.encode("utf-8")) > CALLBACK_MAX_BYTES:
+                raise TelegramError(
+                    f"按钮回调数据超过 {CALLBACK_MAX_BYTES} 字节：{data[:40]}…"
+                )
+            btns.append({"text": label, "callback_data": data})
+        rows.append(btns)
+    return {"inline_keyboard": rows}
+
+
+def _send_payload(text: str, keyboard: list[list[tuple[str, str]]] | None,
+                  chat_id: str | None = None) -> dict:
+    token, cfg_chat = load_config()
+    chat = chat_id or cfg_chat
+    if not token:
+        raise TelegramError("没有 Telegram token（见 .env.example）")
+    if not chat:
+        raise TelegramError("没有 chat_id（先跑 telegram.py whoami）")
+    params: dict = {"chat_id": chat, "text": text}
+    if keyboard:
+        params["reply_markup"] = _build_keyboard(keyboard)
+    return _call(token, "sendMessage", params)
+
+
+def wait_for_callback(chat_id: str | None = None, timeout_sec: int = 300,
+                      poll_interval: int = 2) -> dict | None:
+    """
+    等一次按钮点击。返回 {'data', 'callback_id', 'message_id'}；超时返回 None。
+
+    与 wait_for_reply 一样，**先消费历史更新**再等待 ——
+    否则会把几天前点过的按钮当成这次的输入。
+    """
+    token, cfg_chat = load_config()
+    chat = chat_id or cfg_chat
+
+    try:
+        history = get_updates(limit=100)
+        offset = (max(u["update_id"] for u in history) + 1) if history else None
+    except TelegramError:
+        offset = None
+
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        try:
+            updates = get_updates(offset=offset, timeout=poll_interval)
+        except TelegramError:
+            time.sleep(poll_interval)
+            continue
+        for u in updates:
+            offset = u["update_id"] + 1
+            cb = u.get("callback_query")
+            if not cb:
+                continue
+            msg_chat = str((cb.get("message") or {}).get("chat", {}).get("id", ""))
+            if chat and msg_chat and msg_chat != str(chat):
+                continue
+            return {
+                "data": cb.get("data") or "",
+                "callback_id": cb.get("id") or "",
+                "message_id": (cb.get("message") or {}).get("message_id"),
+            }
+        time.sleep(poll_interval)
+    return None
+
+
 # ── 接收
 
 def get_updates(offset: int | None = None, timeout: int = 0,

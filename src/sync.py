@@ -56,6 +56,20 @@ def sync_day(date_str: str, notes: Notes | None = None) -> SyncResult | None:
     if result.date is None:
         result.date = date_str
 
+    # 保留上一次解析出的 slot。
+    #
+    # 为什么必须做：slot 有两个来源 —— ① 你写在备忘录里的 `@时段`；
+    # ② 你通过 Telegram 按钮选的（落在留档 JSON 里，备忘录原文不动）。
+    # 重新解析只能看到 ①，于是每次 --refresh 都会把 ② 清掉，
+    # 表现为"你设的时段过一会儿自己没了"。实测踩到过。
+    prev = load_archive(date_str)
+    if prev is not None:
+        prev_slots = {e.line_no: e.slot for e in prev.entries if e.slot}
+        for e in result.entries:
+            if e.slot is None and e.line_no in prev_slots:
+                e.slot = prev_slots[e.line_no]
+                e.issues = [x for x in e.issues if "时段未指定" not in x]
+
     DAYS_DIR.mkdir(parents=True, exist_ok=True)
     md_path = DAYS_DIR / f"{date_str}.md"
     json_path = DAYS_DIR / f"{date_str}.json"
