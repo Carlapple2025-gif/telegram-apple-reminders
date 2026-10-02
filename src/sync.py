@@ -111,6 +111,28 @@ def load_archive(date_str: str) -> parser.ParseResult | None:
     return parser.ParseResult(date=data.get("date"), entries=entries)
 
 
+def save_archive(date_str: str, result: parser.ParseResult) -> Path:
+    """
+    把（可能被回填过的）解析结果写回留档 JSON。
+
+    为什么需要它：完成状态的权威在提醒事项，而**顺延在次日早上读的是留档**。
+    如果 21:30 解析出的状态只留在内存里，顺延看到的就还是备忘录里的旧标记 ——
+    于是你昨晚打的钩会失效，做完的事被顺延到第二天。
+
+    counts 由 ParseResult 现算，所以会跟着更新后的状态走。
+    """
+    DAYS_DIR.mkdir(parents=True, exist_ok=True)
+    json_path = DAYS_DIR / f"{date_str}.json"
+    payload = result.to_dict()
+    meta = archive_meta(date_str)
+    if meta:
+        payload["_meta"] = meta
+    json_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return json_path
+
+
 def archive_meta(date_str: str) -> dict:
     p = DAYS_DIR / f"{date_str}.json"
     if not p.is_file():

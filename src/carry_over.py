@@ -21,8 +21,16 @@
 
 **只在当天页不存在时才新建。** 已存在就追加 —— 避免覆盖你当天已经写的内容。
 
-**已完成的项不会被顺延。** 22:30 推送提醒你去补打钩，正是为了让这一步拿到
-准确的完成状态。你打完钩再顺延，就不会把做完的事带到明天。
+**已完成的项不会被顺延。**
+
+完成状态从哪来（重要）：
+    权威是**提醒事项的 `completed`**，不是备忘录里的 `[x]`。
+    流程上：21:30 日报会 `completion.resolve()` 出权威状态、回填进留档 JSON，
+    而本脚本次日 07:00 读的就是那份留档 —— 所以顺延拿到的是你昨晚打完钩之后的
+    真实状态。
+
+    如果 21:30 那次没跑成（或你想立刻用最新状态），加 `--resolve` 现场重新
+    从提醒事项解析一次。
 """
 
 from __future__ import annotations
@@ -131,6 +139,8 @@ def main() -> int:
     ap.add_argument("--next", help="覆盖次日日期（默认来源日期 +1）")
     ap.add_argument("--offline", action="store_true",
                     help="不查备忘录，假定次日页不存在（用于离线验证计划生成）")
+    ap.add_argument("--resolve", action="store_true",
+                    help="现场从提醒事项重新解析完成状态（默认用留档里的回填结果）")
     args = ap.parse_args()
 
     src_date_str = args.date or dt.date.today().isoformat()
@@ -162,6 +172,23 @@ def main() -> int:
             return 1
         prev = parser.parse(note.plaintext)
         source_desc = "备忘录"
+
+    # ── 完成状态：权威是提醒事项
+    # 默认直接用留档里的 completed（21:30 日报已回填过，含你打完钩的状态）。
+    # --resolve 时现场再解析一次，用于"日报没跑成"或"想立刻用最新状态"。
+    if args.resolve or source_desc == "备忘录":
+        import completion
+        resolved = completion.resolve(prev, sync.archive_meta(src_date_str).get("note_id", ""))
+        changed = completion.write_back(prev, resolved)
+        if resolved.reminders_available:
+            if changed:
+                sync.save_archive(src_date_str, prev)
+            print(f"完成状态：已从提醒事项解析（修正 {changed} 条）")
+        else:
+            print(f"⚠️  提醒事项不可用（{resolved.reminders_error}），"
+                  f"退回用备忘录标记判断")
+    else:
+        print("完成状态：取自留档（21:30 日报已回填）")
 
     print(f"来源：{source_desc}（{src_date_str}）")
     print(f"  待办 {len(prev.todos)} 条，其中未完成 {len(prev.open_todos)} 条")

@@ -394,7 +394,30 @@ _n = _completion.write_back(_pg3, _completion.resolve(_pg3, _CNOTE, _FakeReminde
 check("回填留档只改有差异的条目", _n == 1 and [e.completed for e in _pg3.todos] == [False, True, False])
 
 
-# ── 9. AppleScript 语法校验（osacompile，只编译不执行）
+# ── 9. 顺延的完成状态来自留档（权威链路的落点）
+
+print("\n── 9. 顺延依据留档里的完成状态 ──")
+
+# 这是整条权威链路的关键一环：
+#   21:30 日报 resolve(提醒事项) → write_back → save_archive（落盘）
+#   → 次日 07:00 顺延读留档 → 只带走未完成的
+# 若这一环断了，你昨晚打的钩会失效、做完的事被顺延到明天。
+_prev_done = parser.parse("2026-10-02\n- [ ] 甲\n- [ ] 乙")
+_prev_done.entries[2].completed = True   # 模拟"留档里乙已完成（来自提醒事项）"
+import carry_over as _co  # noqa: E402
+_plan, _ = _co.build_plan(_prev_done, None)
+check("留档标记为完成的条目不参与顺延",
+      len(_plan) == 1 and "甲" in _plan[0], f"实际 {_plan}")
+
+# 全部完成 → 无事可做
+_prev_all = parser.parse("2026-10-02\n- [ ] 甲\n- [ ] 乙")
+for _e in _prev_all.entries:
+    _e.completed = True
+_plan, _ = _co.build_plan(_prev_all, None)
+check("留档里全部完成 → 不顺延任何条目", len(_plan) == 0)
+
+
+# ── 10. AppleScript 语法校验（osacompile，只编译不执行）
 
 print("\n── 9. AppleScript 语法校验 ──")
 
@@ -432,9 +455,9 @@ check(f"{len(_as_templates)} 个 AppleScript 模板语法正确",
       not _as_fail, "；".join(_as_fail))
 
 
-# ── 10. 系统 Python 3.9 兼容性
+# ── 11. 系统 Python 3.9 兼容性
 
-print("\n── 10. 系统 Python 兼容性 ──")
+print("\n── 11. 系统 Python 兼容性 ──")
 
 # 为什么单独查这个：launchd 任务用的是 **/usr/bin/python3（3.9）**，
 # 而我平时用自带运行时（3.12）。若代码用了运行时求值的类型标注
@@ -467,7 +490,7 @@ else:
 
 # ── 11. 密钥不进版本库
 
-print("\n── 11. 密钥保护检查 ──")
+print("\n── 12. 密钥保护检查 ──")
 
 # 为什么值得单独查：Telegram token 一旦被提交，等于把 bot 交给别人。
 # 加 telegram.py 时就发现 .gitignore 里**没有 .env** —— 而下一步就要往
@@ -483,9 +506,9 @@ _r = _sp2.run(["git", "check-ignore", ".env.example"], cwd=str(ROOT),
 check(".env.example 可被提交（它是模板）", _r.returncode != 0)
 
 
-# ── 12. shell 脚本静态检查：bash 3.2 的全角字符陷阱
+# ── 13. shell 脚本静态检查：bash 3.2 的全角字符陷阱
 
-print("\n── 12. shell 脚本检查 ──")
+print("\n── 13. shell 脚本检查 ──")
 
 # macOS 自带 bash 3.2 会把**全角字符的字节**当成变量名的一部分。
 # 于是 `echo "「$TARGET」"` 会去找名为 `TARGET」` 的变量，报

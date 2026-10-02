@@ -144,6 +144,12 @@ def main() -> int:
     # ── 合并完成状态（权威 = 提醒事项）
     resolved = completion.resolve(result, note_id)
 
+    # 回填并**持久化**到留档 —— 顺延在次日早上读的就是它。
+    # 不落盘的话，你今晚打的钩会失效，做完的事会被顺延到明天。
+    changed = completion.write_back(result, resolved)
+    if changed:
+        sync.save_archive(date_str, result)
+
     try:
         from reminders import Reminders
         reminders_list = Reminders().list_name
@@ -159,6 +165,11 @@ def main() -> int:
 
     if not resolved.reminders_available:
         print(f"⚠️  提醒事项不可用：{resolved.reminders_error}")
+    if changed:
+        print(f"（已回填 {changed} 条完成状态并写入留档）")
+    if resolved.not_pushed:
+        print(f"（{len(resolved.not_pushed)} 条尚未同步到提醒事项，"
+              f"本次按备忘录标记判断）")
 
     if args.no_push:
         return 0
