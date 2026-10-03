@@ -1687,8 +1687,6 @@ try:
     # 待补充项落盘 → 按钮不依赖内存（进程重启后照样能用）
     _dm.save_pending(42, "帮我看下那个表")
     check("待补充项可读回", _dm.load_pending() == "帮我看下那个表")
-    check("按消息号校验：属于这条消息时能读到",
-          _dm.load_pending(42) == "帮我看下那个表")
 
     # ⚠️ **只有一个槽位**：这条断言锁住"不需要猜接哪一条"这个设计。
     # 曾经按消息号各存一份，于是"点按钮 → 系统追问 → 用户补时间"
@@ -1697,18 +1695,26 @@ try:
     _dm.save_pending(77, "后来的一条")
     check("新的一条会顶掉旧的（只有一个槽位）",
           _dm.load_pending() == "后来的一条", str(_dm.load_pending()))
-    check("旧消息号的按钮已失效（不会删错东西）",
-          _dm.load_pending(42) is None)
-    _dm.clear_pending(42)
-    check("旧按钮点击不会清掉当前槽位",
-          _dm.load_pending() == "后来的一条")
+
+    # ⚠️ 而且按钮**必须解析当前槽位，不能拿消息号去卡**。
+    # 踩到过：追问是另一条新消息，槽位在那个消息号上，按钮却绑原消息号，
+    # 于是点任何一个都只回"这条已经处理过了（或已过期）"，
+    # 而追问文案还在说"点下面的按钮"—— 用户点下去就是撞墙。
+    # 只有一个槽位，"当前那个"就是唯一答案。
+    check("按钮不靠消息号卡（能解析当前槽位）",
+          _dm.load_pending(12345) == "后来的一条",
+          "用别的消息号也应解析到唯一的当前槽位")
+    _dm.clear_pending(12345)
+    check("清槽位也不靠消息号卡",
+          _dm.load_pending() is None)
 
     # 过期的待补充不再认（隔一天的"补时间"接上去只会更困惑）
-    _rec = _json2.loads(_dm._pending_path().read_text(encoding="utf-8"))
-    _rec["at"] = (_dt2.datetime.now()
-                  - _dt2.timedelta(hours=_dm.PENDING_TTL_HOURS + 1)).isoformat()
-    _dm._pending_path().write_text(_json2.dumps(_rec, ensure_ascii=False),
-                                   encoding="utf-8")
+    _dm.PENDING_DIR.mkdir(parents=True, exist_ok=True)
+    _dm._pending_path().write_text(_json2.dumps(
+        {"text": "过期的那条", "msg_id": 9,
+         "at": (_dt2.datetime.now()
+                - _dt2.timedelta(hours=_dm.PENDING_TTL_HOURS + 1)).isoformat()},
+        ensure_ascii=False), encoding="utf-8")
     check("过期（超 TTL）的待补充不再认", _dm.load_pending() is None,
           "过期的补时间接上去只会更让人困惑")
 
@@ -1839,6 +1845,70 @@ finally:
      _dm.tg.send_with_buttons, _dm.tg.answer_callback) = _saved
     _sh2.rmtree(_d, ignore_errors=True)
     _sh2.rmtree(_dm_dir2, ignore_errors=True)
+
+
+section("v4 整链：追问之后按钮仍然点得动")
+
+# ⚠️ 这一段是 subagent 审出来的 bug：追问那一步把槽位挪到了**追问消息号**，
+# 按钮却仍绑**原消息号** —— 两组按钮的 callback_data 全对不上槽位，
+# 点任何一个都只回"这条已经处理过了（或已过期）"，
+# 而追问自己的文案还在说"（要改成待办/备忘，点下面的按钮）"。
+#
+# 只有"直接发一句时间"（文本路径）是通的 —— 所以上一条整链测试
+# **测不到**它：那条路径没有点按钮。又一次说明"每一层都对，接起来仍可能错"。
+_d = _fresh_journal()
+_dm_dir3 = _P2(_tf2.mkdtemp())
+_saved3 = (_dm.PENDING_DIR, _dm._make_intake, _dm.tg.send,
+           _dm.tg.send_with_buttons, _dm.tg.answer_callback)
+_dm.PENDING_DIR = _dm_dir3 / "pending"
+try:
+    _sent3 = []
+    _mids3 = [2000]
+    _kb_seen = []
+
+    def _swb3(_t, _kb):
+        _mids3[0] += 1
+        _sent3.append(_t)
+        _kb_seen.append(_kb)
+        return {"message_id": _mids3[0]}
+
+    _wrote3 = []
+    _dm._make_intake = lambda: _it.Intake(
+        add_todo=lambda t, w=None: (_wrote3.append(("todo", t)), "T1")[1],
+        add_event=lambda s, a, b, **k: (_wrote3.append(("event", s, a)), "E1")[1],
+        add_memo=lambda t: (_wrote3.append(("memo", t)), "M1")[1],
+        testing=True)
+    _dm.tg.send = lambda t: _sent3.append(t)
+    _dm.tg.send_with_buttons = _swb3
+    _dm.tg.answer_callback = lambda *a, **k: None
+
+    # ① 判不准 → 按钮
+    _dm.handle_message("测试Apple- agent稳定性", 84, "chat")
+    # ② 点「日程」→ 缺时间 → 追问 + 槽位仍在
+    _dm._handle_callback("e:84", "cb1", "chat")
+    check("追问后：槽位仍在等补充", _dm.load_pending() == "测试Apple- agent稳定性")
+    check("追问后：又发了一组按钮给用户", len(_kb_seen) >= 2,
+          f"共发了 {len(_kb_seen)} 组按钮")
+
+    # ③ **点追问那组按钮** —— callback_data 里的消息号与槽位里的并不相同
+    _slot_mid = _dm._load_pending_record().get("msg_id")
+    _btn_mid = int(_kb_seen[-1][0][0][1].split(":")[1])
+    check("（前提）按钮消息号与槽位消息号确实不同 —— 正是当初撞墙的条件",
+          _btn_mid != _slot_mid,
+          f"按钮={_btn_mid} 槽位={_slot_mid}")
+    _dm._handle_callback(f"t:{_btn_mid}", "cb2", "chat")
+    check("追问后的按钮点得动（不再回'已经处理过了'）",
+          "已经处理过了" not in _sent3[-1], _sent3[-1])
+    check("追问后的按钮真的写入了",
+          _wrote3 and _wrote3[-1][0] == "todo", str(_wrote3))
+    check("追问后的按钮用的是原来那条的原文",
+          _wrote3[-1][1] == "测试Apple- agent稳定性", repr(_wrote3[-1][1]))
+    check("用掉后槽位清空", _dm.load_pending() is None)
+finally:
+    (_dm.PENDING_DIR, _dm._make_intake, _dm.tg.send,
+     _dm.tg.send_with_buttons, _dm.tg.answer_callback) = _saved3
+    _sh2.rmtree(_d, ignore_errors=True)
+    _sh2.rmtree(_dm_dir3, ignore_errors=True)
 
 
 check("真实自检用分钟精度断言（与 applecal.add 一致）",
@@ -2241,7 +2311,16 @@ check("日报含未完成段", "⏳ 未完成 2 件" in _b6)
 check("日报含明日日程", "📅 明日日程 1 项" in _b6 and "14:00" in _b6)
 check("日报含日程地点", "@会议室" in _b6)
 check("日报含备忘提醒", "📝 备忘放了 3 天以上" in _b6 and "荷载要按名称命名" in _b6)
-check("日报说明如何消除备忘提醒", "删掉即可" in _b6)
+# ⚠️ 这里原本断言的是"删掉即可，之后不再提醒"—— 而**那句话是假的**：
+# ARCHITECTURE §四设计的"感知路径"（只读快照 → 与 journal 差集 →
+# memo_cleared → 永不再提醒）没有任何生产代码接上，
+# 只有自检与 tools 用过 memo.snapshot()。于是删掉备忘，日报照旧天天提醒。
+#
+# 判据改成：**不许承诺尚未实现的功能**。等真正接上差集，
+# 再把这条断言换成"删掉之后不再出现"（那才是该验的东西）。
+check("日报不承诺未实现的'删掉就不再提醒'",
+      "删掉即可" not in _b6 and "不再提醒" not in _b6,
+      "感知路径没接上，这句话目前是假的")
 
 # 全部完成 → 不该出现"未完成"段
 _t7, _b7 = _rp.build_report(_rp.ReportData(date=_RD, todos=[_rp.Todo("甲", True)]))

@@ -142,13 +142,15 @@ def _pending_path() -> Path:
 def save_pending(msg_id: int, text: str) -> None:
     """把"当前待补充的那条"存下来（**替换**掉上一份）。"""
     try:
+        # 写之前先确保目录在 —— 实测被自检打脸过：目录被清掉后
+        # 这里直接 FileNotFoundError 抛出，而它跑在收件主路径上。
         PENDING_DIR.mkdir(parents=True, exist_ok=True)
         _pending_path().write_text(
             json.dumps({"text": text, "msg_id": msg_id,
                         "at": dt.datetime.now().isoformat()},
                        ensure_ascii=False), encoding="utf-8")
     except OSError as e:
-        # 存不下不该让收件失败（与 journal 同一条原则：日志/状态坏了不影响主流程）
+        # 存不下不该让收件失败（与 journal 同一条原则：状态坏了不影响主流程）
         _log(f"待补充状态保存失败（不影响回执）：{_trunc(str(e))}")
 
 
@@ -197,31 +199,32 @@ def load_pending(msg_id: int | None = None) -> str | None:
     """
     取"当前待补充"的原文。
 
-    传 `msg_id` 时只在该记录正属于这条消息时才返回 ——
-    按钮回调靠它判断"这个按钮是否已过期/已被别的条目顶掉"。
+    `msg_id` 是**兼容参数**：只有一个槽位，"当前槽位"就是唯一答案，
+    所以这里不再拿消息号去卡。踩过的坑：追问是**另一条新消息**，
+    按钮却绑在原消息号上，两边一对不上，用户点按钮只得到
+    "这条已经处理过了（或已过期）"—— 而追问文案还在让他点按钮。
+    与其维护"哪个 id 才算数"，不如让按钮就解析当前槽位（TTL 负责挡过期）。
     """
     rec = _load_pending_record()
     if rec is None:
-        return None
-    if msg_id is not None and rec.get("msg_id") != msg_id:
         return None
     return rec.get("text")
 
 
 def clear_pending(msg_id: int | None = None) -> None:
     """
-    清掉待补充项。
+    清掉待补充项（清的就是"当前那个"，只有一个）。
 
     ⚠️ 这是本模块唯一的删除动作，删的是**自己刚写的临时文件**，
     不碰任何 Apple 应用里的东西 —— 不违反"agent 不删"的约束。
 
-    传 `msg_id` 时只清"确实属于这条消息"的那份，
-    避免旧的按钮点击把新的待补充项误删。
+    `msg_id` 保留为兼容参数，仅记一行日志（见 load_pending 的说明）。
     """
     if msg_id is not None:
         rec = _load_pending_record()
-        if rec is None or rec.get("msg_id") != msg_id:
-            return
+        if rec is not None and rec.get("msg_id") not in (None, msg_id):
+            _log(f"清槽位的调用来自 msg {msg_id}，槽位属于 "
+                 f"msg {rec.get('msg_id')} —— 仍是同一个槽位，照清")
     p = _pending_file()
     if p is None:
         return
@@ -272,15 +275,22 @@ def _handle_callback(data: str, callback_id: str, chat: str) -> None:
         # 又会把它当成新的一条日程（标题变成「上午九点」）。
         #
         # 实测踩到过：端到端跑一遍，按钮这一步清了标记，下一步果然没接上。
-        # 追问是**新发出的一条消息**，所以槽位的 msg_id 要跟着挪到追问上，
-        # 让"回追问"这条路能接住（回原消息那条路也仍然通，
-        # 因为槽位里存的原文没变、按钮只认原文）。
+        #
+        # ⚠️ 这里也踩过一次"按钮绑错消息号"：槽位挪到追问那条消息，
+        # 按钮却仍绑原消息号，于是点任何一个都只回"这条已经处理过了"，
+        # 而追问文案还在说"点下面的按钮"。
+        # 修法不是在两个 id 之间对齐（追问消息号要等发送返回才知道，
+        # 很容易再错一次），而是让**按钮就解析当前槽位**（见 load_pending）。
+        # 只有一个槽位，所以"当前那个"就是唯一答案，不需要 id 对齐。
         ask_msg_id = None
         try:
-            r = tg.send_with_buttons("回一句时间就行：", _ask_keyboard(msg_id))
+            r = tg.send_with_buttons("回一句时间就行：",
+                                     _ask_keyboard(msg_id))
             ask_msg_id = r.get("message_id") if isinstance(r, dict) else None
         except Exception as e:  # noqa: BLE001
             _log(f"追问按钮发送失败（文字已发出，不影响）：{_trunc(str(e))}")
+
+        # 槽位记下"追问那条消息号"只为排查方便；解析不依赖它
         save_pending(int(ask_msg_id) if ask_msg_id else msg_id, text)
         journal.append("button_resolved", text=text, kind=kind.value,
                        ok=out.ok, needs_more=True)

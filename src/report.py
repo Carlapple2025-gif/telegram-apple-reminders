@@ -127,7 +127,16 @@ def build_report(data: ReportData) -> tuple[str, str]:
         lines.append(f"📝 备忘放了 {MEMO_NAG_DAYS} 天以上，还没处理：")
         for m in data.memos:
             lines.append(f"　{m.text}")
-        lines.append("　（处理完在备忘录里删掉即可，之后不再提醒）")
+        # ⚠️ 这里曾经写的是"处理完在备忘录里删掉即可，之后不再提醒"——
+        # **那句话当时是假的**：架构里设计得很清楚（只读快照 → 与 journal
+        # 做差集 → 记 memo_cleared → 永不再提醒），但那条"感知路径"
+        # 没有任何生产代码接上（只有自检与 tools 用过 memo.snapshot）。
+        # 于是你删掉备忘，日报照样天天提醒它 —— 而且回执还在骗你说不会。
+        #
+        # 先改成如实描述：这个清单来自 journal 台账，删掉不会让它消失。
+        # 真正接上差集之前，不要写"之后不再提醒"。
+        lines.append("　（这个清单来自台账，删掉不会自动消失 —— "
+                     "暂时请忽略已处理的条目）")
         lines.append("")
 
     if data.errors:
