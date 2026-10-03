@@ -53,7 +53,51 @@ from pathlib import Path
 
 # 项目根（本文件在 src/ 下）
 ROOT = Path(__file__).resolve().parent.parent
-JOURNAL_DIR = ROOT / "data" / "journal"
+
+# 用户日志目录。**支持环境变量覆盖**，这是给测试用的安全阀。
+#
+# 为什么需要：实测踩到 —— 我用 `daemon._OFFLINE = True` 验证离线模式时，
+# 忘了把 JOURNAL_DIR 指到临时目录，于是 7 条测试记录直接写进了
+# **真实的** data/journal/。后果不只是脏数据：日报的"防遗忘"读的就是
+# 这份台账，污染会让它提醒一条根本不存在的事。
+#
+# 所以在测试里显式设：
+#     PDCA_JOURNAL_DIR=$(mktemp -d) python3 ...
+JOURNAL_DIR = Path(
+    os.environ.get("PDCA_JOURNAL_DIR") or (ROOT / "data" / "journal")
+)
+
+
+class JournalContaminationError(RuntimeError):
+    """测试代码试图往真实日志里写（防止污染用户数据）。"""
+
+
+def assert_not_real(why: str = "") -> None:
+    """
+    断言当前写的**不是**真实日志目录。测试与离线演示前调用。
+
+    这不是"防呆"而是"防污染"：真实 journal 是日报"防遗忘"的数据源，
+    混进测试数据会让它提醒不存在的事，而那种错误很难被发现
+    （看起来只是一条普通记录）。
+    """
+    real = (ROOT / "data" / "journal").resolve()
+    try:
+        cur = JOURNAL_DIR.resolve()
+    except OSError:
+        return
+    if cur == real and not os.environ.get("PDCA_ALLOW_REAL_JOURNAL"):
+        raise JournalContaminationError(
+            f"拒绝写入真实日志目录（{why or '未说明原因'}）。\n"
+            f"测试请设 PDCA_JOURNAL_DIR 指向临时目录；\n"
+            f"确实要写真实日志时设 PDCA_ALLOW_REAL_JOURNAL=1。")
+
+
+def is_real_dir() -> bool:
+    """当前是否指向真实日志目录（供自检判断）。"""
+    try:
+        return JOURNAL_DIR.resolve() == (ROOT / "data" / "journal").resolve()
+    except OSError:
+        return False
 
 # 事件类型。用常量避免拼错 —— 拼错的事件类型会静默地永远匹配不上。
 EV_INPUT = "input"            # 你的原始输入（原样保存，便于复盘）
@@ -88,7 +132,14 @@ def append(event: str, **fields) -> dict:
     ⚠️ 这个函数**只追加**，不会读取或修改任何已有内容 ——
     这是"传感器"定位的直接体现。哪怕传入的数据是错的，
     也只是多一条错记录，不会破坏历史。
+
+    ⚠️ 它是**唯一的写入点**，所以污染防护也放在这里。
+    曾经把断言放在调用方（daemon 的离线模式）—— 结果 `log_input`
+    直接调用绕过了它，真实日志照样被写（实测：写进去了 1 条）。
+    防护必须守在数据出口，不能靠调用方自觉。
     """
+    assert_not_real(f"event={event}")
+
     rec = {"at": now_iso(), "event": event}
     rec.update(fields)
 

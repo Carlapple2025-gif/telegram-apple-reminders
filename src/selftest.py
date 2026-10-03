@@ -922,6 +922,18 @@ check("纯空白 → None", _cls.classify("   ", _B) is None)
 section("v4 用户日志（journal）")
 
 _jr = _load(SRC / "journal.py")
+
+# ⚠️ 自检**必须**把 journal 指到临时目录。
+# 实测踩到：离线模式那一段忘了重定向，7 条测试记录写进了**真实**的
+# data/journal/ —— 而日报的"防遗忘"读的就是这份台账，污染会让它
+# 提醒一条根本不存在的事（且很难发现，看起来只是普通记录）。
+import pathlib as _plB  # noqa: E402
+import tempfile as _tfB  # noqa: E402
+_SELFTEST_JOURNAL = _plB.Path(_tfB.mkdtemp(prefix="pdca-selftest-journal-"))
+_jr.JOURNAL_DIR = _SELFTEST_JOURNAL / "journal"
+if _jr.is_real_dir():
+    raise SystemExit("❌ 自检未能把 journal 重定向到临时目录，拒绝继续"
+                     "（否则会污染真实数据）")
 import json as _json2  # noqa: E402
 import tempfile as _tf2  # noqa: E402
 import shutil as _sh2  # noqa: E402
@@ -1664,12 +1676,52 @@ check("重试日志只取首行",
       "splitlines()[0]" in _dm_src or "_trunc" in _run_once)
 
 
+section("日志污染防护")
+
+# 真实 journal 是日报"防遗忘"的数据源。混进测试数据会让它提醒
+# 不存在的事，而且很难发现（看起来只是一条普通记录）。
+# 实测踩到：离线模式那段测试写了 7 条测试记录进真实目录。
+check("journal 支持环境变量覆盖目录",
+      "PDCA_JOURNAL_DIR" in (SRC / "journal.py").read_text(encoding="utf-8"))
+check("journal 提供污染断言", hasattr(_jr, "assert_not_real"))
+# 断言必须在**唯一写入点** append() 里 ——
+# 曾经放在调用方（daemon 离线模式），结果 log_input 直调绕过了它。
+_jr_src = (SRC / "journal.py").read_text(encoding="utf-8")
+_append_body = _jr_src[_jr_src.index("def append("):_jr_src.index("def log_input(")]
+check("污染断言在唯一写入点 append() 内",
+      "assert_not_real" in _append_body,
+      "断言不在 append 里 → 直调会绕过防护")
+check("journal 提供真实目录判断", hasattr(_jr, "is_real_dir"))
+
+# 自检自己必须跑在临时目录上
+check("自检的 journal 指向临时目录", not _jr.is_real_dir(),
+      f"当前 {_jr.JOURNAL_DIR}")
+
+# 断言真的会拦（在真实目录上调用应当抛错）
+_real = _jr.JOURNAL_DIR
+try:
+    import os as _osB  # noqa: E402
+    _jr.JOURNAL_DIR = _jr.ROOT / "data" / "journal"
+    _osB.environ.pop("PDCA_ALLOW_REAL_JOURNAL", None)
+    try:
+        _jr.assert_not_real("自检")
+        _blocked = False
+    except _jr.JournalContaminationError:
+        _blocked = True
+    check("往真实目录写会被拦住", _blocked)
+finally:
+    _jr.JOURNAL_DIR = _real
+
+
 section("v4 守护的离线模式")
 
 # 离线模式让"没有授权"时也能看到整条链路怎么工作（回执文案、分类结果、
 # 日志记录），对首次上手和排查都很有用。它必须**真的不写入**。
 _dm._OFFLINE = True
 try:
+    # 离线模式会往 journal 记东西；断言它此刻不是真实目录。
+    # 这一步就是踩过的坑（污染了 7 条真实记录）。
+    _jr.assert_not_real("自检的离线模式测试")
     _oit = _dm._make_intake()
     _oout = _oit.handle("明天交电费", _B)
     check("离线模式：有回执", _oout.ok and "待办" in _oout.reply)

@@ -235,6 +235,11 @@ def _make_intake() -> Intake:
         calls.append(f"备忘录 ← {text}")
         return "OFFLINE-MEMO"
 
+    # 离线模式会往 journal 记东西 —— 但那是**测试性质**的写入。
+    # 真实 journal 是日报"防遗忘"的数据源，混进测试数据会让它提醒
+    # 不存在的事。所以离线模式必须写到临时目录（实测踩过污染）。
+    journal.assert_not_real("daemon 离线模式")
+
     it = Intake(add_todo=_t, add_event=_e, add_memo=_m)
     it._offline_calls = calls        # 供回执里展示"会写到哪里"
     return it
