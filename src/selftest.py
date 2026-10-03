@@ -1534,6 +1534,40 @@ check("时间戳解析：空字符串返回 None", _rp._parse_at("") is None)
 check("时间戳解析：垃圾返回 None", _rp._parse_at("不是时间") is None)
 
 
+section("v4 安装脚本")
+
+_inst_path = ROOT / "deploy" / "install_launchd.sh"
+_inst = _inst_path.read_text(encoding="utf-8")
+
+# 只装 v4 的两个任务（v1 的三个 plist 文件保留但不再安装）
+check("安装脚本只装 daemon 与 report",
+      "LABELS=(com.carl.pdca.daemon com.carl.pdca.report)" in _inst)
+check("安装脚本不再包含 v1 的任务",
+      "com.carl.pdca.carryover" not in _inst
+      and "com.carl.pdca.sync" not in _inst)
+
+# v1 的 test 会跑 daily_report/carry_over —— v4 必须换成新入口，
+# 否则"验证安装"验证的是已经不用了的代码
+check("安装脚本的 test 跑新入口",
+      "src/report.py" in _inst and "src/daemon.py" in _inst)
+check("安装脚本的 test 不再跑 v1 入口",
+      "daily_report.py" not in _inst and "carry_over.py" not in _inst)
+
+# 验证据说不能顺手发一条重复日报
+check("test 用 --no-push（不重复推送）", "--no-push" in _inst)
+
+# preflight 要检查 v4 需要的配置项，并给出可执行的下一步
+check("preflight 检查备忘文件夹配置", "memo_folder_id" in _inst)
+check("preflight 检查日历配置", "calendar_name" in _inst)
+check("preflight 指出去哪初始化", "setup-v4.sh" in _inst)
+
+# doctor 的权限探测同样必须真实读取（与 setup 脚本一致）
+check("doctor 真实读取权限", "count of folders" in _inst)
+
+# 用系统 python3（与 launchd 一致，避免"手动能跑、定时跑不了"）
+check("安装脚本用系统 python3", 'PYTHON="/usr/bin/python3"' in _inst)
+
+
 section("v4 初始化脚本")
 
 # 初始化脚本把"有依赖顺序、容易漏"的步骤串起来。漏了的表现很隐蔽
