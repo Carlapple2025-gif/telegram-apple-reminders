@@ -1534,6 +1534,51 @@ check("时间戳解析：空字符串返回 None", _rp._parse_at("") is None)
 check("时间戳解析：垃圾返回 None", _rp._parse_at("不是时间") is None)
 
 
+section("v4 初始化脚本")
+
+# 初始化脚本把"有依赖顺序、容易漏"的步骤串起来。漏了的表现很隐蔽
+# （没建「备忘」文件夹时，备忘那一路会一直失败，得翻日志才发现）。
+_setup = (ROOT / "deploy" / "setup-v4.sh")
+check("存在 deploy/setup-v4.sh", _setup.is_file())
+
+_st = _setup.read_text(encoding="utf-8")
+
+# 必须默认干跑：初始化会改动备忘录结构与日历
+# 判据要写准：`--apply` 在脚本里是 case 分支（不带引号），
+# 而"默认干跑"体现在 MODE 的默认值上。
+check("初始化默认干跑（--apply 才改）",
+      "--apply) APPLY=1" in _st and 'MODE="干跑' in _st)
+# 必须幂等：重复运行安全
+check("初始化脚本声明幂等", "幂等" in _st)
+
+# ⚠️ 权限探测必须**真正读取数据**，不能只问 App 名字。
+# 踩到过：`tell application "Notes" to return name` 会成功（只证明 App 存在），
+# 而任何读取都报 -10004 —— 于是检查给出虚假的"✅ 可访问"，
+# 让人以为配好了、实际每步都在失败。
+check("权限探测读的是数据而非 App 名",
+      "count of folders" in _st and "count of calendars" in _st
+      and "count of lists" in _st)
+# 排除注释：脚本里**故意**在注释中引用了 `to return name` 这个错误写法
+# 作为反例说明。扫描器不排除注释就会自我误报（这个坑踩过多次）。
+_st_code = "\n".join(l for l in _st.splitlines() if not l.lstrip().startswith("#"))
+check("权限探测不再用 return name", "to return name" not in _st_code)
+
+# 三处授权都要检查（漏一处就会出现"某功能一直失败但不知道原因"）
+for _app in ("备忘录", "日历", "提醒事项"):
+    check(f"初始化检查 {_app} 授权", _app in _st)
+
+# 用了系统 python3 与 launchd 保持一致（避免"手动能跑、定时跑不了"）
+check("初始化默认用系统 python3", "/usr/bin/python3" in _st)
+
+# 单步失败不中止：一次看到全貌，而不是修一个跑一次
+check("单步失败不中止（继续跑后面的）", "继续" in _st)
+
+# bash 脚本不得有"$VAR 后紧跟全角字符"的写法（bash 3.2 会当成变量名一部分）
+import re as _re7  # noqa: E402
+_badsh = _re7.findall(r"\$([A-Za-z_][A-Za-z0-9_]*)(?=[\x80-\xff])", _st)
+check("初始化脚本无全角字符陷阱", not _badsh, str(_badsh))
+
+
 # ── 汇总
 
 print()
