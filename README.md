@@ -150,6 +150,7 @@ python3 tools/probe-native-dates.py  # 只读探测：Apple 原生日期能力�
 
 ```
 pdca/
+├── CHANGELOG.md               ← 行为变化与架构决定（新会话先看这个和 PROJECT-STATE）
 ├── config.json                三处 App 的定位（folder id / 列表名 / 日历名）
 ├── .env                       Telegram token、Bark key（0600，已 gitignore）
 │

@@ -150,6 +150,7 @@ journal 是**追加不改**的传感器读数，所以这些记录会永久保�
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | **唯一权威** | 任何设计犹豫时 |
 | [`SYMBOL-SCHEME.md`](SYMBOL-SCHEME.md) | **已实现**（决策记录）| 想知道为什么删掉"猜语义" |
 | [`TELEGRAM-DESIGN.md`](TELEGRAM-DESIGN.md) | **讨论稿** | 讨论 Telegram 层时 |
+| [`../CHANGELOG.md`](../CHANGELOG.md) | 行为变化与架构决定 | 想知道"什么时候变的、为什么" |
 | [`PROJECT-STATE.md`](PROJECT-STATE.md) | 本文，接续点 | 新会话开始时 |
 | [`USER-GUIDE.md`](USER-GUIDE.md) | 使用者视角 | 忘了怎么用 |
 | [`CONCEPT.md`](CONCEPT.md) | 最初概念（部分被取代）| 追溯"为什么做这个" |
