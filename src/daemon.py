@@ -247,7 +247,18 @@ def _make_intake() -> Intake:
 def handle_message(text: str, msg_id: int, chat: str) -> None:
     _log(f"收到：{_trunc(text)!r}")
     it = _make_intake()
-    out = it.handle(text, msg_id=msg_id)
+
+    # 把"上一条还在等补充的内容"传进去。
+    #
+    # 为什么需要：用户被追问"日程没写时间"时，最自然的回答是"上午九点"。
+    # 那是一条没有内容的消息 —— 实测踩到：它被当成**新的一条日程**建出来，
+    # 标题就是「上午九点」，而原来那条的事由丢了。
+    # 这里把 pending 里本来就存着的原文交给 handle，让它接到上一条上。
+    #
+    # 不引入新状态：pending 是按钮机制**原本就有的**那份记录
+    # （key 是消息号），这里只是把它多读一次。
+    pending_text = load_pending(msg_id)
+    out = it.handle(text, msg_id=msg_id, pending_text=pending_text)
 
     reply = out.reply
     if _OFFLINE:
@@ -264,7 +275,29 @@ def handle_message(text: str, msg_id: int, chat: str) -> None:
         save_pending(msg_id, text)
         _log(f"已发出确认按钮（msg {r.get('message_id')}）")
     else:
+        # 无论成功还是失败都清掉"待补充"标记，避免陈旧状态下次又来插一脚。
+        # 注意：这里只清"本条消息自己的" pending（key 是 msg_id），
+        # 而"接上一条"用的是 pending 的**另一个** msg_id ——
+        # 所以合并成功后还要把那条也清掉，否则下次补时间又会接到它上面。
+        clear_pending(msg_id)
+        if pending_text is not None and out.ok:
+            for stale in _pending_ids():
+                if stale != msg_id:
+                    clear_pending(stale)
+                    _log(f"已清掉待补充标记 msg {stale}（本条已接上）")
         _log(f"→ {out.kind.value if out.kind else '?'} ok={out.ok}")
+
+
+def _pending_ids() -> list[int]:
+    """列出当前所有"待补充"的消息号（正常情况下最多一条）。"""
+    out: list[int] = []
+    try:
+        for p in PENDING_DIR.glob("*.json"):
+            if p.stem.isdigit():
+                out.append(int(p.stem))
+    except OSError:
+        pass
+    return out
 
 
 def run_once(offset: int | None = None, wait: int = 25) -> int | None:

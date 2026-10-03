@@ -1497,8 +1497,127 @@ finally:
     _sh2.rmtree(_d, ignore_errors=True)
 
 
-section("v4 待办的时间信息不能被丢掉")
+section("v4 「整句只是一个时间」的判据（is_bare_time）")
 
+# ⚠️ 这条判据来自一次真实的踩坑：
+# 用户发了「测试Apple- agent稳定性」→ 判不准 → 给按钮 → 用户点「日程」
+# → 系统回"再说一次带上时间？" → 用户回「上午九点」
+# → **系统把它当成新的一条日程**，标题就是「上午九点」，
+#   时间落在今天 09:00（已经过去），原标题丢了。
+#
+# 根因之一：系统认不出"这句只是在补时间"。这个判据就是补上这一环。
+#
+# 注意区分两件事：
+#   "整句只是一个时间"（上午九点）      → 可能是用户在补上一条的时间
+#   "句子里含时间"    （上午九点开会）  → 这是完整的一条，不该合并
+for _s, _want in [("上午九点", True), ("明天上午九点", True), ("下午两点", True),
+                  ("9:00", True), ("下午2点半", True), ("明天下午两点", True),
+                  ("上午", True), ("明天", True), ("周五", True),
+                  ("10月5日", True),
+                  # 有内容 → 不是"只是时间"
+                  ("上午九点开会", False), ("下午两点 项目周会", False),
+                  ("明天上午九点测试 Apple agent 稳定性", False),
+                  ("测试Apple- agent稳定性", False), ("明天交电费", False),
+                  ("", False)]:
+    check(f"is_bare_time({_s!r}) == {_want}",
+          _whens.is_bare_time(_s) is _want,
+          f"得到 {_whens.is_bare_time(_s)!r}")
+
+# 曾经的错解：用"把命中片段剥掉再看剩什么"判断 —— 不可靠，因为
+# When.time_text 只记录命中片段（"上午九点"里只抓到"九点"），
+# 残留的"上午"自己又能解析成默认 9:00，于是判据说"这句有内容"，
+# 修复等于没生效。这条断言锁住"判据必须看整句"。
+_bare_hits = _whens.parse_when("上午九点", _B)
+check("判据不能依赖 time_text 的完整性（它会漏字）",
+      _bare_hits is not None and _bare_hits.time_text != "上午九点",
+      "若 time_text 已改成完整片段，本注释与实现可一并复核")
+check("判据对同一句仍然给出正确结果",
+      _whens.is_bare_time("上午九点") is True,
+      "说明判据确实是看整句，不是看命中片段")
+
+
+section("v4 补时间要接到上一条上（不新建）")
+
+# 这是上面那次踩坑的**修复断言**。用户被追问"日程没写时间"后回一句
+# 「上午九点」——它必须接到上一条上，而不是拿"上午九点"当标题新建。
+_d = _fresh_journal()
+try:
+    _i, _f = _new_intake()
+    _o = _i.handle("上午九点", _B, msg_id=90,
+                   pending_text="测试Apple- agent稳定性")
+    check("补时间：合并后只写一条", len(_f.calls) == 1, f"得到 {_f.calls}")
+    check("补时间：写的是日历端", _f.calls[0][0] == "event")
+    check("补时间：标题是上一条的原文（不是「上午九点」）",
+          _f.calls[0][1] == "测试Apple- agent稳定性", repr(_f.calls[0][1]))
+    check("补时间：回执如实说明'接在上一条'", "接在你上一条上" in _o.reply)
+finally:
+    _sh2.rmtree(_d, ignore_errors=True)
+
+# 没有上一条时**不能瞎接** —— 单独一句"上午九点"仍按独立日程处理。
+_d = _fresh_journal()
+try:
+    _i, _f = _new_intake()
+    _i.handle("上午九点", _B, msg_id=91, pending_text=None)
+    check("无上一条时不合并（标题仍是原句）",
+          _f.calls[0][1] == "上午九点", repr(_f.calls[0][1]))
+finally:
+    _sh2.rmtree(_d, ignore_errors=True)
+
+# 一句完整的话不该被 pending 影响 —— pending 是个"补时间"的口子，
+# 不能变成"任何话都往上一条上接"。
+_d = _fresh_journal()
+try:
+    _i, _f = _new_intake()
+    _i.handle("明天上午九点测试 Apple agent 稳定性", _B, msg_id=92,
+              pending_text="别的旧条目")
+    check("完整的一句话不受 pending 影响",
+          _f.calls[0][1] == "测试 Apple agent 稳定性", repr(_f.calls[0][1]))
+finally:
+    _sh2.rmtree(_d, ignore_errors=True)
+
+
+section("v4 只说时刻、而该时刻今天已过 → 顺延明天")
+
+# whens.py 是纯函数，刻意不读时钟（否则没法离线测），并在注释里写明
+# "由调用方决定（它本来就知道'现在'）"。调用方是 intake —— 这一段验它
+# 真的做了这件事。不做的话会出现"下午两点开会"在晚上说、
+# 日程却落在**今天下午两点（已经过去）**。
+#
+# 用"今天已过的时刻"构造：取当前时刻往前 2 小时，再取整点。
+_now = _dt2.datetime.now()
+_past = (_now - _dt2.timedelta(hours=2)).replace(minute=0, second=0, microsecond=0)
+_past_s = f"{_past.hour}点"
+
+_d = _fresh_journal()
+try:
+    _i, _f = _new_intake()
+    _o = _i.handle(f"{_past_s} 项目周会", _B)
+    _got = _f.calls[0][2]
+    check("已过的时刻被顺延到次日",
+          _got.date() == _past.date() + _dt2.timedelta(days=1),
+          f"得到 {_got}（原时刻 {_past}）")
+    check("顺延后回执如实说明", "放到了明天" in _o.reply)
+    # ⚠️ 回执里显示的日期必须是**顺延后**的，不能一边写"10月3日"
+    # 一边说"放到了明天"—— 自相矛盾的回执比不说还糟。
+    check("回执显示的是顺延后的日期（不矛盾）",
+          f"{_got.month}月{_got.day}日" in _o.reply,
+          f"回执={_o.reply!r}")
+finally:
+    _sh2.rmtree(_d, ignore_errors=True)
+
+# 带日期的明确时间不该被顺延（用户说了明天就是明天）
+_d = _fresh_journal()
+try:
+    _i, _f = _new_intake()
+    _i.handle("明天下午两点 项目周会", _B)
+    check("写了日期就不顺延",
+          _f.calls[0][2] == _dt2.datetime(2026, 10, 4, 14, 0),
+          str(_f.calls[0][2]))
+finally:
+    _sh2.rmtree(_d, ignore_errors=True)
+
+
+section("v4 待办的时间信息不能被丢掉")
 # 踩到过：classify 在待办分支写 `when=None`，把已经解析好的时间扔了 ——
 # "明天交电费"里的"明天"白解析，上层再也拿不到。
 # **解析出来的信息不该在分类这一步被丢弃**，用不用是上层的事。
