@@ -89,26 +89,26 @@ check(
 
 # ── 2. 解析器行为（纯函数，离线可测）
 
-print("\n── 2. 解析器行为检查 ──")
+print("\n── @. 解析器行为检查 ──")
 import parse as parser  # noqa: E402
 
 
-def kinds(text: str) -> list[tuple[str, str, bool | None, str | None]]:
+def kinds(text: str) -> list[tuple[str, str, bool | None]]:
     r = parser.parse(text)
-    return [(e.kind, e.text, e.completed, e.slot) for e in r.entries]
+    return [(e.kind, e.text, e.completed) for e in r.entries]
 
 
 # 基础标记
 r = kinds("2026-10-02\n- [ ] 待办甲\n- [x] 待办乙\n* 备忘丙\n@中午 时段丁")
 check("识别日期标题", r[0][0] == "meta" and r[0][1] == "2026-10-02")
-check("未完成待办", r[1] == ("todo", "待办甲", False, None))
-check("已完成待办", r[2] == ("todo", "待办乙", True, None))
+check("未完成待办", r[1] == ("todo", "待办甲", False))
+check("已完成待办", r[2] == ("todo", "待办乙", True))
 check("备忘不进待办", r[3][0] == "note" and r[3][1] == "备忘丙")
-check("时段前缀被剥掉", r[4] == ("todo", "时段丁", False, "中午"))
+check("旧 @时段 前缀被剥掉（兼容历史笔记）", r[4][1] == "时段丁")
 
 # 裸行 = 待办（最高频情况，零符号）
 r = kinds("裸行没有符号")
-check("裸行视为未完成待办", r[0] == ("todo", "裸行没有符号", False, None))
+check("裸行视为未完成待办", r[0] == ("todo", "裸行没有符号", False))
 
 # 智能标点：iOS 会把 "- " 变成 "– "/"— "，不能因此漏掉标记
 for dash in ["-", "–", "—"]:
@@ -129,11 +129,6 @@ check("无列表符号的 [x]", r[0][0] == "todo" and r[0][2] is True)
 r = kinds("只有内容 - [ ]")
 check("行尾残留标记被剥掉", r[0][1] == "只有内容")
 
-# 五种时段
-for slot in ["上午", "中午", "下午", "晚上", "明天"]:
-    r = kinds(f"@{slot} 事")
-    check(f"时段 {slot}", r[0][3] == slot)
-
 # 元信息行
 r = kinds("# 备注行")
 check("# 开头视为元信息", r[0][0] == "meta")
@@ -141,10 +136,6 @@ check("# 开头视为元信息", r[0][0] == "meta")
 # 空行不产出条目
 r = kinds("甲\n\n\n乙")
 check("空行不产出条目", len(r) == 2)
-
-# 时段未指定要有提示（供上层询问）
-res = parser.parse("- [ ] 没写时段")
-check("未指定时段时产生 issue", any("时段未指定" in i for i in res.entries[0].issues))
 
 # 去重：只报告，不删除
 res = parser.parse("提交结算单\n提交结算单\n完全不同的事")
@@ -160,7 +151,7 @@ check("原文逐字保留", res.entries[1].raw == "- [ ] 甲 乙  丙")
 
 # ── 3. 顺延逻辑（离线可测 —— 这些分支在沙箱里必须能验掉）
 
-print("\n── 3. 顺延逻辑检查 ──")
+print("\n── @. 顺延逻辑检查 ──")
 import carry_over  # noqa: E402
 
 
@@ -215,7 +206,7 @@ check("⟳ 标记在归一化后保持不变",
 
 # ── 4. 留档渲染
 
-print("\n── 4. 留档渲染检查 ──")
+print("\n── @. 留档渲染检查 ──")
 res = parser.parse("2026-10-02\n- [ ] 甲\n* 乙")
 md = parser.render_archive(res, {"date": "2026-10-02", "source": "test"})
 check("留档含原文段", "## 原文（逐字保留）" in md)
@@ -225,7 +216,7 @@ check("留档含日期", "date: 2026-10-02" in md)
 
 # ── 5. AppleScript 字面量转义
 
-print("\n── 5. AppleScript 转义检查 ──")
+print("\n── @. AppleScript 转义检查 ──")
 import re as _re  # noqa: E402
 import notes as _notes  # noqa: E402
 
@@ -246,7 +237,7 @@ check("反斜杠先于引号转义",
 
 # ── 6. 清理判据（哪些能删、哪些必须留）
 
-print("\n── 6. 清理判据检查 ──")
+print("\n── @. 清理判据检查 ──")
 import datetime as _dt  # noqa: E402
 import importlib.util as _ilu  # noqa: E402
 
@@ -268,7 +259,7 @@ for _n in ["2026-10-02", "2026-10-01", "国际象棋", "2026-10-02 备注",
 
 # ── 7. 提醒事项同步规则
 
-print("\n── 7. 提醒事项同步规则 ──")
+print("\n── @. 提醒事项同步规则 ──")
 import importlib.util as _ilu2  # noqa: E402
 
 def _load(path):
@@ -347,7 +338,7 @@ check("改文字后视为新内容",
 
 # ── 8. 完成状态合并（权威 = 提醒事项）
 
-print("\n── 8. 完成状态合并规则 ──")
+print("\n── @. 完成状态合并规则 ──")
 _completion = _load(SRC / "completion.py")
 
 _CNOTE = "x-coredata://TEST/ICNote/p1"
@@ -403,7 +394,7 @@ check("回填留档只改有差异的条目", _n == 1 and [e.completed for e in 
 
 # ── 9. 顺延的完成状态来自留档（权威链路的落点）
 
-print("\n── 9. 顺延依据留档里的完成状态 ──")
+print("\n── @. 顺延依据留档里的完成状态 ──")
 
 # 这是整条权威链路的关键一环：
 #   21:30 日报 resolve(提醒事项) → write_back → save_archive（落盘）
@@ -424,119 +415,9 @@ _plan, _ = _co.build_plan(_prev_all, None, "2026-10-02", "2026-10-03")
 check("留档里全部完成 → 不顺延任何条目", len(_plan) == 0)
 
 
-# ── 10. slot 在重新解析时必须保留
+# ── 10. 顺延的幂等与防链式
 
-print("\n── 10. 重新解析时保留已设时段 ──")
-
-# 实测踩到的 bug：slot 有两个来源（备忘录里的 @时段、Telegram 按钮选的），
-# 而重新解析只能看到前者 —— 于是每次 --refresh 都会把按钮选的结果清掉，
-# 表现为"你设的时段过一会儿自己没了"。
-# 这里用真实 sync 模块的函数验证保留逻辑。
-_pg = parser.parse("2026-10-02\n- [ ] 甲\n- [ ] 乙")
-_pg.entries[1].slot = "中午"          # 模拟"按钮选的，落在留档里"
-_prev_map = {e.line_no: e.slot for e in _pg.entries if e.slot}
-
-_fresh = parser.parse("2026-10-02\n- [ ] 甲\n- [ ] 乙")
-for _e in _fresh.entries:
-    if _e.slot is None and _e.line_no in _prev_map:
-        _e.slot = _prev_map[_e.line_no]
-check("重新解析后 slot 被保留", _fresh.entries[1].slot == "中午")
-
-# slot 保留的键**只能是正文**，不能用行号 —— 两次实测踩坑：
-#   ① 只用行号：编辑备忘录后行号位移，上一行号的时段被错套到别的条目；
-#   ② 行号+正文：行号一变就找不到，正确的选择被丢掉。
-check("slot 保留键用正文而非行号",
-      parser.normalize_line("甲") != parser.normalize_line("乙"))
-
-# 行号位移后仍能按正文找回（模拟删掉一行）
-_prev_by_text = {parser.normalize_line("乙"): "中午"}
-_after_edit = parser.parse("2026-10-02\n- [ ] 乙")   # 乙 从第3行变成第2行
-for _e in _after_edit.entries:
-    _k = parser.normalize_line(_e.text)
-    if _e.slot is None and _k in _prev_by_text:
-        _e.slot = _prev_by_text[_k]
-check("行号位移后仍按正文找回 slot", _after_edit.entries[1].slot == "中午")
-
-# 备忘录里已有时段时，应以备忘录为准（你自己写的优先）
-_fresh2 = parser.parse("2026-10-02\n@下午 甲")
-_prev2 = {1: "上午"}
-for _e in _fresh2.entries:
-    if _e.slot is None and _e.line_no in _prev2:
-        _e.slot = _prev2[_e.line_no]
-check("备忘录里的 @时段 优先于留档里旧的", _fresh2.entries[1].slot == "下午")
-
-
-# ── 11. 按钮选择器的状态机
-
-print("\n── 11. 按钮选择器状态机 ──")
-_ask = _load(SRC / "ask_slots.py")
-
-
-def _sess(*texts):
-    return _ask.Session(answers=[
-        _ask.Answer(line_no=i, text=t) for i, t in enumerate(texts, start=2)])
-
-
-# 回调编码必须在 64 字节限制内（实测硬限制）
-_bad_cb = []
-_s2 = _sess("甲", "乙", "丙")
-for _i2 in range(len(_s2.answers)):
-    _s2.index = _i2
-    for _row in _ask.frame_keyboard(_s2):
-        for _lbl, _data in _row:
-            if len(_data.encode("utf-8")) > _tg.CALLBACK_MAX_BYTES:
-                _bad_cb.append(_data)
-check("按钮回调数据均在 64 字节内", not _bad_cb, str(_bad_cb[:3]))
-
-# 正文必须回显"已定"情况 —— 用户反馈"点完成只记录一条"，
-# 根因是看不到进度；正文回显是最直接的证据。
-_s3 = _sess("甲", "乙")
-_s3.answers[0].slot = "中午"
-_s3.answers[0].decided = True
-_txt = _ask.frame_text(_s3)
-check("正文回显已定条数", "已定 1/2" in _txt)
-check("正文列出已做的选择", "甲→中午" in _txt)
-
-# 最后一条的"下一条"应变成"完成"
-_s4 = _sess("甲", "乙")
-_s4.index = 1
-_labels = [l for row in _ask.frame_keyboard(_s4) for l, _ in row]
-check("最后一条显示「完成」而非「下一条」", any("完成" in l for l in _labels))
-
-# 确认屏必须警告未选项 —— 这是防"静默丢答案"的关键
-_s5 = _sess("甲", "乙")
-_s5.answers[0].slot = "上午"
-_s5.answers[0].decided = True
-_s5.confirming = True
-_ctxt = _ask.confirm_text(_s5)
-check("确认屏列出全部选择", "甲" in _ctxt and "乙" in _ctxt)
-check("确认屏警告未选项", "还有 1 条没选" in _ctxt)
-_kb5 = [l for row in _ask.confirm_keyboard(_s5) for l, _ in row]
-check("确认屏提供回跳入口", any("回去补" in l for l in _kb5))
-
-# 全部已选时不警告
-_s6 = _sess("甲")
-_s6.answers[0].slot = "上午"
-_s6.answers[0].decided = True
-_s6.confirming = True
-check("全部已选时不显示警告", "没选" not in _ask.confirm_text(_s6))
-
-# ["全部跳过"] 已按用户要求换成"这不是待办"
-_s7 = _sess("甲")
-_labels7 = [l for row in _ask.frame_keyboard(_s7) for l, _ in row]
-check("已移除「全部跳过」按钮", not any("全部跳过" in l for l in _labels7))
-check("提供「这不是待办」按钮", any("不是待办" in l for l in _labels7))
-
-# 备忘标记：选了之后不应再被当作待办参与时段询问
-_s8 = _sess("甲")
-_s8.answers[0].as_note = True
-_s8.answers[0].decided = True
-check("标记备忘后仍算已决定", _s8.decided_count == 1)
-
-
-# ── 12. 顺延的幂等与防链式
-
-print("\n── 12. 顺延幂等 / 不链式往后传 ──")
+print("\n── @. 顺延幂等 / 不链式往后传 ──")
 
 _prev02 = parser.parse("2026-10-02\n@中午 勘察表盖章\n明天要交电费")
 
@@ -562,62 +443,9 @@ _fps = {_co.content_fingerprint(t) for t in
 check("不同标记写法归一到同一指纹", len(_fps) == 1, str(_fps))
 
 
-# ── 18. 按钮回调不丢失（两次实测踩坑）
+# ── 11. AppleScript 语法校验（osacompile，只编译不执行）
 
-print("\n── 13. 按钮回调不丢失 ──")
-
-_tg.answer_callback = lambda *a, **k: None   # 离线时静默
-
-# 坑 1：`d` 是两步操作 —— 第一次进确认屏，第二次才提交。
-# 早先 offset 没有跨调用续传，导致第二次点击被当成"历史"跳过，
-# 用户表现为"点了提交没反应"。
-_s9 = _sess("甲", "乙")
-_s9.answers[0].slot = "上午"
-_s9.answers[0].decided = True
-_r1 = _ask.handle_click(_s9, {"data": "d", "callback_id": "c1", "message_id": 1})
-check("第一次点完成 → 进确认屏（不结束）", _r1 is True and _s9.confirming is True)
-_r2 = _ask.handle_click(_s9, {"data": "d", "callback_id": "c2", "message_id": 1})
-check("第二次点完成 → 真正结束", _r2 is False)
-
-# 坑 2：一次返回多个点击时，必须逐个处理。
-# 只处理第一个的话，offset 会推进到整批之后，剩下的点击被永久跳过。
-_s10 = _sess("甲", "乙")
-_ask.handle_click(_s10, {"data": "s:0:am", "callback_id": "a", "message_id": 1})
-_ask.handle_click(_s10, {"data": "s:1:pm", "callback_id": "b", "message_id": 1})
-check("连续两次点击都被处理", _s10.decided_count == 2
-      and _s10.answers[0].slot == "上午" and _s10.answers[1].slot == "下午")
-
-# wait_for_callback 必须支持 offset 续传与整批返回
-import inspect as _insp  # noqa: E402
-_sig = _insp.signature(_tg.wait_for_callback)
-check("wait_for_callback 支持 offset 续传", "offset" in _sig.parameters)
-check("wait_for_callback 支持跳过历史", "skip_history" in _sig.parameters)
-
-# 返回结构里要有 batch（整批）与 offset（续传位置）
-_src = inspect.getsource(_tg.wait_for_callback)
-check("回调返回整批而非单个", '"batch"' in _src)
-
-
-# ── 18. 过期按钮必须有响应
-
-print("\n── 14. 过期按钮的处理 ──")
-
-# 用户实测踩到：会话结束后再点按钮，没有任何响应、按钮一直转圈
-# （演示消息的按钮被点了 11 次）。这里验证两件事：
-#   ① 会话结束时会主动收尾（撤掉按钮）
-#   ② 提供了清理积压点击的入口
-check("telegram 提供 drain_stale_callbacks",
-      hasattr(_tg, "drain_stale_callbacks"))
-check("ask_slots 会话结束会收尾",
-      hasattr(_ask, "finish_ui"))
-_src_finish = inspect.getsource(_ask.finish_ui)
-check("收尾会去掉按钮（不传 reply_markup）",
-      "reply_markup" not in _src_finish)
-
-
-# ── 18. AppleScript 语法校验（osacompile，只编译不执行）
-
-print("\n── 15. AppleScript 语法校验 ──")
+print("\n── @. AppleScript 语法校验 ──")
 
 import subprocess as _sp  # noqa: E402
 
@@ -653,9 +481,9 @@ check(f"{len(_as_templates)} 个 AppleScript 模板语法正确",
       not _as_fail, "；".join(_as_fail))
 
 
-# ── 18. 系统 Python 3.9 兼容性
+# ── 12. 系统 Python 3.9 兼容性
 
-print("\n── 16. AppleScript 的 whose 子句 ──")
+print("\n── @. AppleScript 的 whose 子句 ──")
 
 # 反复踩到的坑：`whose id "..."` 缺 `is` 会**编译失败**（-2741），
 # 报错只说"期望逗号但找到引号"，完全看不出是缺 is —— 骗了我好几次。
@@ -704,7 +532,7 @@ for _f in list((ROOT / "src").glob("*.py")) + list((ROOT / "deploy").glob("*.sh"
 check("代码里没有重复的 is", not _dup5, "；".join(_dup5[:3]))
 
 
-print("\n── 17. 顺延后必须为次日页建留档 ──")
+print("\n── @. 顺延后必须为次日页建留档 ──")
 
 # 实测踩到：顺延在备忘录里建了 10-03，但没建留档 ——
 # 于是"新的一页不在系统视野内"：日报读不到它、时段询问扫描不到它、
@@ -719,7 +547,7 @@ check("建留档失败不阻断顺延（备忘录已写入）",
       "建立留档失败" in _co_src)
 
 
-print("\n── 18. 「内容未变」必须视为成功 ──")
+print("\n── @. 「内容未变」必须视为成功 ──")
 
 # Telegram 对"内容与当前完全一致"的编辑**返回 HTTP 400 错误**：
 #   message is not modified: specified new message content ... exactly the same
@@ -735,15 +563,11 @@ check("edit_with_buttons 处理「内容未变」",
 _sig_edit = inspect.signature(_tg.edit_with_buttons)
 check("edit_with_buttons 签名正常", "message_id" in _sig_edit.parameters)
 
-# render() 的退化路径必须只在**真的连续失败**时才走，
-# 且要有日志 —— 否则"多发消息"这种问题会静默发生。
-_ask_src2 = (SRC / "ask_slots.py").read_text(encoding="utf-8")
-check("render 退化前会记日志", "退化为发新消息" in _ask_src2)
-check("finish_ui 用 edit_with_buttons（能处理未变）",
-      "tg.edit_with_buttons(sess.message_id" in _ask_src2)
+check("telegram 提供 drain_stale_callbacks（清理过期按钮）",
+      hasattr(_tg, "drain_stale_callbacks"))
 
 
-print("\n── 19. 通知通道 ──")
+print("\n── @. 通知通道 ──")
 
 _notify = _load(SRC / "notify.py")
 
@@ -762,15 +586,13 @@ check("默认同时发 Telegram 与 Bark",
 # 日报默认走双通道，且支持 --ask（渐进式披露的落地点）
 _dr_src = (SRC / "daily_report.py").read_text(encoding="utf-8")
 check("日报默认双通道", "telegram,bark" in _dr_src)
-check("日报支持 --ask 询问时段", '"--ask"' in _dr_src)
 
 # 定时任务里必须真的带上 --ask，否则"接了但没启用"
 _plist = (ROOT / "deploy" / "com.carl.pdca.report.plist").read_text(encoding="utf-8")
-check("定时任务的日报已启用 --ask", "<string>--ask</string>" in _plist)
 check("定时任务的日报已启用 --sync", "<string>--sync</string>" in _plist)
 
 
-print("\n── 20. 系统 Python 兼容性 ──")
+print("\n── @. 系统 Python 兼容性 ──")
 
 # 为什么单独查这个：launchd 任务用的是 **/usr/bin/python3（3.9）**，
 # 而我平时用自带运行时（3.12）。若代码用了运行时求值的类型标注
@@ -782,8 +604,7 @@ import subprocess as _sp2  # noqa: E402
 
 _SYS_PY = "/usr/bin/python3"
 _modules = ["parse", "notes", "sync", "notify", "reminders", "push_tasks",
-            "cleanup", "daily_report", "read_day", "completion", "telegram",
-            "ask_slots"]
+            "cleanup", "daily_report", "read_day", "completion", "telegram"]
 
 if not os.path.exists(_SYS_PY):
     check("系统 python3 存在", False, f"找不到 {_SYS_PY}")
@@ -802,9 +623,35 @@ else:
           not _bad, "；".join(_bad))
 
 
-# ── 11. 密钥不进版本库
+# ── 13. 关键路线的三个定时任务必须齐全
 
-print("\n── 21. 密钥保护检查 ──")
+print("\n── 13. 关键路线的定时任务 ──")
+
+# 关键路线（最小模型）：
+#   ① 09:00 同步待办 → 提醒事项   ← 没它就没地方打钩，完成状态无从谈起
+#   ② 21:30 日报（只读 + 推送）
+#   ③ 07:00 顺延（唯一写备忘录）
+#
+# 检查 plist 真的存在且在安装列表里 —— "实现了但没接线"是本项目
+# 反复踩的坑（write_back 未被调用、顺延后不建留档、待办从未同步）。
+_plists = {p.name for p in (ROOT / "deploy").glob("com.carl.pdca.*.plist")}
+for _need in ("com.carl.pdca.sync.plist", "com.carl.pdca.report.plist",
+              "com.carl.pdca.carryover.plist"):
+    check(f"存在 {_need}", _need in _plists)
+
+_install = (ROOT / "deploy" / "install_launchd.sh").read_text(encoding="utf-8")
+for _lbl in ("com.carl.pdca.sync", "com.carl.pdca.report", "com.carl.pdca.carryover"):
+    check(f"安装列表含 {_lbl}", _lbl in _install)
+
+# 同步任务必须带 --apply，否则只干跑、待办永远进不了提醒事项
+_sync_plist = (ROOT / "deploy" / "com.carl.pdca.sync.plist").read_text(encoding="utf-8")
+check("同步任务带 --apply", "<string>--apply</string>" in _sync_plist)
+check("同步任务带 --refresh", "<string>--refresh</string>" in _sync_plist)
+
+
+# ── 14. 密钥不进版本库
+
+print("\n── @. 密钥保护检查 ──")
 
 # 为什么值得单独查：Telegram token 一旦被提交，等于把 bot 交给别人。
 # 加 telegram.py 时就发现 .gitignore 里**没有 .env** —— 而下一步就要往
@@ -820,9 +667,9 @@ _r = _sp2.run(["git", "check-ignore", ".env.example"], cwd=str(ROOT),
 check(".env.example 可被提交（它是模板）", _r.returncode != 0)
 
 
-# ── 18. shell 脚本静态检查：bash 3.2 的全角字符陷阱
+# ── 15. shell 脚本静态检查：bash 3.2 的全角字符陷阱
 
-print("\n── 22. shell 脚本检查 ──")
+print("\n── @. shell 脚本检查 ──")
 
 # macOS 自带 bash 3.2 会把**全角字符的字节**当成变量名的一部分。
 # 于是 `echo "「$TARGET」"` 会去找名为 `TARGET」` 的变量，报

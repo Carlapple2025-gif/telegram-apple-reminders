@@ -2,7 +2,7 @@
 # 安装 / 卸载 pdca 的 launchd 定时任务。
 #
 # 用法：
-#   ./deploy/install_launchd.sh install     安装（21:30 日报 + 07:00 顺延）
+#   ./deploy/install_launchd.sh install     安装（09:00 同步 + 21:30 日报 + 07:00 顺延）
 #   ./deploy/install_launchd.sh uninstall   卸载
 #   ./deploy/install_launchd.sh status      查看状态与上次退出码
 #   ./deploy/install_launchd.sh reload      重新加载（改完 plist 后用）
@@ -10,6 +10,7 @@
 #   ./deploy/install_launchd.sh test --write  触发真实的写入任务（会改备忘录）
 #
 # 两个任务的分工（刻意分开）：
+#   09:00 sync      —— 把当天页的待办同步到提醒事项（关键一环：没它就没地方打钩）
 #   21:30 report    —— 只读 + 推送，**不写备忘录**
 #   07:00 carryover —— 唯一会写备忘录的任务
 # 分开的好处：写入路径只有一个入口，出问题时排查面小。
@@ -19,7 +20,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT="$(cd "$HERE/.." && pwd)"
 AGENTS="$HOME/Library/LaunchAgents"
-LABELS=(com.carl.pdca.report com.carl.pdca.carryover)
+LABELS=(com.carl.pdca.sync com.carl.pdca.report com.carl.pdca.carryover)
 
 # 固定用自带的 python3：它只用标准库，不依赖任何虚拟环境。
 # （ldc-spider 那边踩过"解释器链被 git clean 掉导致任务全失效"的坑，
@@ -70,7 +71,9 @@ do_install() {
     echo "✅ 已安装 $label"
   done
   echo
-  echo "21:30 日报（只读 + 推送）　07:00 顺延（会写备忘录）"
+  echo "09:00 同步待办 → 提醒事项"
+  echo "21:30 日报（只读 + 推送）"
+  echo "07:00 顺延（会写备忘录）"
   echo "查看状态：$0 status"
   echo "立即测试：$0 test"
 }

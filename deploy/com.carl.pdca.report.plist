@@ -21,9 +21,6 @@
 		<!-- 先同步到提醒事项：否则当天页建得晚时，待办还没进提醒事项，
 		     完成状态就查不到，日报会漏报已完成的事 -->
 		<string>--sync</string>
-		<!-- 推送后，若有「时段未指定」的条目，用 Telegram 按钮问你。
-		     这是「渐进式披露」的落地：agent 不猜，遇到歧义就问。 -->
-		<string>--ask</string>
 	</array>
 
 	<key>WorkingDirectory</key>

@@ -7,13 +7,18 @@
   · 原文逐字保留 —— 便于人工核对，也让去重不会因为改写而失效
   · 无法识别的行不丢弃 —— 归为「待定」交给上层询问，绝不静默丢掉
 
-标记约定：
+标记约定（**只有三种，刻意保持最少**）：
   - [ ] xxx   待办，未完成
   - [x] xxx   待办，已完成
   * xxx       备忘（不进待办）
-  @上午|中午|下午|晚上|明天 xxx   待办 + 时段
-  其它非空行   待办，时段未指定
+  其它非空行   待办
   # 开头       元信息，跳过
+
+为什么不做时段（@上午 之类）：
+  曾经实现过"粗粒度时段 + 时段未指定时用按钮询问"，为此写了 550 行的
+  交互选择器，还要处理留档写回、跨天保留、按钮翻页……而收益只是
+  "这件事放上午还是下午"。投入产出严重不成比例，已整体移除。
+  现在只保留最小模型：**待办 / 备忘 / 完成** 三态。
 """
 
 from __future__ import annotations
@@ -27,9 +32,6 @@ from dataclasses import dataclass, field, asdict
 from difflib import SequenceMatcher
 
 # ── 标记定义
-
-# 时段标签。放在最前面以便用户书写，解析时剥掉。
-SLOTS = ["上午", "中午", "下午", "晚上", "明天"]
 
 # 这些字符在不同输入法/智能标点下会互相替换，统一归一化。
 # 例：iOS 智能标点会把 "- " 变成 "– " 或 "— "，如果把这种行当成普通待办，
@@ -54,59 +56,48 @@ def normalize_line(s: str) -> str:
     return s
 
 
-def strip_leading_marker(line: str) -> tuple[str, str | None, str | None]:
+# 旧的时段前缀写法（@上午 / @中午 …）。**不再作为功能**，
+# 但解析时要剥掉 —— 否则历史笔记里那些 `@中午 勘察表盖章` 会变成
+# 待办文字 `@中午 勘察表盖章`，而提醒事项里是 `勘察表盖章`，
+# 去重键对不上就会**重复建条目**。实测过这个风险。
+_LEGACY_SLOT_PREFIX = re.compile(r"^[@＠]\s*(?:上午|中午|下午|晚上|明天)\s*")
+
+
+def strip_leading_marker(line: str) -> tuple[str, str | None]:
     """
-    剥掉行首标记，返回 (剩余内容, 类型, 时段)。
+    剥掉行首标记，返回 (剩余内容, 类型)。
 
     类型：'todo' | 'note' | None（没识别到标记）
-    时段：'上午' / '中午' / ... 或 None
     """
     s = line.strip()
     if not s:
-        return "", None, None
+        return "", None
 
     kind = None
-    completed = None
 
     # 行首的列表符号（- * • 等）。归一化后再判断。
-    if s and (s[0] in DASH_CHARS or s[0] in BULLET_CHARS):
+    if s[0] in DASH_CHARS or s[0] in BULLET_CHARS:
         marker = s[0]
         rest = s[1:].lstrip()
-        if marker in BULLET_CHARS:
-            kind = "note"
-        else:
-            kind = "todo"
+        kind = "note" if marker in BULLET_CHARS else "todo"
         s = rest
-    else:
-        # 没有列表符号但直接是复选框的情况也接受
-        kind = None
 
     # 复选框
     m_done = CHECKED.match(s)
     m_open = UNCHECKED.match(s)
     if m_done:
-        completed = True
         s = s[m_done.end():].lstrip()
         if kind is None:
             kind = "todo"
     elif m_open:
-        completed = False
         s = s[m_open.end():].lstrip()
         if kind is None:
             kind = "todo"
 
-    # 时段前缀：@上午 / @ 上午 / 上午: 三种写法都接受
-    slot = None
-    for cand in SLOTS:
-        for pat in (f"@{cand}", f"＠{cand}", f"{cand}：", f"{cand}:"):
-            if s.startswith(pat):
-                slot = cand
-                s = s[len(pat):].lstrip()
-                break
-        if slot:
-            break
+    # 兼容：剥掉遗留的 @时段 前缀（不是功能，只是不让它污染正文）
+    s = _LEGACY_SLOT_PREFIX.sub("", s)
 
-    return s, kind, slot
+    return s, kind
 
 
 @dataclass
@@ -118,7 +109,6 @@ class Entry:
     kind: str             # 'todo' | 'note' | 'meta' | 'unknown'
     text: str             # 剥掉标记后的正文
     completed: bool | None = None   # 仅 todo 有意义
-    slot: str | None = None         # 时段
     issues: list[str] = field(default_factory=list)  # 需要上层询问/注意的点
 
     @property
@@ -186,7 +176,7 @@ def parse(text: str) -> ParseResult:
                 entries.append(Entry(idx, raw, "meta", date))
                 continue
 
-        body, kind, slot = strip_leading_marker(raw)
+        body, kind = strip_leading_marker(raw)
 
         if kind is None:
             # 没有标记 → 按约定视为待办（裸行是最高频情况，零符号）
@@ -227,12 +217,7 @@ def parse(text: str) -> ParseResult:
                 # 裸行没有复选框 → 未完成
                 completed = False
 
-        entry = Entry(idx, raw, kind, body, completed=completed, slot=slot)
-
-        if slot is None and kind == "todo":
-            entry.issues.append("时段未指定，需要询问归属")
-
-        entries.append(entry)
+        entries.append(Entry(idx, raw, kind, body, completed=completed))
 
     return ParseResult(date=date, entries=entries)
 
@@ -283,8 +268,8 @@ def render_archive(result: ParseResult, meta: dict) -> str:
     lines.append("")
     lines.append("## 解析结果")
     lines.append("")
-    lines.append("| 行 | 类型 | 内容 | 状态 | 时段 | 备注 |")
-    lines.append("|---|---|---|---|---|---|")
+    lines.append("| 行 | 类型 | 内容 | 状态 | 备注 |")
+    lines.append("|---|---|---|---|---|")
     for e in result.entries:
         kind_label = {"todo": "待办", "note": "备忘", "meta": "元信息", "unknown": "待定"}.get(e.kind, e.kind)
         if e.kind == "todo":
@@ -293,7 +278,7 @@ def render_archive(result: ParseResult, meta: dict) -> str:
             state = "—"
         notes = "；".join(e.issues) if e.issues else ""
         lines.append(
-            f"| {e.line_no} | {kind_label} | {e.text} | {state} | {e.slot or '—'} | {notes} |"
+            f"| {e.line_no} | {kind_label} | {e.text} | {state} | {notes} |"
         )
     lines.append("")
     lines.append("## 汇总")

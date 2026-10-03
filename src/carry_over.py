@@ -85,7 +85,7 @@ def content_fingerprint(text: str) -> str:
     t = re.sub(rf"{CARRY_MARK}\s*\d{{2}}-\d{{2}}", " ", t)
     t = t.replace(CARRY_MARK, " ")
     # 剥掉行首列表符号与复选框
-    body, _, _ = parser.strip_leading_marker(t)
+    body, _ = parser.strip_leading_marker(t)
     t = body or t
     return parser.normalize_line(t)
 
@@ -362,7 +362,7 @@ def main() -> int:
         # 为什么必须做：顺延只写备忘录，而留档是后续所有步骤的输入
         # （日报读它、时段询问扫描它、再下次顺延读它）。不补这一步，
         # 新的一页就**不在系统视野内** —— 实测踩到：10-03 建好后留档里
-        # 没有它，`ask_slots --all` 因此看不到它上面的条目。
+        # 没有它，日报/下次顺延都看不到它上面的条目。
         try:
             s2 = sync.sync_day(next_date_str)
             if s2 is not None:

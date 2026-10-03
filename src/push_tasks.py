@@ -150,9 +150,8 @@ def sync_day(date_str: str, apply: bool = False, refresh: bool = False,
 
     ok_c = ok_m = 0
     for entry, k in plan.create:
-        due = "1 * days" if entry.slot else None
         try:
-            rem.create(name=entry.text, body=k, due=due)
+            rem.create(name=entry.text, body=k)
             ok_c += 1
         except RemindersError as e:
             print(f"  ❌ 新建失败「{entry.text}」：{e}", file=sys.stderr)
@@ -226,8 +225,7 @@ def main() -> int:
     if plan.create:
         print(f"  新建 {len(plan.create)} 条：")
         for entry, _ in plan.create:
-            slot = f" @{entry.slot}" if entry.slot else ""
-            print(f"    + {entry.text}{slot}")
+            print(f"    + {entry.text}")
     if plan.complete:
         print(f"  置为完成 {len(plan.complete)} 条（备忘录里已打钩）：")
         for r, why in plan.complete:
@@ -258,10 +256,8 @@ def main() -> int:
     print("── 执行 " + "─" * 48)
     ok_c = ok_m = 0
     for entry, k in plan.create:
-        # 到期日：有具体时段就设今天，否则不设（避免制造假紧迫感）
-        due = "1 * days" if entry.slot else None
         try:
-            r = rem.create(name=entry.text, body=k, due=due)
+            r = rem.create(name=entry.text, body=k)
             print(f"  ✅ 新建 {r.name}")
             ok_c += 1
         except RemindersError as e:

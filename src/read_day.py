@@ -81,9 +81,8 @@ def main() -> int:
         state = ""
         if e.kind == "todo":
             state = " ✓已完成" if e.completed else " ☐未完成"
-        slot = f" @{e.slot}" if e.slot else ""
         warn = ("  ⚠️ " + "；".join(e.issues)) if e.issues else ""
-        print(f"  [{kind}]{state}{slot}  {e.text}{warn}")
+        print(f"  [{kind}]{state}  {e.text}{warn}")
 
     print()
     print(f"  待办 {len(result.todos)} 条（未完成 {len(result.open_todos)} 条）"
