@@ -1665,6 +1665,38 @@ check("存在统一的 update_state（读-改-写）",
       hasattr(_dm, "update_state"))
 
 
+section("网络异常必须被转换（否则杀死守护）")
+
+# 实测踩到：长轮询期间 Telegram 直接断开连接，抛
+# `http.client.RemoteDisconnected` —— 它是 ConnectionResetError → OSError，
+# **不是 URLError**，所以只捕 URLError/HTTPError 的写法漏掉了它，
+# 异常冒到 daemon 导致**进程退出**（KeepAlive 会重启，但每次被断都重启一次）。
+_tg_src2 = (SRC / "telegram.py").read_text(encoding="utf-8")
+check("telegram 导入 http.client", "import http.client" in _tg_src2)
+check("捕获 HTTPException/ConnectionError/OSError",
+      "http.client.HTTPException" in _tg_src2
+      and "ConnectionError" in _tg_src2 and "OSError" in _tg_src2)
+
+# 真的转换了吗（注入一个 RemoteDisconnected）
+import http.client as _hc2  # noqa: E402
+import urllib.request as _ur2  # noqa: E402
+_orig_open = _ur2.urlopen
+try:
+    def _fake(*a, **k):
+        raise _hc2.RemoteDisconnected("Remote end closed connection")
+    _ur2.urlopen = _fake
+    try:
+        _tg._call("t", "getUpdates", {})
+        _converted = False
+    except _tg.TelegramError:
+        _converted = True
+    except Exception:
+        _converted = False
+    check("RemoteDisconnected 被转成 TelegramError", _converted)
+finally:
+    _ur2.urlopen = _orig_open
+
+
 section("v4 守护的崩溃循环防护")
 
 # ⚠️ 这是 KeepAlive 会放大的风险：守护是常驻 + 自动重启的，
@@ -1703,11 +1735,50 @@ check("journal 支持环境变量覆盖目录",
 check("journal 提供污染断言", hasattr(_jr, "assert_not_real"))
 # 断言必须在**唯一写入点** append() 里 ——
 # 曾经放在调用方（daemon 离线模式），结果 log_input 直调绕过了它。
+# ⚠️ 断言**不该**放在 append()（唯一写入点）。
+# 实测踩到：那样会**把生产也拦住** —— 守护要写的正是真实目录，
+# 断言抛错后 _journal 又静默吞掉异常（"日志失败不影响主流程"），
+# 于是 journal 全空而任务显示 ok=True。
+# 正解是由调用方声明自己是不是测试（Intake(testing=True)）。
 _jr_src = (SRC / "journal.py").read_text(encoding="utf-8")
 _append_body = _jr_src[_jr_src.index("def append("):_jr_src.index("def log_input(")]
-check("污染断言在唯一写入点 append() 内",
-      "assert_not_real" in _append_body,
-      "断言不在 append 里 → 直调会绕过防护")
+# 判据要排除注释/文档字符串里"提到"该函数名的情况 ——
+# 用 `assert_not_real(` 的**调用形态**判断（本项目在粗粒度文本匹配上
+# 栽过多次：扫描器会把讲解性的注释也算进去）。
+_append_calls = [
+    _l for _l in _append_body.splitlines()
+    if "assert_not_real(" in _l and not _l.lstrip().startswith("#")
+    and not _l.lstrip().startswith('"')
+]
+check("污染断言不在 append()（否则会拦生产）",
+      not _append_calls,
+      f"append 里仍在调用：{_append_calls}")
+check("Intake 提供 testing 开关（测试自行声明）",
+      "testing" in (SRC / "intake.py").read_text(encoding="utf-8"))
+
+# 生产路径（指向真实目录、未声明 testing）必须能写
+_jr_p = _jr.JOURNAL_DIR
+try:
+    _jr.JOURNAL_DIR = _jr.ROOT / "data" / "journal"
+    _probe_ok = False
+    try:
+        _rec_p = _jr.append("_selftest_probe", note="临时探测，由自检创建")
+        _probe_ok = True
+    except Exception:
+        _probe_ok = False
+    check("生产路径可写真实 journal（不被断言拦）", _probe_ok)
+    # 清掉探测记录（自检不该留下垃圾）
+    import os as _osC  # noqa: E402
+    _pf = _jr.JOURNAL_DIR / f"{_jr._today()}.jsonl"
+    if _pf.is_file():
+        _lines = [l for l in _pf.read_text(encoding="utf-8").splitlines()
+                  if "_selftest_probe" not in l]
+        if _lines:
+            _pf.write_text("\n".join(_lines) + "\n", encoding="utf-8")
+        else:
+            _osC.remove(_pf)
+finally:
+    _jr.JOURNAL_DIR = _jr_p
 check("journal 提供真实目录判断", hasattr(_jr, "is_real_dir"))
 
 # 自检自己必须跑在临时目录上

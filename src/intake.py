@@ -168,11 +168,17 @@ class Intake:
                  add_todo: TodoSink | None = None,
                  add_event: EventSink | None = None,
                  add_memo: MemoSink | None = None,
-                 log: Callable[..., dict] | None = None):
+                 log: Callable[..., dict] | None = None,
+                 testing: bool = False):
         self._add_todo = add_todo
         self._add_event = add_event
         self._add_memo = add_memo
         self._log = log
+        # testing=True 时断言"没在往真实 journal 写" —— 防止测试数据
+        # 污染真实台账（日报的"防遗忘"读的就是它）。
+        # 生产不要设这个：守护要写的正是真实目录。
+        if testing:
+            journal.assert_not_real("Intake(testing=True)")
 
     # ── 真实的写入端（延迟导入 + 延迟构造）
 

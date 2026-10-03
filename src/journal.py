@@ -74,11 +74,16 @@ class JournalContaminationError(RuntimeError):
 
 def assert_not_real(why: str = "") -> None:
     """
-    断言当前写的**不是**真实日志目录。测试与离线演示前调用。
+    断言当前写的**不是**真实日志目录。
 
-    这不是"防呆"而是"防污染"：真实 journal 是日报"防遗忘"的数据源，
-    混进测试数据会让它提醒不存在的事，而那种错误很难被发现
-    （看起来只是一条普通记录）。
+    ⚠️ 这是给**测试**用的，不是给生产用的。
+    曾经把它放进 append()（唯一的写入点），结果**把生产也拦住了** ——
+    守护要写的正是真实目录，断言抛错后 `_journal` 又静默吞掉异常
+    （"日志失败不影响主流程"），于是 journal 全空而任务显示 ok=True。
+    实测踩到：真实消息被处理了，journal 里一条都没有。
+
+    正解：**由调用方声明自己是不是测试**（Intake(testing=True)、
+    离线模式），而不是由写入点猜。
     """
     real = (ROOT / "data" / "journal").resolve()
     try:
@@ -133,13 +138,9 @@ def append(event: str, **fields) -> dict:
     这是"传感器"定位的直接体现。哪怕传入的数据是错的，
     也只是多一条错记录，不会破坏历史。
 
-    ⚠️ 它是**唯一的写入点**，所以污染防护也放在这里。
-    曾经把断言放在调用方（daemon 的离线模式）—— 结果 `log_input`
-    直接调用绕过了它，真实日志照样被写（实测：写进去了 1 条）。
-    防护必须守在数据出口，不能靠调用方自觉。
+    **污染防护不在这里** —— 由调用方声明自己是不是测试
+    （见 assert_not_real 的说明：放在写入点会把生产也拦住）。
     """
-    assert_not_real(f"event={event}")
-
     rec = {"at": now_iso(), "event": event}
     rec.update(fields)
 

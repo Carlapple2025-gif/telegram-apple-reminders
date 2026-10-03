@@ -20,6 +20,7 @@ Telegram 通道：双向。
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import sys
@@ -84,6 +85,18 @@ def _call(token: str, method: str, params: dict | None = None,
         raise TelegramError(
             f"网络失败：{e}\n"
             f"（实测 Mac mini 可直连 api.telegram.org；若失败先确认网络）"
+        ) from None
+    except (http.client.HTTPException, ConnectionError, OSError) as e:
+        # ⚠️ 必须单独兜住这一类。实测踩到：长时间长轮询时 Telegram 会
+        # 直接断开连接，抛 `http.client.RemoteDisconnected` ——
+        # 它是 ConnectionResetError → OSError，**不是 URLError**，
+        # 所以上面那个 except 抓不到，异常冒到 daemon 导致**进程退出**
+        # （KeepAlive 虽然会重启，但每次长轮询被断都重启一次，很糟）。
+        #
+        # 顺带把 OSError 一起兜住（socket 层的各种 errno 都会走到这里）。
+        raise TelegramError(
+            f"连接中断：{type(e).__name__}: {e}\n"
+            f"（长轮询期间被对端断开属常见现象，会自动重试）"
         ) from None
 
     if not payload.get("ok"):
