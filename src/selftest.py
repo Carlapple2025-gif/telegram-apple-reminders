@@ -532,21 +532,40 @@ section("AppleScript 的 whose 子句")
 #      所以只要确认每个 whose 子句附近都有 is/contains 即可，简单且准确。
 import re as _re5  # noqa: E402
 
-_WHOSE_OK = _re5.compile(r"whose\s+\w+\s+(is|contains|is not)\b")
+# 属性名可以是两个词（`whose completion date is greater than d`），
+# 而且源码里这个子句常常跨行 —— 跨行处会插进 `'` 换行 缩进 `'`
+# （Python 相邻字符串字面量拼接），所以间隙要允许这些字符，不能只允许 \w\s。
+_WHOSE_OK = _re5.compile(r"whose.{0,40}?(is|contains)\b", _re5.S)
 _hits5: list[str] = []
 _scanned5 = 0
 for _f in list((ROOT / "src").glob("*.py")) + list((ROOT / "deploy").glob("*.sh")):
     if _f.name == "selftest.py":
         continue
-    for _ln, _line in enumerate(_f.read_text(encoding="utf-8").splitlines(), 1):
+    _lines5 = _f.read_text(encoding="utf-8").splitlines()
+    # 逐行跟踪"是否在文档字符串里"：docstring 里提到 whose 是在讲事情，
+    # 不是在写 AppleScript。（本项目扫描器的老毛病：把 docstring 里的
+    # 函数名当成调用、把注释里的反例当成代码 —— 这次提前处理掉。）
+    _in_doc = False
+    for _ln, _line in enumerate(_lines5, 1):
         _stripped = _line.lstrip()
+        _quotes = _line.count('"""')
+        if _quotes == 1:
+            _in_doc = not _in_doc
+            continue                      # 定界行本身不算
+        if _in_doc:
+            continue
         # 跳过注释：注释里会引用反例（"whose id \"...\""），误报过
         if _stripped.startswith("#"):
             continue
         for _m in _re5.finditer(r"whose\s+\w+", _line):
             _scanned5 += 1
-            _tail = _line[_m.start():_m.start() + 60]
-            if not _WHOSE_OK.search(_tail):
+            # ⚠️ 要在**拼接后的相邻两行**里找 is/contains，不能只看本行。
+            # 属性名可以是两个词（`whose completion date is greater than d`），
+            # 而源码里这个子句常常跨行写 —— 只看本行会把合法写法判成违规，
+            # 逼着人把 AppleScript 挤成一行来讨好检查（那是本末倒置）。
+            # 判据放宽到"本行 + 下一行"就够：AppleScript 语句不会更长。
+            _tail = "\n".join(_lines5[_ln - 1:_ln + 1])[_m.start():]
+            if not _WHOSE_OK.search(_tail[:90]):
                 _hits5.append(f"{_f.name}:{_ln}  {_tail.strip()[:50]}")
 
 check(f"{_scanned5} 个 whose 子句都带 is/contains",
@@ -2311,16 +2330,11 @@ check("日报含未完成段", "⏳ 未完成 2 件" in _b6)
 check("日报含明日日程", "📅 明日日程 1 项" in _b6 and "14:00" in _b6)
 check("日报含日程地点", "@会议室" in _b6)
 check("日报含备忘提醒", "📝 备忘放了 3 天以上" in _b6 and "荷载要按名称命名" in _b6)
-# ⚠️ 这里原本断言的是"删掉即可，之后不再提醒"—— 而**那句话是假的**：
-# ARCHITECTURE §四设计的"感知路径"（只读快照 → 与 journal 差集 →
-# memo_cleared → 永不再提醒）没有任何生产代码接上，
-# 只有自检与 tools 用过 memo.snapshot()。于是删掉备忘，日报照旧天天提醒。
-#
-# 判据改成：**不许承诺尚未实现的功能**。等真正接上差集，
-# 再把这条断言换成"删掉之后不再出现"（那才是该验的东西）。
-check("日报不承诺未实现的'删掉就不再提醒'",
-      "删掉即可" not in _b6 and "不再提醒" not in _b6,
-      "感知路径没接上，这句话目前是假的")
+# 这句话现在**是真的**（`_read_stale_memos` 做了只读快照差集）——
+# 曾经它是一句没实现的承诺：文案写着"删掉之后不再提醒"，
+# 而差集根本没接上，删掉备忘日报照旧天天提醒。断言翻回来的前提是
+# 那两处接线真的存在（见下面的"感知路径"一节）。
+check("日报说明如何消除备忘提醒", "删掉即可" in _b6)
 
 # 全部完成 → 不该出现"未完成"段
 _t7, _b7 = _rp.build_report(_rp.ReportData(date=_RD, todos=[_rp.Todo("甲", True)]))
@@ -2491,6 +2505,168 @@ check("单步失败不中止（继续跑后面的）", "继续" in _st)
 import re as _re7  # noqa: E402
 _badsh = _re7.findall(r"\$([A-Za-z_][A-Za-z0-9_]*)(?=[\x80-\xff])", _st)
 check("初始化脚本无全角字符陷阱", not _badsh, str(_badsh))
+
+
+section("v4 日报的「今日完成」按 Apple 原生完成时刻筛")
+
+# ⚠️ 踩到过：`_read_todos` 取全量、只按 completed 分流（completed_at 恒为
+# None），于是**昨天、上个月完成的条目全都落在"今日完成"里**，
+# 日报越看越不可信。
+#
+# 修法用 Apple 原生 `completion date`（探测见 tools/probe-native-dates.py：
+# 已完成条目读得到真实日期，未完成的是 missing value，`whose` 服务端可过滤）。
+#
+# 时区/区域设置坑的规避：**不让 AppleScript 回日期字符串**
+# （"2026年10月3日 星期六 下午2:13:30" 依赖系统语言），
+# 改回"年,月,日,时,分"整数分量，由 Python 组装。
+_rem = _load(SRC / "reminders.py")
+
+for _raw, _want in [("2026,10,3,14,13", _dt2.datetime(2026, 10, 3, 14, 13)),
+                    ("2026,7,28,14,13", _dt2.datetime(2026, 7, 28, 14, 13)),
+                    ("2026,1,1,0,0", _dt2.datetime(2026, 1, 1, 0, 0)),
+                    ("none", None),           # 未完成条目 → missing value
+                    ("NONE", None),           # 大小写不敏感
+                    ("", None), ("坏值", None), ("2026,10", None)]:
+    check(f"完成时刻解析 {_raw!r}",
+          _rem._parse_completion(_raw) == _want,
+          f"得到 {_rem._parse_completion(_raw)!r}")
+
+# 解析失败**不能抛**：日报是只读汇总，一条读不出来不该让整份报告崩
+check("完成时刻解析不抛异常",
+      all(_rem._parse_completion(x) is None
+          for x in ("坏", "1,2,3", "99,99,99,99,99" if False else "坏值")))
+
+# Reminder 必须**带上** completed_at —— 否则上面这段解析白写（这是"解析出来
+# 的信息在上层被丢掉"的老毛病，待办的 when 丢过一次，见另一节）。
+check("Reminder 带 completed_at 字段",
+      "completed_at" in _rem.Reminder.__dataclass_fields__,
+      "字段没加的话，日报永远拿不到完成日期")
+
+# completed_on 必须真的按日期筛（同一天的多条都算，别的一天不算）
+_D1 = _dt2.date(2026, 10, 3)
+_fake = [
+    _rem.Reminder(id="1", name="今天甲", completed=True, body="", due="",
+                  completed_at=_dt2.datetime(2026, 10, 3, 9, 0)),
+    _rem.Reminder(id="2", name="今天乙", completed=True, body="", due="",
+                  completed_at=_dt2.datetime(2026, 10, 3, 21, 30)),
+    _rem.Reminder(id="3", name="昨天丙", completed=True, body="", due="",
+                  completed_at=_dt2.datetime(2026, 10, 2, 21, 30)),
+    _rem.Reminder(id="4", name="没打钩", completed=False, body="", due="",
+                  completed_at=None),
+    _rem.Reminder(id="5", name="打钩但没时刻", completed=True, body="", due="",
+                  completed_at=None),
+]
+_origin_rem_cls = _rem.Reminders
+
+
+class _FakeReminders(_rem.Reminders):
+    """
+    只替掉 I/O，**保留真实逻辑**。
+
+    自检**不能**走真实 verify_list —— 沙箱里必被拒（-10004），
+    那样断言就变成"测环境有没有授权"，而不是测筛日期的逻辑。
+
+    注意要**继承**真实类：如果连 completed_on 一起替掉，
+    这段测试就只是在测替身自己，等于没测。
+    """
+    fake: list = []
+
+    def __init__(self, config=None):
+        pass
+
+    def verify_list(self):
+        return 0
+
+    def all_reminders(self):
+        return list(self.fake)
+
+
+try:
+    _FakeReminders.fake = _fake
+    _rem.Reminders = _FakeReminders
+    _got = [r.id for r in _rem.Reminders({"reminders_list": "X"}).completed_on(_D1)]
+    check("按日期筛出当天完成的 2 条", _got == ["1", "2"], str(_got))
+    check("昨天的完成项被排除", "3" not in _got)
+    check("打钩但没有时刻的**不**算进今天（宁可漏报也不误报）",
+          "5" not in _got)
+
+    # 日报那一层也要按日期筛（光在 reminders 里有 completed_on 不够 ——
+    # 这正是"每一层都对、接起来仍可能错"的那类接线问题）
+    _td = _rp._read_todos(_D1)
+    check("日报只收当天完成的条目",
+          sorted(t.name for t in _td if t.completed) == ["今天乙", "今天甲"],
+          str([t.name for t in _td]))
+    check("日报保留未完成条目",
+          any(t.name == "没打钩" and not t.completed for t in _td))
+    check("日报传下去的 completed_at 不为空",
+          all(t.completed_at is not None for t in _td if t.completed))
+finally:
+    _rem.Reminders = _origin_rem_cls
+
+
+section("v4 备忘的「感知路径」真的接上了（删掉就不再提醒）")
+
+# 这是 ARCHITECTURE §四设计的那条路径：
+#   台账（我提交过什么）+ **只读快照差集**（现在还在不在）
+#     → 台账有、快照没有 = 你删了 → 记 memo_cleared → 永不再提醒
+#
+# ⚠️ 它曾经**完全没接上**：只有自检与 tools 用过 memo.snapshot()，
+# 生产路径（report.py）只读台账，于是你删掉备忘、日报照样天天提醒它，
+# 而页脚还写着"删掉即可，之后不再提醒"——一句没实现的承诺。
+#
+# 探测（tools/probe-native-dates.py）证实备忘录**没有**"这条被删了"的
+# 原生线索（删除只是移进 Recently Deleted 保留 30 天），
+# 所以只能靠快照差集，不能靠时间戳 —— 这条断言锁的就是那个差集。
+_d = _P2(_tf2.mkdtemp())
+_orig_jdir = _jr.JOURNAL_DIR
+_orig_snap = _mm.snapshot_ids
+try:
+    _jr.JOURNAL_DIR = _d
+    _jr.assert_not_real = lambda *a, **k: None
+
+    _OLD = (_dt2.datetime.now() - _dt2.timedelta(days=10)).isoformat()
+    _jr.append("memo_added", memo_id="keep", text="还在的备忘", at=_OLD)
+    _jr.append("memo_added", memo_id="gone", text="被删掉的备忘", at=_OLD)
+    _jr.append("memo_added", memo_id="fresh", text="今天刚记的",
+               at=_dt2.datetime.now().isoformat())
+
+    # 快照里只剩 keep 与 fresh → gone 是你删掉的
+    _mm.snapshot_ids = lambda: {"keep", "fresh"}
+    _stale = _rp._read_stale_memos(_dt2.date.today(), 3)
+
+    check("被删掉的备忘不再被提醒",
+          all(m.text != "被删掉的备忘" for m in _stale),
+          str([m.text for m in _stale]))
+    check("还在的、够天数的备忘照旧提醒",
+          any(m.text == "还在的备忘" for m in _stale),
+          str([m.text for m in _stale]))
+    check("太新的备忘不提醒（不足天数）",
+          all(m.text != "今天刚记的" for m in _stale))
+
+    # 差集必须**留痕**（可追溯：这条提过、当天就处理了）
+    _cleared = [r for r in _jr.read_range(days=1)
+                if r.get("event") == "memo_cleared"]
+    check("差集记了 memo_cleared",
+          any(r.get("memo_id") == "gone" for r in _cleared),
+          str(_cleared))
+    check("memo_cleared 带原文（便于日后复盘）",
+          any(r.get("text") == "被删掉的备忘" for r in _cleared))
+
+    # ⚠️ 读不到快照 ≠ 被删了。
+    # 把"没读到"当成"已删除"会**静默清空全部提醒**，而那看不出来 ——
+    # 这是本项目最忌讳的失败形态。所以快照失败时必须退化成"照旧提醒"。
+    def _boom():
+        raise RuntimeError("模拟快照读取失败")
+
+    _mm.snapshot_ids = _boom
+    _stale2 = _rp._read_stale_memos(_dt2.date.today(), 3)
+    check("快照失败时不当成'被删了'（宁可多提醒）",
+          any(m.text == "还在的备忘" for m in _stale2),
+          str([m.text for m in _stale2]))
+finally:
+    _jr.JOURNAL_DIR = _orig_jdir
+    _mm.snapshot_ids = _orig_snap
+    _sh2.rmtree(_d, ignore_errors=True)
 
 
 section("日报退出码如实反映推送结果")

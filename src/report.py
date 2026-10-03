@@ -127,16 +127,10 @@ def build_report(data: ReportData) -> tuple[str, str]:
         lines.append(f"📝 备忘放了 {MEMO_NAG_DAYS} 天以上，还没处理：")
         for m in data.memos:
             lines.append(f"　{m.text}")
-        # ⚠️ 这里曾经写的是"处理完在备忘录里删掉即可，之后不再提醒"——
-        # **那句话当时是假的**：架构里设计得很清楚（只读快照 → 与 journal
-        # 做差集 → 记 memo_cleared → 永不再提醒），但那条"感知路径"
-        # 没有任何生产代码接上（只有自检与 tools 用过 memo.snapshot）。
-        # 于是你删掉备忘，日报照样天天提醒它 —— 而且回执还在骗你说不会。
-        #
-        # 先改成如实描述：这个清单来自 journal 台账，删掉不会让它消失。
-        # 真正接上差集之前，不要写"之后不再提醒"。
-        lines.append("　（这个清单来自台账，删掉不会自动消失 —— "
-                     "暂时请忽略已处理的条目）")
+        # 这句话现在**是真的**：上面 _read_stale_memos 做了只读快照差集，
+        # 你在备忘录里删掉的条目会被记成 memo_cleared 并从此不再出现在这里。
+        # （曾经这里写过同样的话，但差集没接上 —— 见该函数的注释。）
+        lines.append("　（处理完在备忘录里删掉即可，之后不再提醒）")
         lines.append("")
 
     if data.errors:
@@ -165,9 +159,9 @@ def collect(date: dt.date | None = None,
     today = date or dt.date.today()
     data = ReportData(date=today)
 
-    # ① 提醒事项
+    # ① 提醒事项（"今日完成"按原生 completion date 筛）
     try:
-        data.todos = _read_todos()
+        data.todos = _read_todos(today)
     except Exception as e:  # noqa: BLE001
         data.errors.append(f"提醒事项：{e}")
 
@@ -186,17 +180,32 @@ def collect(date: dt.date | None = None,
     return data
 
 
-def _read_todos() -> list[Todo]:
-    """读提醒事项列表里的全部条目。"""
+def _read_todos(day: dt.date | None = None) -> list[Todo]:
+    """
+    读提醒事项列表里的条目。
+
+    ⚠️ 「今日完成」**必须按完成日期筛**，否则昨天、上个月完成的条目
+    会永远堆在"今日完成"里，日报越看越不可信。
+    判据用 Apple 原生的 `completion date`
+    （探测见 tools/probe-native-dates.py：已完成条目可读，
+      未完成条目是 missing value）。
+
+    `day` 为 None 时（兼容旧调用）不筛完成项 —— 但**新调用都应该传日期**。
+    """
     import reminders
     rem = reminders.Reminders()
     rem.verify_list()
     out: list[Todo] = []
     for r in rem.all_reminders():
+        # 未完成项一律保留（它们没有"哪天完成的"这个问题）
+        if r.completed and day is not None:
+            # 没有完成时刻的已完成项：宁可漏报一条，也不要把它算进"今天完成"
+            if r.completed_at is None or r.completed_at.date() != day:
+                continue
         out.append(Todo(
             name=r.name,
             completed=bool(r.completed),
-            completed_at=None,
+            completed_at=r.completed_at,
         ))
     return out
 
@@ -213,12 +222,48 @@ def _read_stale_memos(today: dt.date, days: int) -> list[Memo]:
     """
     从 journal 台账里找"放了 N 天以上"的备忘。
 
-    台账只含"我提交过、且快照里还在"的条目 —— 你删掉的已经移出台账，
-    所以这里天然不会提醒一件已经处理完的事。
+    ⚠️ 台账（journal.submitted_memos）**只回答"我提交过什么"**，
+    不回答"它现在还在不在"——后者是 Apple 应用的事实。所以这里必须
+    再做一次**只读快照差集**：
+
+        台账里有、快照里没有  → 你已经删了 → 记 memo_cleared，永不再提醒
+        台账里有、快照里也有  → 还没处理   → 够天数就提醒
+
+    这就是 ARCHITECTURE §四写的"感知路径"。
+
+    **曾经这里只读台账、没做差集**，于是你删掉备忘、日报照样天天提醒它，
+    而页脚还写着"删掉即可，之后不再提醒"——**承诺了没实现的功能**。
+    探测（tools/probe-native-dates.py）证实备忘录**没有**"这条被删了"的
+    原生线索（删除只是移进 Recently Deleted 保留 30 天），
+    所以判断"还在不在"只能靠快照差集，不能靠时间戳。
+
+    差集是纯读 + 记一笔日志，不改任何 Apple 数据。
     """
     import journal
+
+    ledger = journal.submitted_memos(days=365)
+
+    # 只读快照：拿"现在真实还在的 id 集合"。
+    # 快照失败时**不做差集**（读不到 ≠ 被删了）—— 这一条很关键：
+    # 把"没读到"当成"被删除"会静默地把提醒全部清掉，而那看不出来。
+    live_ids: set[str] | None = None
+    try:
+        import memo
+        live_ids = memo.snapshot_ids()
+    except Exception as e:  # noqa: BLE001
+        # 读不到就退化成"只按台账提醒"（宁可多提醒，也不要误判为已删除）
+        import sys as _sys
+        print(f"（备忘快照读取失败，本次不做差集：{e}）", file=_sys.stderr)
+
     out: list[Memo] = []
-    for _mid, info in journal.submitted_memos(days=365).items():
+    for mid, info in ledger.items():
+        if live_ids is not None and mid not in live_ids:
+            # 你已删除 → 记一笔，之后永不再提
+            try:
+                journal.log_memo_cleared(mid, info.get("text", ""))
+            except Exception:  # noqa: BLE001
+                pass          # 记不上不影响本份报告
+            continue
         created = _parse_at(info.get("at", ""))
         if created is None:
             continue

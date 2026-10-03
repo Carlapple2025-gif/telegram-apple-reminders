@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import subprocess
 import sys
@@ -27,6 +28,27 @@ ROOT = Path(__file__).resolve().parent.parent
 
 class RemindersError(RuntimeError):
     pass
+
+
+def _parse_completion(raw: str) -> dt.datetime | None:
+    """
+    把 AppleScript 传来的完成时刻（"年,月,日,时,分"）转成 datetime。
+
+    `none` 与任何解析不出来的值都返回 None —— 调用方据此判断
+    "这条没有完成时刻"（未完成的条目就是 missing value → none）。
+    解析失败**不抛异常**：日报是只读汇总，一条读不出来不该让整份报告失败。
+    """
+    s = (raw or "").strip()
+    if not s or s.lower() == "none":
+        return None
+    parts = [p.strip() for p in s.split(",")]
+    if len(parts) < 5:
+        return None
+    try:
+        y, mo, d, h, mi = (int(p) for p in parts[:5])
+        return dt.datetime(y, mo, d, h, mi)
+    except (ValueError, TypeError):
+        return None
 
 
 def lit(s: str) -> str:
@@ -84,6 +106,10 @@ class Reminder:
     completed: bool
     body: str
     due: str  # 原始字符串形式，够用即可
+    # 完成时刻。**探测已证实可读**（tools/probe-native-dates.py）：
+    # 已完成条目读得到真实日期，未完成的是 missing value。
+    # 有了它，日报才能只报"今天完成的"，而不是把历史全倒出来。
+    completed_at: dt.datetime | None = None
 
 
 class Reminders:
@@ -146,9 +172,16 @@ class Reminders:
         """
         列出该列表内全部条目。
 
-        输出格式：每条三行（id / completed / name），外加 body 与 due。
+        输出格式：每条若干行（id / completed / name / body / 完成时刻），
         用「一行一个字段」而不是分隔符拼接 —— AppleScript 字面量里
         不能可靠嵌入控制字符（notes.py 踩过这个坑）。
+
+        ⚠️ 完成时刻用**年月日时分整数**输出，不输出日期字符串。
+        日期字符串形如"2026年10月3日 星期六 下午2:13:30"——
+        它依赖系统区域设置，换台机器/改个语言就可能解析失败或差一天，
+        而这类 bug 极难发现（备忘录那边已经有同源教训，见 applecal.py
+        顶部关于"日期不用 AppleScript 字面量"的说明）。
+        整数分量则由 Python 组装，时间语义完全可控。
         """
         out = run(
             'tell application "Reminders"\n'
@@ -159,6 +192,14 @@ class Reminders:
             '    set out to out & (completed of r as string) & linefeed\n'
             '    set out to out & (name of r) & linefeed\n'
             '    set out to out & (body of r) & linefeed\n'
+            '    set cd to (completion date of r)\n'
+            '    if cd is missing value then\n'
+            '      set out to out & "none" & linefeed\n'
+            '    else\n'
+            '      set out to out & (year of cd as integer) & "," & '
+            '(month of cd as integer) & "," & (day of cd) & "," & '
+            '(hours of cd) & "," & (minutes of cd) & linefeed\n'
+            '    end if\n'
             '    set out to out & "----" & linefeed\n'
             '  end repeat\n'
             '  return out\n'
@@ -175,16 +216,63 @@ class Reminders:
                         name=chunk[2],
                         body=(chunk[3] if len(chunk) > 3 else ""),
                         due="",
+                        completed_at=_parse_completion(
+                            chunk[4] if len(chunk) > 4 else "none"),
                     ))
                 chunk = []
             else:
                 chunk.append(line)
         return items
 
+    def completed_on(self, day: dt.date) -> list[Reminder]:
+        """
+        只取**在某一天完成**的条目（Apple 原生 `completion date`）。
+
+        探测已证实（tools/probe-native-dates.py）：
+          · 已完成条目的 completion date 读得到
+          · `whose completion date is greater than <某时刻>` 服务端可过滤
+          · 未完成条目的该字段是 missing value
+
+        这里仍走 `all_reminders()` 再在 Python 里筛，不直接用 whose：
+        这个列表的条目量很小，而 whose 的日期比较要把 AppleScript 日期
+        对象拼进查询串（区域设置敏感的写法），收益不抵风险。
+        真有性能问题再换成 whose —— 那时也已经有探针证明它可用。
+        """
+        return [r for r in self.all_reminders()
+                if r.completed and r.completed_at is not None
+                and r.completed_at.date() == day]
+
     def open_reminders(self) -> list[Reminder]:
         return [r for r in self.all_reminders() if not r.completed]
 
     # ── 写（全部带读回验证）
+
+    def yesterday_done_count(self) -> int:
+        """
+        昨天完成了几条（Apple **服务端**过滤，用原生 `whose`）。
+
+        这条存在的意义不只是功能 —— 它是"原生 `whose` 真能用"的活证据：
+        探测（tools/probe-native-dates.py）证实
+        `whose completion date is greater than <某时刻>` 可用，
+        未完成条目的该字段是 missing value。
+
+        ⚠️ 必须写 `is greater than`，不能简写成 `>`：
+        本项目的静态契约检查要求每个 whose 子句都带 is/contains，
+        因为**缺 is 的写法实测会编译失败**。探测里 `>` 能过是因为
+        那里是另一个上下文 —— 不值得为省四个单词去踩自己定的规矩。
+        """
+        out = run(
+            'set d to (current date) - 1 * days\n'
+            'tell application "Reminders"\n'
+            f'  set L to list {lit(self.list_name)}\n'
+            '  return (count of (every reminder of L whose completion date '
+            'is greater than d)) as string\n'
+            'end tell'
+        )
+        try:
+            return int(out.strip())
+        except ValueError:
+            return 0
 
     def create(self, name: str, body: str = "", due: str | None = None) -> Reminder:
         """
