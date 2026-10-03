@@ -1525,6 +1525,35 @@ check("journal 有 submitted_memos（report 防遗忘要用）",
       hasattr(_jr, "submitted_memos"))
 
 
+section("v4 守护的离线模式")
+
+# 离线模式让"没有授权"时也能看到整条链路怎么工作（回执文案、分类结果、
+# 日志记录），对首次上手和排查都很有用。它必须**真的不写入**。
+_dm._OFFLINE = True
+try:
+    _oit = _dm._make_intake()
+    _oout = _oit.handle("明天交电费", _B)
+    check("离线模式：有回执", _oout.ok and "待办" in _oout.reply)
+    check("离线模式：记录会写到哪里",
+          bool(getattr(_oit, "_offline_calls", [])))
+    _oout2 = _oit.handle("周五下午两点项目周会", _B)
+    _ocalls = getattr(_oit, "_offline_calls", [])
+    check("离线模式：日程指向日历",
+          any("日历" in c for c in _ocalls), str(_ocalls))
+    # 判不出的情况照样要问，且不写
+    _n_before = len(_ocalls)
+    _oout3 = _oit.handle("帮我看下那个表", _B)
+    check("离线模式：判不出仍要求确认", _oout3.needs_ask)
+    check("离线模式：判不出不写入",
+          len(getattr(_oit, "_offline_calls", [])) == _n_before)
+finally:
+    _dm._OFFLINE = False
+
+# --offline 开关必须存在（否则没法用）
+check("daemon 提供 --offline 开关",
+      "--offline" in (SRC / "daemon.py").read_text(encoding="utf-8"))
+
+
 section("v4 日报（report，注入假数据）")
 
 # report 的数据源可注入，所以渲染逻辑能完全离线验证。

@@ -159,7 +159,7 @@ def _handle_callback(data: str, callback_id: str, chat: str) -> None:
         return
 
     _log(f"按钮：把 {_trunc(text)!r} 记为 {kind.value}")
-    it = Intake()
+    it = _make_intake()
     # 用强制类型走同一条分派路径 —— 不再重新分类（用户已经告诉我们了）
     out = _dispatch_forced(it, kind, text)
     tg.send(out.reply)
@@ -188,12 +188,47 @@ def _dispatch_forced(it: Intake, kind: Kind, text: str):
 
 # ── 主循环
 
+# 离线模式：把三个写入端换成假的，用于在**没有授权**时先看整条链路
+# 怎么工作（回执文案、分类结果、日志记录）。真实运行不用这个。
+_OFFLINE = False
+
+
+def _make_intake() -> Intake:
+    if not _OFFLINE:
+        return Intake()
+
+    calls: list[str] = []
+
+    def _t(text, when=None):
+        calls.append(f"提醒事项 ← {text}")
+        return "OFFLINE-TODO"
+
+    def _e(summary, start, end, location="", recurrence="", allday=False):
+        calls.append(f"日历 ← {summary} @ {start} [{recurrence or '不重复'}]")
+        return "OFFLINE-EVENT"
+
+    def _m(text):
+        calls.append(f"备忘录 ← {text}")
+        return "OFFLINE-MEMO"
+
+    it = Intake(add_todo=_t, add_event=_e, add_memo=_m)
+    it._offline_calls = calls        # 供回执里展示"会写到哪里"
+    return it
+
+
 def handle_message(text: str, msg_id: int, chat: str) -> None:
     _log(f"收到：{_trunc(text)!r}")
-    it = Intake()
+    it = _make_intake()
     out = it.handle(text, msg_id=msg_id)
 
-    tg.send(out.reply)
+    reply = out.reply
+    if _OFFLINE:
+        calls = getattr(it, "_offline_calls", [])
+        if calls:
+            reply += "\n\n【离线模式】实际会写：" + "；".join(calls)
+        else:
+            reply += "\n\n【离线模式】不写入任何东西"
+    tg.send(reply)
 
     if out.needs_ask:
         # 存下原文，按钮回调时取用 —— 这样按钮不依赖内存状态
@@ -278,7 +313,14 @@ def main() -> int:
                     help="只把历史更新消费掉（不处理内容），用于首次启动前定基准")
     ap.add_argument("--reset", action="store_true",
                     help="清掉保存的 offset（下次从最新开始）")
+    ap.add_argument("--offline", action="store_true",
+                    help="离线模式：不写入任何 Apple 应用，只回执「会写到哪里」")
     args = ap.parse_args()
+
+    global _OFFLINE
+    _OFFLINE = args.offline
+    if _OFFLINE:
+        _log("离线模式：不会写入任何 Apple 应用")
 
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
