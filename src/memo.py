@@ -267,6 +267,42 @@ def _html_escape(s: str) -> str:
     return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
 
+# ── 删除（**仅供"改分类"使用**）
+#
+# ⚠️ 这违反了 v4 最初的约束"agent 不删任何东西"。之所以开这个口子：
+# 用户明确需要把记错类型的东西改过来（实测："改为备忘录"），
+# 而"改分类"必然要把原条从旧 App 移走。
+#
+# 为了让这个能力**不被滥用**，限制成：
+#   · 只按 note_id 删（不按标题/内容模糊匹配 —— 绝不猜）
+#   · 只由 reclassify 调用（其他地方不用）
+#   · 每次删除都记进 journal，可追溯
+
+def delete(note_id: str) -> bool:
+    """
+    按 id 删除一条备忘（移到系统「最近删除」，30 天内可恢复）。
+    返回是否删除成功（读回验证）。
+    """
+    if not note_id:
+        raise MemoError("删除需要明确的 note_id（不接受模糊匹配）")
+
+    fid = active_folder_id()
+    run_applescript(
+        'tell application "Notes"\n'
+        f'  set targetFolder to folder id {_as_literal(fid)}\n'
+        '  repeat with n in notes of targetFolder\n'
+        f'    if (id of n) is {_as_literal(note_id)} then\n'
+        '      delete n\n'
+        '      return "ok"\n'
+        '    end if\n'
+        '  end repeat\n'
+        '  return "NOTFOUND"\n'
+        'end tell')
+
+    # 读回验证：备忘录删除也可能静默失败
+    return note_id not in snapshot_ids()
+
+
 # ── 初始化：新建并使用一个备忘文件夹
 #
 # 为什么不复用 v1 的 logs 文件夹：那里有用户亲手写的当天页，

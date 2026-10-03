@@ -356,6 +356,32 @@ def exists(uid: str, calendar: str | None = None) -> bool:
     return out.strip() == "FOUND"
 
 
+def delete(uid: str, calendar: str | None = None) -> bool:
+    """
+    按 uid 删除一条日程（**仅供"改分类"使用**，理由见 memo.delete 的说明）。
+
+    只按 uid 删（不按标题模糊匹配 —— 绝不猜）；删后读回验证。
+    """
+    if not uid:
+        raise CalendarError("删除需要明确的 uid（不接受模糊匹配）")
+
+    cal = calendar or config_calendar()
+    scope = (f'calendar {_as_literal(cal)}' if cal else "calendar 1")
+    run_applescript(
+        f'tell application "{APP}"\n'
+        f'  set targetCal to {scope}\n'
+        '  repeat with e in (every event of targetCal)\n'
+        f'    if (uid of e) is {_as_literal(uid)} then\n'
+        '      delete e\n'
+        '      return "ok"\n'
+        '    end if\n'
+        '  end repeat\n'
+        '  return "NOTFOUND"\n'
+        'end tell', timeout=120)
+
+    return not exists(uid, cal)
+
+
 # ── CLI
 
 def main() -> int:

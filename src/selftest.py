@@ -1081,10 +1081,37 @@ check("转义：反斜杠先于引号",
 check("转义：普通引号", _mm._as_literal('说"hi"') == '"说\\"hi\\""')
 check("HTML 转义", _mm._html_escape("a<b&c>d") == "a&lt;b&amp;c&gt;d")
 
-# memo 模块**不能有删除能力** —— 这是架构约束（用户保留删除权）
+# 删除能力：v4 最初的约束是"agent 从不删任何东西"。
+# **2026-10-03 显式修订**：用户需要"改分类"（实测："改为备忘录"），
+# 而改分类必然要把原条目从旧 App 移走 —— 所以开了口子。
+# 口子用三条限制控制，这里逐条验证：
 _mm_src = (SRC / "memo.py").read_text(encoding="utf-8")
-check("memo 模块不含 delete 命令",
-      "delete " not in _mm_src.replace("# ", ""))
+_ac_src = (SRC / "applecal.py").read_text(encoding="utf-8")
+
+check("memo 提供删除（供改分类用）", "def delete(" in _mm_src)
+check("applecal 提供删除（供改分类用）", "def delete(" in _ac_src)
+# ① 只接受明确 id，不接受模糊匹配
+check("memo.delete 要求明确 id",
+      "不接受模糊匹配" in _mm_src)
+check("applecal.delete 要求明确 id",
+      "不接受模糊匹配" in _ac_src)
+# ② 只有 reclassify 调用删除
+_callers: list[str] = []
+for _f in (SRC).glob("*.py"):
+    if _f.name in ("memo.py", "applecal.py", "reminders.py", "reclassify.py",
+                   "selftest.py", "cleanup_reminders.py"):
+        continue
+    _t = _f.read_text(encoding="utf-8")
+    for _ln, _line in enumerate(_t.splitlines(), 1):
+        if _line.lstrip().startswith("#"):
+            continue
+        if _re.search(r"\b(memo|applecal|rem)\.delete\(", _line):
+            _callers.append(f"{_f.name}:{_ln}")
+check("只有 reclassify 调用删除", not _callers, "；".join(_callers))
+# ③ 删除必须读回验证（防静默失败）
+check("memo.delete 读回验证", "snapshot_ids()" in _mm_src.split("def delete(")[1][:900])
+check("applecal.delete 读回验证",
+      "exists(" in _ac_src.split("def delete(")[1][:900])
 
 
 section("v4 的 AppleScript 必须可编译")

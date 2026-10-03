@@ -167,26 +167,41 @@ def log_input(text: str, source: str = "telegram", msg_id: int | None = None) ->
 
 
 def log_todo(text: str, reminder_id: str = "", ok: bool = True,
-             detail: str = "") -> dict:
+             detail: str = "", src_msg_id: int | None = None,
+             reply_msg_id: int | None = None) -> dict:
+    """
+    记下"我建了一条待办"。
+
+    `reply_msg_id` 是**我发出的那条回执**的 message_id ——
+    有了它，用户"回复我的回执"时才能精确定位到这一条（见 resolve_prev）。
+    没有它就只能靠"最近一条"猜，而猜身份是本项目踩过四次的坑。
+    """
     return append(EV_TODO_ADDED, text=text, reminder_id=reminder_id,
-                  ok=ok, detail=detail)
+                  ok=ok, detail=detail, src_msg_id=src_msg_id,
+                  reply_msg_id=reply_msg_id)
 
 
 def log_event(summary: str, start: str = "", end: str = "",
               location: str = "", calendar: str = "", ok: bool = True,
-              detail: str = "") -> dict:
+              detail: str = "", src_msg_id: int | None = None,
+              reply_msg_id: int | None = None) -> dict:
     return append(EV_EVENT_ADDED, summary=summary, start=start, end=end,
-                  location=location, calendar=calendar, ok=ok, detail=detail)
+                  location=location, calendar=calendar, ok=ok, detail=detail,
+                  src_msg_id=src_msg_id, reply_msg_id=reply_msg_id)
 
 
-def log_memo(text: str, memo_id: str, ok: bool = True, detail: str = "") -> dict:
+def log_memo(text: str, memo_id: str, ok: bool = True, detail: str = "",
+             src_msg_id: int | None = None,
+             reply_msg_id: int | None = None) -> dict:
     """
     记下"我提交过一条备忘"。
 
-    `memo_id` 是 agent 生成并写进备忘录的标识 —— 它是**观察阶段的唯一凭据**：
+    `memo_id` 是 Apple 分配的笔记 id —— 它是**观察阶段的唯一凭据**：
     下次只读快照时，靠它判断"我写的那条还在不在"。
     """
-    return append(EV_MEMO_ADDED, memo_id=memo_id, text=text, ok=ok, detail=detail)
+    return append(EV_MEMO_ADDED, memo_id=memo_id, text=text, ok=ok,
+                  detail=detail, src_msg_id=src_msg_id,
+                  reply_msg_id=reply_msg_id)
 
 
 def log_memo_cleared(memo_id: str, text: str = "") -> dict:
@@ -203,6 +218,49 @@ def log_observed(kind: str, present: int = 0, cleared: list | None = None,
 
 def log_error(where: str, detail: str) -> dict:
     return append(EV_ERROR, where=where, detail=detail)
+
+
+# ── 纠正：把"用户指的是哪一条"解析出来
+#
+# 两条路径（见 docs/ARCHITECTURE.md 的"纠正"一节）：
+#   A. 用户**回复我的回执** → 用 reply_to_message.message_id 精确定位（零猜测）
+#   B. 用户直接发短指令   → 落到"最近一条"，但**必须先回显确认**再动
+#
+# 关键：A 路径完全不需要猜，所以优先；B 路径是便利性补充。
+
+# 这些事件代表"确实往 Apple 应用里写了一条东西"，可被纠正
+CORRECTABLE = (EV_TODO_ADDED, EV_EVENT_ADDED, EV_MEMO_ADDED)
+
+
+def resolve_prev(reply_to_msg_id: int | None = None,
+                 days: int = 2) -> dict | None:
+    """
+    找出用户想纠正的那一条。
+
+    `reply_to_msg_id` 给定时（用户回复了某条消息）：
+      先按"我发出的回执 id"匹配；匹配不到再按"用户原始消息 id"匹配
+      （用户也可能回复自己的消息）。
+      两者都没有 → 返回 None（**不猜**）。
+
+    未给定时：返回**最近一条**可纠正记录（路径 B），
+    此时调用方必须先回显确认。
+    """
+    recs: list[dict] = []
+    for i in range(days):
+        d = (dt.date.today() - dt.timedelta(days=i)).isoformat()
+        recs.extend(read_day(d))
+    acts = [r for r in recs if r.get("event") in CORRECTABLE]
+
+    if reply_to_msg_id is not None:
+        for r in reversed(acts):
+            if r.get("reply_msg_id") == reply_to_msg_id:
+                return r
+        for r in reversed(acts):
+            if r.get("src_msg_id") == reply_to_msg_id:
+                return r
+        return None          # 明确：不猜
+
+    return acts[-1] if acts else None
 
 
 # ── 读取（供复盘与"我提交过什么"）
