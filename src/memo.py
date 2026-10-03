@@ -105,7 +105,9 @@ def run_applescript(src: str, timeout: int = 30) -> str:
 def folder_id() -> str:
     """读 config.json 里的备忘文件夹 id。"""
     if not CONFIG.is_file():
-        raise MemoError(f"缺少配置文件 {CONFIG}（请先运行 deploy/init.sh）")
+        raise MemoError(
+            "缺少配置文件 " + str(CONFIG) + "\n"
+            "请先运行：bash deploy/setup-v4.sh --apply")
     try:
         cfg = json.loads(CONFIG.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:

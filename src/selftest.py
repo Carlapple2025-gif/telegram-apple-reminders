@@ -1678,6 +1678,32 @@ check("doctor 真实读取权限", "count of folders" in _inst)
 check("安装脚本用系统 python3", 'PYTHON="/usr/bin/python3"' in _inst)
 
 
+section("v4 模块的提示指向真实存在的命令")
+
+# 踩到过：reminders.py 与 memo.py 的错误提示让用户"先运行 deploy/init.sh"——
+# 那是 v1 的初始化入口。**提示指向不存在的命令会让人走进死路**，
+# 而且只在出错时才看到，最难排查。
+_v4_mods = ("journal", "memo", "applecal", "classify", "whens",
+            "intake", "daemon", "report", "reminders")
+_stale = []
+for _m in _v4_mods:
+    _txt = (SRC / f"{_m}.py").read_text(encoding="utf-8")
+    if "init.sh" in _txt:
+        _stale.append(_m)
+check("v4 模块不再提示 v1 的 init.sh", not _stale, str(_stale))
+
+# 提示里出现的每条 deploy/*.sh 都必须真的存在
+import re as _re9  # noqa: E402
+_missing_cmds: list[str] = []
+for _m in _v4_mods:
+    _txt = (SRC / f"{_m}.py").read_text(encoding="utf-8")
+    for _hit in _re9.findall(r"deploy/([A-Za-z0-9_.-]+\.sh)", _txt):
+        if not (ROOT / "deploy" / _hit).is_file():
+            _missing_cmds.append(f"{_m}.py 提到 deploy/{_hit}（不存在）")
+check("提示里提到的脚本都真实存在", not _missing_cmds,
+      "；".join(_missing_cmds))
+
+
 section("v4 初始化脚本")
 
 # 初始化脚本把"有依赖顺序、容易漏"的步骤串起来。漏了的表现很隐蔽

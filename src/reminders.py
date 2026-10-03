@@ -98,7 +98,9 @@ class Reminders:
         if config is None:
             p = ROOT / "config.json"
             if not p.is_file():
-                raise RemindersError(f"缺少 {p}，请先运行 bash deploy/init.sh")
+                raise RemindersError(
+                    "缺少 " + str(p) + "\n"
+                    "请先运行：bash deploy/setup-v4.sh --apply")
             config = json.loads(p.read_text(encoding="utf-8"))
         self.config = config
         self.list_name = config.get("reminders_list", "PDCA")
@@ -128,7 +130,8 @@ class Reminders:
         if self.list_name not in self.list_names():
             raise RemindersError(
                 f"列表「{self.list_name}」不存在。\n"
-                f"先运行 bash deploy/init.sh 创建，或在提醒事项里手动建一个同名列表。"
+                f"可在提醒事项里手动建一个同名列表，或运行："
+                f"  bash deploy/setup-v4.sh --apply"
             )
         out = run(
             'tell application "Reminders"\n'
