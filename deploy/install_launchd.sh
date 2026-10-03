@@ -2,7 +2,7 @@
 # 安装 / 卸载 pdca 的 launchd 定时任务。
 #
 # 用法：
-#   ./deploy/install_launchd.sh install     安装（09:00 同步 + 21:30 日报 + 07:00 顺延）
+#   ./deploy/install_launchd.sh install     安装（常驻收件守护 + 21:30 日报）
 #   ./deploy/install_launchd.sh uninstall   卸载
 #   ./deploy/install_launchd.sh status      查看状态与上次退出码
 #   ./deploy/install_launchd.sh reload      重新加载（改完 plist 后用）
@@ -20,7 +20,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT="$(cd "$HERE/.." && pwd)"
 AGENTS="$HOME/Library/LaunchAgents"
-LABELS=(com.carl.pdca.sync com.carl.pdca.report com.carl.pdca.carryover)
+LABELS=(com.carl.pdca.daemon com.carl.pdca.report)
 
 # 固定用自带的 python3：它只用标准库，不依赖任何虚拟环境。
 # （ldc-spider 那边踩过"解释器链被 git clean 掉导致任务全失效"的坑，

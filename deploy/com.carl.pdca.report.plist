@@ -1,12 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  每天 21:30 日报：汇总当天进度并推送，提醒你补打钩。
+  每天 21:30 日报（v4）。
 
-  这条推送是整条链路的**数据质量保障**：顺延依赖准确的完成状态，
-  而完成状态只能由你手动打钩产生（程序不推断）。
+  读三处 Apple 应用的**当前状态**并汇总：
+    提醒事项 → 今天完成/未完成
+    日历     → 明天的日程
+    备忘录   → 放久了还没处理的备忘（防遗忘）
 
-  注意：21:30 只做「汇总 + 推送」，**不写入你的备忘录**。
+  **只读**：日报不改任何东西。"某条还在不在"由 journal 台账回答，
+  所以连备忘录正文都不用读。
+
+  两个通道都发（Telegram + Bark）互为冗余：日报是关键产物，
+  送达不该依赖单一通道。
 -->
 <plist version="1.0">
 <dict>
@@ -16,11 +22,7 @@
 	<key>ProgramArguments</key>
 	<array>
 		<string>__PYTHON__</string>
-		<string>__PROJECT__/src/daily_report.py</string>
-		<string>--refresh</string>
-		<!-- 先同步到提醒事项：否则当天页建得晚时，待办还没进提醒事项，
-		     完成状态就查不到，日报会漏报已完成的事 -->
-		<string>--sync</string>
+		<string>__PROJECT__/src/report.py</string>
 	</array>
 
 	<key>WorkingDirectory</key>

@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  收件守护：常驻监听 Telegram，收到即分派（v4 的唯一输入入口）。
+
+  KeepAlive：进程退出就重启，保证"随时发一句都有人接"。
+  ThrottleInterval 防止异常时疯狂重启（例如配置缺失导致立刻退出）。
+
+  ⚠️ 首次启动前建议先跑一次 `daemon.py --drain`：
+  它会把积压的历史消息消费掉并把 offset 定在"最新之后"，
+  否则几天前发过的消息会被当成新输入重新记一遍。
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.carl.pdca.daemon</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>__PYTHON__</string>
+		<string>__PROJECT__/src/daemon.py</string>
+	</array>
+
+	<key>WorkingDirectory</key>
+	<string>__PROJECT__</string>
+
+	<key>KeepAlive</key>
+	<true/>
+
+	<!-- 异常退出后至少等 10 秒再重启，避免疯狂循环 -->
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+
+	<key>StandardOutPath</key>
+	<string>__PROJECT__/logs/daemon.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>__PROJECT__/logs/daemon.err.log</string>
+
+	<key>ProcessType</key>
+	<string>Background</string>
+</dict>
+</plist>

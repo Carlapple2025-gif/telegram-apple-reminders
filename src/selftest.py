@@ -617,13 +617,9 @@ _bc_src = _insp2.getsource(_notify.broadcast)
 check("默认同时发 Telegram 与 Bark",
       '"telegram"' in _bc_src and '"bark"' in _bc_src)
 
-# 日报默认走双通道，且支持 --ask（渐进式披露的落地点）
-_dr_src = (SRC / "daily_report.py").read_text(encoding="utf-8")
-check("日报默认双通道", "telegram,bark" in _dr_src)
-
-# 定时任务里必须真的带上 --ask，否则"接了但没启用"
-_plist = (ROOT / "deploy" / "com.carl.pdca.report.plist").read_text(encoding="utf-8")
-check("定时任务的日报已启用 --sync", "<string>--sync</string>" in _plist)
+# 日报默认走双通道（v4 的 report.py；v1 的 daily_report.py 仍在但已不接线）
+_rp_src = (SRC / "report.py").read_text(encoding="utf-8")
+check("v4 日报默认双通道", "telegram,bark" in _rp_src)
 
 
 section("系统 Python 兼容性")
@@ -660,31 +656,34 @@ else:
 
 # ── 关键路线的三个定时任务必须齐全
 
-section("关键路线的定时任务")
+section("v4 的定时任务路线")
 
-# 关键路线（最小模型）：
-#   ① 09:00 同步待办 → 提醒事项   ← 没它就没地方打钩，完成状态无从谈起
-#   ② 21:30 日报（只读 + 推送）
-#   ③ 07:00 顺延（唯一写备忘录）
+# v4 的关键路线只有两个任务：
+#   ① 常驻收件守护（KeepAlive）—— 你发一句就有人接
+#   ② 21:30 日报（只读三处快照）
 #
-# 检查 plist 真的存在且在安装列表里 —— "实现了但没接线"是本项目
-# 反复踩的坑（write_back 未被调用、顺延后不建留档、待办从未同步）。
+# v1 的三个任务（09:00 同步 / 21:30 日报 / 07:00 顺延）在 v4 都不需要：
+# 待办常驻提醒事项，没有"同步"和"顺延"这两个概念。
 _plists = {p.name for p in (ROOT / "deploy").glob("com.carl.pdca.*.plist")}
-for _need in ("com.carl.pdca.sync.plist", "com.carl.pdca.report.plist",
-              "com.carl.pdca.carryover.plist"):
+for _need in ("com.carl.pdca.daemon.plist", "com.carl.pdca.report.plist"):
     check(f"存在 {_need}", _need in _plists)
 
 _install = (ROOT / "deploy" / "install_launchd.sh").read_text(encoding="utf-8")
-for _lbl in ("com.carl.pdca.sync", "com.carl.pdca.report", "com.carl.pdca.carryover"):
+for _lbl in ("com.carl.pdca.daemon", "com.carl.pdca.report"):
     check(f"安装列表含 {_lbl}", _lbl in _install)
 
-# 同步任务必须带 --apply，否则只干跑、待办永远进不了提醒事项
-_sync_plist = (ROOT / "deploy" / "com.carl.pdca.sync.plist").read_text(encoding="utf-8")
-check("同步任务带 --apply", "<string>--apply</string>" in _sync_plist)
-check("同步任务带 --refresh", "<string>--refresh</string>" in _sync_plist)
+# 守护必须 KeepAlive（否则退出后没人接消息）
+_dmn = (ROOT / "deploy" / "com.carl.pdca.daemon.plist").read_text(encoding="utf-8")
+check("守护任务设了 KeepAlive", "<key>KeepAlive</key>" in _dmn)
+check("守护任务有重启节流", "ThrottleInterval" in _dmn)
+check("守护指向 daemon.py", "src/daemon.py" in _dmn)
 
+# 日报指向新实现，且不带 v1 的 --refresh/--sync（v4 日报是纯只读）
+_rep = (ROOT / "deploy" / "com.carl.pdca.report.plist").read_text(encoding="utf-8")
+check("日报指向 report.py", "src/report.py" in _rep)
+check("v4 日报不带 v1 的 --refresh", "--refresh" not in _rep)
+check("v4 日报不带 v1 的 --sync", "--sync" not in _rep)
 
-# ── 顺延必须依据**当前**权威状态
 
 section("顺延依据当前权威状态")
 
@@ -1454,6 +1453,85 @@ finally:
 for _fn in ("send", "send_with_buttons", "answer_callback", "get_updates",
             "load_config"):
     check(f"telegram 提供 {_fn}", hasattr(_tg, _fn))
+
+
+section("v4 日报（report，注入假数据）")
+
+# report 的数据源可注入，所以渲染逻辑能完全离线验证。
+# 三处读取各自独立失败、互不影响 —— 这是 v1 的教训：
+# 一个来源不可用就整个日报发不出，代价太大。
+_rp = _load(SRC / "report.py")
+
+_RD = _dt2.date(2026, 10, 3)
+_t6, _b6 = _rp.build_report(_rp.ReportData(
+    date=_RD,
+    todos=[_rp.Todo("勘察表盖章", True), _rp.Todo("跟进竣工报验", False),
+           _rp.Todo("交电费", False)],
+    events=[_rp.Event("项目周会", _dt2.datetime(2026, 10, 4, 14, 0), "会议室")],
+    memos=[_rp.Memo("荷载要按名称命名", _dt2.datetime(2026, 9, 28, 10, 0))],
+))
+check("日报标题格式", _t6 == "📋 2026-10-03 复盘", _t6)
+check("日报含完成段", "✅ 今日完成 1 件" in _b6)
+check("日报列出完成项", "勘察表盖章" in _b6)
+check("日报含未完成段", "⏳ 未完成 2 件" in _b6)
+check("日报含明日日程", "📅 明日日程 1 项" in _b6 and "14:00" in _b6)
+check("日报含日程地点", "@会议室" in _b6)
+check("日报含备忘提醒", "📝 备忘放了 3 天以上" in _b6 and "荷载要按名称命名" in _b6)
+check("日报说明如何消除备忘提醒", "删掉即可" in _b6)
+
+# 全部完成 → 不该出现"未完成"段
+_t7, _b7 = _rp.build_report(_rp.ReportData(date=_RD, todos=[_rp.Todo("甲", True)]))
+check("全部完成有庆祝文案", "🎉" in _b7)
+check("全部完成无未完成段", "⏳" not in _b7)
+
+# 完全没有待办
+_t8, _b8 = _rp.build_report(_rp.ReportData(date=_RD))
+check("无待办时如实提示", "还没有条目" in _b8)
+check("无待办时无完成段", "✅" not in _b8)
+
+# 读取失败时**不能**说"没有待办" —— 那是把"读不到"说成"没有"，
+# 会让人以为一切正常（这类"静默误报"比报错更危险）。
+_t8b, _b8b = _rp.build_report(_rp.ReportData(
+    date=_RD, errors=["提醒事项：拒绝访问"]))
+check("提醒事项读取失败时不说\"没有待办\"", "还没有条目" not in _b8b)
+check("提醒事项读取失败时有告警", "⚠️" in _b8b)
+
+# 读取失败要如实标注，不能静默变成"今天没有待办"
+_t9, _b9 = _rp.build_report(_rp.ReportData(
+    date=_RD, todos=[_rp.Todo("甲", True)],
+    errors=["日历：超时", "备忘台账：文件损坏"]))
+check("读取失败时标注告警", "⚠️" in _b9)
+check("读取失败时列出来源", "日历：超时" in _b9 and "备忘台账：文件损坏" in _b9)
+check("读取失败时说明可能不完整", "可能不完整" in _b9)
+
+# 无地点不该显示多余的 @
+_t10, _b10 = _rp.build_report(_rp.ReportData(
+    date=_RD, events=[_rp.Event("例会", _dt2.datetime(2026, 10, 4, 9, 0))]))
+check("日程无地点时不显示 @", "@" not in _b10)
+
+# run() 要存档到 data/digest/ 且不推送（注入假 sender）
+import tempfile as _tf7  # noqa: E402
+import shutil as _sh7  # noqa: E402
+_dg = _P2(_tf7.mkdtemp())
+_old_root = _rp.ROOT
+_rp.ROOT = _dg
+try:
+    _sent: list = []
+    _rp.run(date=_RD, push=True, data=_rp.ReportData(date=_RD),
+            sender=lambda t, b, channels=None: (_sent.append((t, b)), [("telegram", True, "ok")])[1])
+    _digest = _dg / "data" / "digest" / "2026-10-03.md"
+    check("日报存档到 data/digest/", _digest.is_file())
+    check("存档内容含标题", "复盘" in _digest.read_text(encoding="utf-8"))
+    check("日报确实调用了推送", len(_sent) == 1)
+finally:
+    _rp.ROOT = _old_root
+    _sh7.rmtree(_dg, ignore_errors=True)
+
+# 时间戳解析容错（journal 里的 at 字段）
+check("时间戳解析：完整 ISO",
+      _rp._parse_at("2026-10-03T10:20:30+08:00") is not None)
+check("时间戳解析：空字符串返回 None", _rp._parse_at("") is None)
+check("时间戳解析：垃圾返回 None", _rp._parse_at("不是时间") is None)
 
 
 # ── 汇总

@@ -1,0 +1,303 @@
+#!/usr/bin/env python3
+"""
+日报：读三处 Apple 应用的**当前状态**，生成复盘并推送。
+
+## 三处数据源（全部只读）
+
+    提醒事项 → 今天完成了什么、还剩什么
+    日历     → 明天的日程
+    备忘录   → 放久了还没处理的备忘（防遗忘）
+
+**只读** —— 日报不改任何东西。这与 v1 不同：v1 的日报会回写留档、
+还会同步提醒事项，于是"读"和"写"混在一起，出了问题很难判断是谁改的。
+
+## 数据源可注入
+
+    build_report(date_str, reminder_items=..., events=..., memos=...)
+
+生产用真实适配器，测试注入假数据 —— 于是全部渲染逻辑都能离线验证。
+
+## 「防遗忘」怎么实现
+
+从 `journal` 的台账（我提交过哪些备忘）里，找出**创建超过 N 天**的条目。
+"某条还在不在"由 journal 台账回答（快照观察已把被删的移出台账），
+所以日报**不需要读备忘录正文** —— 少一次 I/O，也少一处可能的失败。
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable
+
+ROOT = Path(__file__).resolve().parent.parent
+
+# 备忘放多久还没被删掉，就在日报里提醒一次（天）
+MEMO_NAG_DAYS = 3
+
+
+@dataclass
+class Todo:
+    """提自提醒事项的一条待办。"""
+    name: str
+    completed: bool
+    completed_at: dt.datetime | None = None
+
+
+@dataclass
+class Event:
+    """提自日历的一条日程。"""
+    summary: str
+    start: dt.datetime
+    location: str = ""
+
+
+@dataclass
+class Memo:
+    """提自 journal 台账的一条备忘。"""
+    text: str
+    created: dt.datetime | None = None
+
+
+@dataclass
+class ReportData:
+    """日报的全部输入（三处快照）。"""
+    date: dt.date
+    todos: list[Todo] = field(default_factory=list)
+    events: list[Event] = field(default_factory=list)      # 明天的日程
+    memos: list[Memo] = field(default_factory=list)        # 需要提醒的备忘
+    errors: list[str] = field(default_factory=list)        # 某处读失败时的说明
+
+    @property
+    def done(self) -> list[Todo]:
+        return [t for t in self.todos if t.completed]
+
+    @property
+    def open_items(self) -> list[Todo]:
+        return [t for t in self.todos if not t.completed]
+
+
+# ── 渲染
+
+def build_report(data: ReportData) -> tuple[str, str]:
+    """
+    生成 (标题, 正文)。
+
+    正文结构固定四段，**每段都可能为空**（空则整段省略）：
+        完成 / 未完成 / 明日日程 / 备忘提醒
+    """
+    d = data.date
+    title = f"📋 {d.isoformat()} 复盘"
+
+    lines: list[str] = []
+
+    if data.done:
+        lines.append(f"✅ 今日完成 {len(data.done)} 件")
+        for t in data.done:
+            lines.append(f"　{t.name}")
+        lines.append("")
+
+    if data.open_items:
+        lines.append(f"⏳ 未完成 {len(data.open_items)} 件")
+        for t in data.open_items:
+            lines.append(f"　{t.name}")
+        lines.append("")
+    elif data.todos:
+        lines.append("🎉 今天的待办全部完成了")
+        lines.append("")
+
+    # 注意：读取失败时**不能**说"没有待办" —— 那是把"读不到"说成"没有"，
+    # 会误导（实测见过：权限缺失时日报显示"今天没有待办"，看起来一切正常）。
+    _rem_failed = any("提醒事项" in e for e in data.errors)
+    if not data.todos and not _rem_failed:
+        lines.append("（提醒事项里还没有条目 —— 发一句给我就行）")
+        lines.append("")
+
+    if data.events:
+        lines.append(f"📅 明日日程 {len(data.events)} 项")
+        for e in data.events:
+            loc = f"　@{e.location}" if e.location else ""
+            lines.append(f"　{e.start.hour:02d}:{e.start.minute:02d} "
+                         f"{e.summary}{loc}")
+        lines.append("")
+
+    if data.memos:
+        lines.append(f"📝 备忘放了 {MEMO_NAG_DAYS} 天以上，还没处理：")
+        for m in data.memos:
+            lines.append(f"　{m.text}")
+        lines.append("　（处理完在备忘录里删掉即可，之后不再提醒）")
+        lines.append("")
+
+    if data.errors:
+        lines.append("⚠️ 以下来源读取失败，本份可能不完整：")
+        for e in data.errors:
+            lines.append(f"　{e}")
+        lines.append("")
+
+    lines.append("─" * 30)
+    lines.append("做完的在「提醒事项」里打钩 ✓")
+    lines.append("（发一句给我也行，比如「明天交电费」）")
+
+    return title, "\n".join(lines).strip()
+
+
+# ── 数据采集（真实路径，全部只读）
+
+def collect(date: dt.date | None = None,
+            memo_nag_days: int = MEMO_NAG_DAYS) -> ReportData:
+    """
+    读三处 Apple 应用的当前状态。
+
+    **每处失败都不影响其它处** —— 日报的价值在于汇总，
+    宁可少一段也不要整份失败（v1 的教训：一个来源不可用就整个日报发不出）。
+    """
+    today = date or dt.date.today()
+    data = ReportData(date=today)
+
+    # ① 提醒事项
+    try:
+        data.todos = _read_todos()
+    except Exception as e:  # noqa: BLE001
+        data.errors.append(f"提醒事项：{e}")
+
+    # ② 日历（明天的日程）
+    try:
+        data.events = _read_events(today + dt.timedelta(days=1))
+    except Exception as e:  # noqa: BLE001
+        data.errors.append(f"日历：{e}")
+
+    # ③ 备忘（从 journal 台账算，不读备忘录正文）
+    try:
+        data.memos = _read_stale_memos(today, memo_nag_days)
+    except Exception as e:  # noqa: BLE001
+        data.errors.append(f"备忘台账：{e}")
+
+    return data
+
+
+def _read_todos() -> list[Todo]:
+    """读提醒事项列表里的全部条目。"""
+    import reminders
+    rem = reminders.Reminders()
+    rem.verify_list()
+    out: list[Todo] = []
+    for r in rem.all_reminders():
+        out.append(Todo(
+            name=r.name,
+            completed=bool(r.completed),
+            completed_at=None,
+        ))
+    return out
+
+
+def _read_events(day: dt.date) -> list[Event]:
+    """读某一天的日程。"""
+    import applecal
+    evs = applecal.events_between(day, day + dt.timedelta(days=1))
+    return [Event(summary=e.summary, start=e.start, location=e.location)
+            for e in evs]
+
+
+def _read_stale_memos(today: dt.date, days: int) -> list[Memo]:
+    """
+    从 journal 台账里找"放了 N 天以上"的备忘。
+
+    台账只含"我提交过、且快照里还在"的条目 —— 你删掉的已经移出台账，
+    所以这里天然不会提醒一件已经处理完的事。
+    """
+    import journal
+    out: list[Memo] = []
+    for _mid, info in journal.submitted_memos(days=365).items():
+        created = _parse_at(info.get("at", ""))
+        if created is None:
+            continue
+        age = (today - created.date()).days
+        if age >= days:
+            out.append(Memo(text=info.get("text", ""), created=created))
+    out.sort(key=lambda m: m.created or dt.datetime.min)
+    return out
+
+
+def _parse_at(s: str) -> dt.datetime | None:
+    """解析 journal 里的 ISO 时间戳。容错：解析不了返回 None。"""
+    if not s:
+        return None
+    try:
+        return dt.datetime.fromisoformat(s)
+    except ValueError:
+        try:
+            return dt.datetime.fromisoformat(s[:19])
+        except ValueError:
+            return None
+
+
+# ── 主流程
+
+def run(date: dt.date | None = None, push: bool = True,
+        channels: list[str] | None = None,
+        memo_nag_days: int = MEMO_NAG_DAYS,
+        data: ReportData | None = None,
+        sender: Callable[..., list] | None = None) -> tuple[str, str]:
+    """
+    生成并（可选）推送日报。返回 (标题, 正文)。
+
+    `data` 给定时跳过采集（测试用）；`sender` 给定时跳过真实推送。
+    """
+    today = date or dt.date.today()
+    data = data or collect(today, memo_nag_days)
+    title, body = build_report(data)
+
+    print(title)
+    print("═" * 46)
+    print(body)
+    print("═" * 46)
+
+    # 存档到 data/digest/（Telegram 之外再留一份，便于回顾）
+    try:
+        digest_dir = ROOT / "data" / "digest"
+        digest_dir.mkdir(parents=True, exist_ok=True)
+        (digest_dir / f"{today.isoformat()}.md").write_text(
+            f"# {title}\n\n{body}\n", encoding="utf-8")
+        print(f"已存档：data/digest/{today.isoformat()}.md")
+    except OSError as e:
+        print(f"⚠️ 存档失败（不影响推送）：{e}", file=sys.stderr)
+
+    if push:
+        import notify
+        send = sender or notify.broadcast
+        results = send(title, body, channels=channels)
+        print()
+        for ch, ok, msg in results:
+            print(f"  {'✅' if ok else '❌'} {ch}: {msg}")
+
+    return title, body
+
+
+def main() -> int:
+    import argparse
+
+    ap = argparse.ArgumentParser(description="日报：汇总三处状态并推送")
+    ap.add_argument("date", nargs="?", help="日期 YYYY-MM-DD，默认今天")
+    ap.add_argument("--no-push", action="store_true", help="只打印，不推送")
+    ap.add_argument("--channels", default="telegram,bark",
+                    help="推送通道，逗号分隔（默认 telegram,bark）")
+    ap.add_argument("--memo-days", type=int, default=MEMO_NAG_DAYS,
+                    help=f"备忘放多少天开始提醒（默认 {MEMO_NAG_DAYS}）")
+    args = ap.parse_args()
+
+    try:
+        d = dt.date.fromisoformat(args.date) if args.date else dt.date.today()
+    except ValueError as e:
+        print(f"❌ 日期格式不对（应为 YYYY-MM-DD）：{e}", file=sys.stderr)
+        return 1
+
+    run(d, push=not args.no_push,
+        channels=[c.strip() for c in args.channels.split(",") if c.strip()],
+        memo_nag_days=args.memo_days)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
