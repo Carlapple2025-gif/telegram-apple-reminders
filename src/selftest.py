@@ -700,6 +700,51 @@ for _sh in sorted((ROOT / "deploy").glob("*.sh")):
 check("deploy 下所有脚本无全角字符陷阱", not _traps, "；".join(_traps))
 
 
+section("plist 必须通过严格 XML 解析")
+
+# ⚠️ `plutil -lint` **不足以**验证 plist —— 它用宽松的旧式解析器，
+# 会放过真正的 XML 错误。实测踩到：daemon.plist 里 XML 注释含
+# `--drain`（**XML 注释不允许出现连续两个连字符**），
+# plutil -lint 报 OK，而 launchd 拒绝加载 ——
+# 表现是"安装显示成功、任务却不在跑"，排查了很久。
+#
+# 判据：用 plistlib（严格 XML 解析器）逐个解析。
+import plistlib as _plC  # noqa: E402
+_bad_plists: list[str] = []
+for _f in sorted((ROOT / "deploy").glob("*.plist")):
+    try:
+        _plC.loads(_f.read_bytes())
+    except Exception as _e:
+        _bad_plists.append(f"{_f.name}: {str(_e)[:50]}")
+check("deploy 下所有 plist 通过严格 XML 解析", not _bad_plists,
+      "；".join(_bad_plists))
+
+# XML 注释里不得出现 `--`（这是上面那个坑的直接判据，比解析更早暴露问题）
+_dash_comments: list[str] = []
+import re as _reD  # noqa: E402
+for _f in sorted((ROOT / "deploy").glob("*.plist")):
+    _txt = _f.read_text(encoding="utf-8")
+    for _m in _reD.finditer(r"<!--(.*?)-->", _txt, _reD.S):
+        if "--" in _m.group(1):
+            _dash_comments.append(_f.name)
+check("plist 注释里没有 --（XML 不合法）", not _dash_comments,
+      f"{_dash_comments} → 注释里出现连续两个连字符会让 launchd 拒绝加载")
+
+# 安装后的 plist（若已安装）也要能严格解析
+import pathlib as _plD  # noqa: E402
+_home_plists = sorted((_plD.Path.home() / "Library" / "LaunchAgents").glob(
+    "com.carl.pdca.*.plist"))
+if _home_plists:
+    _bad_home: list[str] = []
+    for _f in _home_plists:
+        try:
+            _plC.loads(_f.read_bytes())
+        except Exception:
+            _bad_home.append(_f.name)
+    check(f"已安装的 {len(_home_plists)} 个 plist 也能严格解析",
+          not _bad_home, "；".join(_bad_home))
+
+
 section("v4 的定时任务路线")
 
 # v4 的关键路线只有两个任务：
