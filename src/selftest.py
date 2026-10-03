@@ -1455,6 +1455,76 @@ for _fn in ("send", "send_with_buttons", "answer_callback", "get_updates",
     check(f"telegram 提供 {_fn}", hasattr(_tg, _fn))
 
 
+section("v4 对现有模块的调用契约")
+
+# 为什么需要：`intake._real_add_todo` / `_real_add_event` / `_real_add_memo`
+# 调的是**已有模块**（reminders / applecal / memo）。这些调用在沙箱里
+# 跑不到（没授权），所以签名不匹配的话，直到你第一次真实收件才会炸 ——
+# 而那时错误信息可能只是一句含糊的 AppleScript 报错。
+#
+# 这里用 inspect 核对：**参数名与数量必须能对上**，且返回值属性存在。
+import inspect as _insp8  # noqa: E402
+import dataclasses as _dc8  # noqa: E402
+
+_rems8 = _load(SRC / "reminders.py")
+_ac8 = _load(SRC / "applecal.py")
+_mm8 = _load(SRC / "memo.py")
+
+# ① 待办端：Reminders 的 create / verify_list / make_key
+check("Reminders 有 create", hasattr(_rems8.Reminders, "create"))
+check("Reminders 有 verify_list", hasattr(_rems8.Reminders, "verify_list"))
+_sig_create = _insp8.signature(_rems8.Reminders.create)
+check("Reminders.create 接受 name/body",
+      {"name", "body"} <= set(_sig_create.parameters))
+# intake 调的是 rem.create(name=text, body=body)
+_sig_create.bind(None, name="x", body="y")
+check("create(name=, body=) 是合法调用", True)
+
+_sig_mk = _insp8.signature(_rems8.make_key)
+_sig_mk.bind("text")            # intake 调 make_key(text)
+check("make_key(text) 是合法调用", True)
+check("Reminder 有 id 字段（intake 要取它）",
+      "id" in {f.name for f in _dc8.fields(_rems8.Reminder)})
+
+# ② 日程端：applecal.add 的关键字与返回值
+_sig_ev = _insp8.signature(_ac8.add)
+for _kw in ("summary", "start", "end", "location", "recurrence", "allday"):
+    check(f"applecal.add 接受 {_kw}", _kw in _sig_ev.parameters)
+# intake 调的是 add(summary, start, end, location=..., recurrence=..., allday=...)
+_sig_ev.bind(None, _dt2.datetime(2026, 10, 5), _dt2.datetime(2026, 10, 5, 1),
+             location="", recurrence="", allday=False)
+check("applecal.add(...) 是合法调用", True)
+check("applecal.Event 有 uid 字段",
+      "uid" in {f.name for f in _dc8.fields(_ac8.Event)})
+
+# report 读事件用 events_between(date, date)
+_sig_eb = _insp8.signature(_ac8.events_between)
+_sig_eb.bind(_dt2.date(2026, 10, 5), _dt2.date(2026, 10, 6))
+check("events_between(date, date) 是合法调用", True)
+check("applecal.Event 有 summary/start/location（report 要用）",
+      {"summary", "start", "location"} <=
+      {f.name for f in _dc8.fields(_ac8.Event)})
+
+# ③ 备忘端：memo.add(text) → Memo.note_id
+_sig_memo = _insp8.signature(_mm8.add)
+_sig_memo.bind("x")
+check("memo.add(text) 是合法调用", True)
+check("memo.Memo 有 note_id 字段（intake 要取它）",
+      "note_id" in {f.name for f in _dc8.fields(_mm8.Memo)})
+
+# ④ daemon 用 intake 的三个私有方法（按钮指定类型时走同一条分派路径）
+for _m8 in ("_do_todo", "_do_event", "_do_memo"):
+    check(f"Intake 有 {_m8}（daemon 按钮要用）", hasattr(_it.Intake, _m8))
+
+# ⑤ report 读三处用的接口也要在
+check("Reminders 有 all_reminders（report 要用）",
+      hasattr(_rems8.Reminders, "all_reminders"))
+check("Reminder 有 completed/name（report 要用）",
+      {"completed", "name"} <= {f.name for f in _dc8.fields(_rems8.Reminder)})
+check("journal 有 submitted_memos（report 防遗忘要用）",
+      hasattr(_jr, "submitted_memos"))
+
+
 section("v4 日报（report，注入假数据）")
 
 # report 的数据源可注入，所以渲染逻辑能完全离线验证。
