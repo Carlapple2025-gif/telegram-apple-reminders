@@ -704,7 +704,22 @@ for _f in list((ROOT / "src").glob("*.py")) + list((ROOT / "deploy").glob("*.sh"
 check("代码里没有重复的 is", not _dup5, "；".join(_dup5[:3]))
 
 
-print("\n── 17. 「内容未变」必须视为成功 ──")
+print("\n── 17. 顺延后必须为次日页建留档 ──")
+
+# 实测踩到：顺延在备忘录里建了 10-03，但没建留档 ——
+# 于是"新的一页不在系统视野内"：日报读不到它、时段询问扫描不到它、
+# 再下次顺延也读不到它。原因不是崩溃，而是**漏了一步**。
+#
+# 这类"漏接线"的问题靠运行看不出来（一切正常、就是少了一页），
+# 所以要静态确认这步真的在。
+_co_src = (SRC / "carry_over.py").read_text(encoding="utf-8")
+check("顺延后会为次日页建留档",
+      "建立留档" in _co_src and "sync.sync_day(next_date_str)" in _co_src)
+check("建留档失败不阻断顺延（备忘录已写入）",
+      "建立留档失败" in _co_src)
+
+
+print("\n── 18. 「内容未变」必须视为成功 ──")
 
 # Telegram 对"内容与当前完全一致"的编辑**返回 HTTP 400 错误**：
 #   message is not modified: specified new message content ... exactly the same
@@ -728,7 +743,7 @@ check("finish_ui 用 edit_with_buttons（能处理未变）",
       "tg.edit_with_buttons(sess.message_id" in _ask_src2)
 
 
-print("\n── 18. 通知通道 ──")
+print("\n── 19. 通知通道 ──")
 
 _notify = _load(SRC / "notify.py")
 
@@ -755,7 +770,7 @@ check("定时任务的日报已启用 --ask", "<string>--ask</string>" in _plist
 check("定时任务的日报已启用 --sync", "<string>--sync</string>" in _plist)
 
 
-print("\n── 19. 系统 Python 兼容性 ──")
+print("\n── 20. 系统 Python 兼容性 ──")
 
 # 为什么单独查这个：launchd 任务用的是 **/usr/bin/python3（3.9）**，
 # 而我平时用自带运行时（3.12）。若代码用了运行时求值的类型标注
@@ -789,7 +804,7 @@ else:
 
 # ── 11. 密钥不进版本库
 
-print("\n── 20. 密钥保护检查 ──")
+print("\n── 21. 密钥保护检查 ──")
 
 # 为什么值得单独查：Telegram token 一旦被提交，等于把 bot 交给别人。
 # 加 telegram.py 时就发现 .gitignore 里**没有 .env** —— 而下一步就要往
@@ -807,7 +822,7 @@ check(".env.example 可被提交（它是模板）", _r.returncode != 0)
 
 # ── 18. shell 脚本静态检查：bash 3.2 的全角字符陷阱
 
-print("\n── 21. shell 脚本检查 ──")
+print("\n── 22. shell 脚本检查 ──")
 
 # macOS 自带 bash 3.2 会把**全角字符的字节**当成变量名的一部分。
 # 于是 `echo "「$TARGET」"` 会去找名为 `TARGET」` 的变量，报

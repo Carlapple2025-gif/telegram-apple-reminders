@@ -357,6 +357,23 @@ def main() -> int:
                 print(f"      {m}", file=sys.stderr)
             return 3
         print(f"  ✅ 读回验证通过（{len(plan)} 条全部可见）")
+        # 顺延刚建/改了次日页 → 立刻为它建一份留档。
+        #
+        # 为什么必须做：顺延只写备忘录，而留档是后续所有步骤的输入
+        # （日报读它、时段询问扫描它、再下次顺延读它）。不补这一步，
+        # 新的一页就**不在系统视野内** —— 实测踩到：10-03 建好后留档里
+        # 没有它，`ask_slots --all` 因此看不到它上面的条目。
+        try:
+            s2 = sync.sync_day(next_date_str)
+            if s2 is not None:
+                print(f"  ✅ 已为 {next_date_str} 建立留档"
+                      f"（待办 {len(s2.result.todos)} 条）")
+            else:
+                print(f"  ⚠️ 顺延已写入，但读回时找不到 {next_date_str}",
+                      file=sys.stderr)
+        except Exception as e:  # noqa: BLE001
+            # 留档失败不该让顺延本身算失败：备忘录已经写进去了。
+            print(f"  ⚠️ 建立留档失败：{e}", file=sys.stderr)
     except NotesError as e:
         print(f"  ❌ 写入失败：{e}", file=sys.stderr)
         return 3
