@@ -183,9 +183,19 @@ pdca/
 ├── tools/                     真实环境自检与冒烟
 └── docs/
     ├── ARCHITECTURE.md        ← 架构定稿（要先看这个）
+    ├── PROJECT-STATE.md       ← 现状与决定清单（新会话从这里接续）
+    ├── SYMBOL-SCHEME.md       符号声明方案（已定稿、未实现）
+    ├── TELEGRAM-DESIGN.md     Telegram 层设计（讨论稿）
+    ├── USER-GUIDE.md          使用者视角（怎么用、说错了怎么收拾）
     ├── CONCEPT.md             最初的概念（部分已被 ARCHITECTURE 取代）
+    ├── archive/               被推翻的 v1 架构（理解"为什么推翻"）
     └── ORIENTATION-ROOTCAUSE.md  照片方向问题排查（与 v4 无关，同属踩坑记录）
 ```
+
+> **文档之间是什么关系**：`ARCHITECTURE.md` 是唯一权威；
+> `SYMBOL-SCHEME.md` 与 `TELEGRAM-DESIGN.md` 是**待实施的方案**（代码还没改）；
+> `PROJECT-STATE.md` 是跨会话的接续点，记录"已定 / 待定 / 下一步"。
+> 看代码之前先看 `PROJECT-STATE.md`，能省掉重新推导的时间。
 
 ### 两类日志必须分开
 
