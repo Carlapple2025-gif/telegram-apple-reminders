@@ -1524,6 +1524,10 @@ for _fn in ("send", "send_with_buttons", "answer_callback", "get_updates",
     check(f"telegram 提供 {_fn}", hasattr(_tg, _fn))
 
 
+check("真实自检用分钟精度断言（与 applecal.add 一致）",
+      "second=0" in (ROOT / "tools" / "selftest-live.py").read_text(encoding="utf-8"),
+      "断言未对齐精度会导致假失败")
+
 section("真实环境自检脚本（tools/selftest-live.py）")
 
 # 单元测试与冒烟都用**假写入端**，证明不了"真的能写进去"。
