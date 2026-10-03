@@ -1397,6 +1397,19 @@ try:
     _dm.save_offset(12399)
     check("offset 可覆盖", _dm.load_offset() == 12399)
 
+    # ⚠️ 状态字段之间**不能互相覆盖**。
+    # 踩到过：save_offset 写的是全新字典，于是每次保存读取位置都会把
+    # notified_at（启动通知冷却）抹掉 —— 冷却失效，崩溃循环时又开始刷屏。
+    # 这类"读-改-写没保留其它字段"的坑本项目出现过多次。
+    _dm._mark_notified()
+    _dm.save_offset(555)
+    _st = _json2.loads(_dm.STATE_FILE.read_text(encoding="utf-8"))
+    check("写 offset 不冲掉 notified_at", "notified_at" in _st, str(sorted(_st)))
+    _dm._mark_notified()
+    _st2 = _json2.loads(_dm.STATE_FILE.read_text(encoding="utf-8"))
+    check("写 notified_at 不冲掉 offset", _st2.get("offset") == 555,
+          str(sorted(_st2)))
+
     check("原子写不留 .tmp 残留", not (_dm_dir / "state.tmp").exists())
 
     # 状态文件损坏不该让守护进程起不来
@@ -1563,6 +1576,33 @@ check("Reminder 有 completed/name（report 要用）",
       {"completed", "name"} <= {f.name for f in _dc8.fields(_rems8.Reminder)})
 check("journal 有 submitted_memos（report 防遗忘要用）",
       hasattr(_jr, "submitted_memos"))
+
+
+section("v4 守护的启动通知冷却")
+
+# 为什么需要：守护是 KeepAlive 的，如果因故反复重启，
+# **你每次都会收到一条启动消息** —— 崩溃循环会变成消息轰炸，
+# 而那恰恰是你最不想被打扰的时候。
+check("有启动通知冷却机制", hasattr(_dm, "_should_notify_startup"))
+check("有冷却标记写入", hasattr(_dm, "_mark_notified"))
+_gd = _P2(_tf2.mkdtemp())
+_old_sf = _dm.STATE_FILE
+_dm.STATE_FILE = _gd / "state.json"
+try:
+    check("无状态文件时允许通知", _dm._should_notify_startup() is True)
+    _dm._mark_notified()
+    check("刚通知过则跳过", _dm._should_notify_startup() is False)
+
+    # 状态文件损坏时保守放行（宁可多发一条，也不要静默永不通知）
+    _dm.STATE_FILE.write_text("{坏", encoding="utf-8")
+    check("状态损坏时放行（保守）", _dm._should_notify_startup() is True)
+finally:
+    _dm.STATE_FILE = _old_sf
+    _sh2.rmtree(_gd, ignore_errors=True)
+
+# 状态更新必须是"读-改-写"，不能整份覆盖
+check("存在统一的 update_state（读-改-写）",
+      hasattr(_dm, "update_state"))
 
 
 section("v4 守护的崩溃循环防护")

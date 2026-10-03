@@ -81,14 +81,38 @@ def load_offset() -> int | None:
         return None
 
 
+def update_state(**fields) -> None:
+    """
+    **读-改-写**地更新状态文件（保留其它字段）。
+
+    ⚠️ 不能用"写一个全新字典"的方式 —— 那会把别的字段冲掉。
+    实测踩到：save_offset 原本写的是全新字典，于是每次保存读取位置
+    都会把 notified_at（启动通知冷却用）抹掉，冷却随即失效、
+    崩溃循环时又会开始刷屏。
+    这类"读-改-写没保留其它字段"的坑在本项目出现过多次（早先的
+    Telegram 配置也是），所以统一收口到一个函数。
+    """
+    data: dict = {}
+    if STATE_FILE.is_file():
+        try:
+            data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            data = {}
+    data.update(fields)
+    data["at"] = dt.datetime.now().astimezone().replace(
+        microsecond=0).isoformat()
+    try:
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = STATE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, STATE_FILE)     # 原子替换，避免写一半被读到
+    except OSError as e:
+        _log(f"状态保存失败（不影响运行）：{_trunc(str(e))}")
+
+
 def save_offset(offset: int) -> None:
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = STATE_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"offset": offset,
-                               "at": dt.datetime.now().astimezone().replace(
-                                   microsecond=0).isoformat()},
-                              ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, STATE_FILE)     # 原子替换，避免写一半被读到
+    """保存读取位置。**保留其它字段**（见 update_state 的说明）。"""
+    update_state(offset=offset)
 
 
 # ── 待确认项（按钮用）
@@ -303,6 +327,34 @@ def run_once(offset: int | None = None, wait: int = 25) -> int | None:
     return new_offset
 
 
+# 启动通知的冷却时间（秒）。5 分钟内不重复发。
+NOTIFY_COOLDOWN = 300
+
+
+def _should_notify_startup() -> bool:
+    """距上次启动通知是否已超过冷却时间。"""
+    if not STATE_FILE.is_file():
+        return True
+    try:
+        last = json.loads(STATE_FILE.read_text(encoding="utf-8")).get("notified_at")
+    except (json.JSONDecodeError, OSError):
+        return True
+    if not last:
+        return True
+    try:
+        prev = dt.datetime.fromisoformat(last)
+    except ValueError:
+        return True
+    age = (dt.datetime.now().astimezone() - prev).total_seconds()
+    return age >= NOTIFY_COOLDOWN
+
+
+def _mark_notified() -> None:
+    """记下"刚发过启动通知"（经 update_state，保留 offset 等字段）。"""
+    update_state(notified_at=dt.datetime.now().astimezone().replace(
+        microsecond=0).isoformat())
+
+
 def _stop(signum, frame):  # noqa: ANN001
     global _running
     _running = False
@@ -379,13 +431,22 @@ def main() -> int:
             offset = None
     _log(f"启动，offset = {offset}")
 
-    try:
-        tg.send("👋 pdca 收件守护已启动。直接发一句就行：\n"
-                "　　「明天交电费」→ 提醒事项\n"
-                "　　「周五下午两点项目周会」→ 日历\n"
-                "　　「想起一件事，…」→ 备忘录")
-    except tg.TelegramError as e:
-        _log(f"启动通知发送失败（不影响运行）：{_trunc(str(e))}")
+    # 启动通知带冷却：只在距上次通知超过 NOTIFY_COOLDOWN 秒时才发。
+    #
+    # 为什么需要：守护是 KeepAlive 的，如果因故反复重启，
+    # **你每次都会收到一条启动消息** —— 崩溃循环会变成消息轰炸，
+    # 而那恰恰是你最不想被打扰的时候。
+    if _should_notify_startup():
+        try:
+            tg.send("👋 pdca 收件守护已启动。直接发一句就行：\n"
+                    "　　「明天交电费」→ 提醒事项\n"
+                    "　　「周五下午两点项目周会」→ 日历\n"
+                    "　　「想起一件事，…」→ 备忘录")
+            _mark_notified()
+        except tg.TelegramError as e:
+            _log(f"启动通知发送失败（不影响运行）：{_trunc(str(e))}")
+    else:
+        _log("（启动通知处于冷却期，跳过 —— 避免反复重启时刷屏）")
 
     while _running:
         # --once 用短轮询：验证时不该干等长轮询的超时
