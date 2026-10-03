@@ -21,6 +21,9 @@
 	<array>
 		<string>__PYTHON__</string>
 		<string>__PROJECT__/src/carry_over.py</string>
+		<!-- 注意：脚本会**自动**先从提醒事项取当前完成状态，
+		     不需要额外开关。早先用留档快照判断，导致"昨晚打了钩、
+		     今早仍被顺延"（快照停在打钩之前）。 -->
 		<string>--apply</string>
 	</array>
 

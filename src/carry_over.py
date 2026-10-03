@@ -182,8 +182,6 @@ def main() -> int:
     ap.add_argument("--next", help="覆盖次日日期（默认来源日期 +1）")
     ap.add_argument("--offline", action="store_true",
                     help="不查备忘录，假定次日页不存在（用于离线验证计划生成）")
-    ap.add_argument("--resolve", action="store_true",
-                    help="现场从提醒事项重新解析完成状态（默认用留档里的回填结果）")
     args = ap.parse_args()
 
     src_date_str = args.date or dt.date.today().isoformat()
@@ -216,22 +214,26 @@ def main() -> int:
         prev = parser.parse(note.plaintext)
         source_desc = "备忘录"
 
-    # ── 完成状态：权威是提醒事项
-    # 默认直接用留档里的 completed（21:30 日报已回填过，含你打完钩的状态）。
-    # --resolve 时现场再解析一次，用于"日报没跑成"或"想立刻用最新状态"。
-    if args.resolve or source_desc == "备忘录":
-        import completion
-        resolved = completion.resolve(prev, sync.archive_meta(src_date_str).get("note_id", ""))
-        changed = completion.write_back(prev, resolved)
-        if resolved.reminders_available:
-            if changed:
-                sync.save_archive(src_date_str, prev)
-            print(f"完成状态：已从提醒事项解析（修正 {changed} 条）")
-        else:
-            print(f"⚠️  提醒事项不可用（{resolved.reminders_error}），"
-                  f"退回用备忘录标记判断")
+    # ── 完成状态：**总是**从提醒事项取当前值
+    #
+    # 为什么不默认用留档快照：快照可能是几小时前的，而完成状态会在这期间变化。
+    # 实测踩到：用户 22:00 在提醒事项打了钩，但留档停在 21:52，
+    # 于是次日 07:02 的顺延把**已经完成的事**也带到了新的一天，
+    # 造成"备忘录说未完成、提醒事项说已完成"的矛盾。
+    #
+    # "依据权威状态"不该是个需要记住的开关 —— 所以这里不做条件分支，
+    # 每次都现场解析。提醒事项不可用时才退回备忘录标记（并明确告警）。
+    import completion
+    resolved = completion.resolve(prev, sync.archive_meta(src_date_str).get("note_id", ""))
+    changed = completion.write_back(prev, resolved)
+    if resolved.reminders_available:
+        if changed:
+            sync.save_archive(src_date_str, prev)
+        note = f"（修正 {changed} 条）" if changed else ""
+        print(f"完成状态：已从提醒事项取当前值{note}")
     else:
-        print("完成状态：取自留档（21:30 日报已回填）")
+        print(f"⚠️  提醒事项不可用（{resolved.reminders_error}），"
+              f"退回用备忘录标记判断 —— 结果可能不准")
 
     print(f"来源：{source_desc}（{src_date_str}）")
     print(f"  待办 {len(prev.todos)} 条，其中未完成 {len(prev.open_todos)} 条")

@@ -619,7 +619,7 @@ import subprocess as _sp2  # noqa: E402
 _SYS_PY = "/usr/bin/python3"
 _modules = ["parse", "notes", "sync", "notify", "reminders", "push_tasks",
             "cleanup", "daily_report", "read_day", "completion", "telegram",
-            "cleanup_reminders"]
+            "cleanup_reminders", "reconcile"]
 
 if not os.path.exists(_SYS_PY):
     check("系统 python3 存在", False, f"找不到 {_SYS_PY}")
@@ -664,7 +664,29 @@ check("同步任务带 --apply", "<string>--apply</string>" in _sync_plist)
 check("同步任务带 --refresh", "<string>--refresh</string>" in _sync_plist)
 
 
-# ── 14. 密钥不进版本库
+# ── 14. 顺延必须依据**当前**权威状态
+
+print("\n── 14. 顺延依据当前权威状态 ──")
+
+# 实测踩到：用户 22:00 在提醒事项打了钩，但留档停在 21:52，
+# 次日 07:02 的顺延把**已完成的事**也带到了新的一天，
+# 造成"备忘录说未完成、提醒事项说已完成"的矛盾。
+#
+# 修法不是加个开关（那要靠人记得开），而是让它成为默认行为。
+_co_src2 = (SRC / "carry_over.py").read_text(encoding="utf-8")
+check("顺延总是从提醒事项取当前状态",
+      "总是**从提醒事项取当前值**" in _co_src2
+      or "总是" in _co_src2 and "completion.resolve" in _co_src2)
+check("顺延不再依赖 --resolve 开关", '"--resolve"' not in _co_src2)
+
+# 提供调和工具：把"提醒事项已完成、备忘录还写着 [ ]"的差异抹平
+check("存在调和工具 reconcile.py", (SRC / "reconcile.py").is_file())
+_rec_src = (SRC / "reconcile.py").read_text(encoding="utf-8")
+check("调和默认干跑（--apply 才写）", '"--apply"' in _rec_src)
+check("调和会读回验证", "读回验证" in _rec_src)
+
+
+
 
 print("\n── @. 密钥保护检查 ──")
 
