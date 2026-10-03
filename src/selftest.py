@@ -1057,6 +1057,211 @@ for _mod in ("memo.py", "applecal.py"):
 check("AppleScript 片段里没有 \\u 转义", not _u_escapes, "；".join(_u_escapes))
 
 
+section("v4 收件分派（intake，注入假写入端）")
+
+# intake 的三个写入端是**可注入**的 —— 所以全部分支都能离线验掉，
+# 不需要备忘录/日历权限，也不会污染真实数据。
+# v1 的分发逻辑绑死在真实 AppleScript 上，只能靠手动跑验证，
+# 这是它 bug 反复出现的原因之一。
+_it = _load(SRC / "intake.py")
+
+
+class _FakeSinks:
+    """记录所有写入调用，便于断言"到底往哪写了"。"""
+    def __init__(self):
+        self.calls = []
+
+    def todo(self, text, when=None):
+        self.calls.append(("todo", text, when))
+        return "T-1"
+
+    def event(self, summary, start, end, location="", recurrence="", allday=False):
+        self.calls.append(("event", summary, start, end, recurrence, allday))
+        return "E-1"
+
+    def memo(self, text):
+        self.calls.append(("memo", text))
+        return "M-1"
+
+
+def _fresh_journal():
+    """每个用例独立的 journal 目录，避免计数互相污染。"""
+    _d = _P2(_tf2.mkdtemp())
+    _jr.JOURNAL_DIR = _d
+    return _d
+
+
+def _new_intake():
+    _f = _FakeSinks()
+    return _it.Intake(add_todo=_f.todo, add_event=_f.event,
+                      add_memo=_f.memo), _f
+
+
+# ① 待办 → 只写提醒事项（正文已剥掉时间词）
+_d = _fresh_journal()
+try:
+    _i, _f = _new_intake()
+    _o = _i.handle("明天交电费", _B)
+    check("待办：ok 且类型正确", _o.ok and _o.kind == _cls.Kind.TODO)
+    check("待办：只写了一次", len(_f.calls) == 1, f"得到 {_f.calls}")
+    check("待办：写的是提醒事项端", _f.calls[0][0] == "todo")
+    check("待办：正文剥掉时间词", _f.calls[0][1] == "交电费", _f.calls[0][1])
+    check("待办：回执说明去向", "提醒事项" in _o.reply)
+finally:
+    _sh2.rmtree(_d, ignore_errors=True)
+
+# ② 日程 → 只写日历（含时间与重复规则）
+_d = _fresh_journal()
+try:
+    _i, _f = _new_intake()
+    _o = _i.handle("周五下午两点项目周会", _B)
+    check("日程：类型正确", _o.kind == _cls.Kind.EVENT)
+    check("日程：写的是日历端", _f.calls[0][0] == "event")
+    check("日程：时间算对", _f.calls[0][2] == _dt2.datetime(2026, 10, 9, 14, 0),
+          str(_f.calls[0][2]))
+    check("日程：回执含日期", "10月9日" in _o.reply)
+
+    _i, _f = _new_intake()
+    _o = _i.handle("每周一交周报", _B)
+    check("周期日程：带 RRULE", _f.calls[0][4] == "FREQ=WEEKLY;BYDAY=MO",
+          _f.calls[0][4])
+    check("周期日程：按全天处理", _f.calls[0][5] is True)
+    check("周期日程：回执说人话", "每周一" in _o.reply, _o.reply)
+finally:
+    _sh2.rmtree(_d, ignore_errors=True)
+
+# ③ 备忘 → 只写备忘录
+_d = _fresh_journal()
+try:
+    _i, _f = _new_intake()
+    _o = _i.handle("想起一件事，荷载要按名称命名", _B)
+    check("备忘：类型正确", _o.kind == _cls.Kind.MEMO)
+    check("备忘：写的是备忘录端", _f.calls[0][0] == "memo")
+    check("备忘：回执说明去向", "备忘录" in _o.reply)
+finally:
+    _sh2.rmtree(_d, ignore_errors=True)
+
+# ④ 判不出 → **不写入**、要求确认（"判断归用户"的落点）
+_d = _fresh_journal()
+try:
+    _i, _f = _new_intake()
+    _o = _i.handle("帮我看下那个表", _B)
+    check("判不出：不写入任何端", len(_f.calls) == 0, f"得到 {_f.calls}")
+    check("判不出：要求确认", _o.needs_ask and not _o.ok)
+    check("判不出：给了三个候选", len(_o.candidates) == 3)
+finally:
+    _sh2.rmtree(_d, ignore_errors=True)
+
+# ⑤ 日程没写时间 → 不瞎猜一个时间，要求补充
+_d = _fresh_journal()
+try:
+    _i, _f = _new_intake()
+    _o = _i.handle("例会", _B)
+    check("日程缺时间：不写入", len(_f.calls) == 0)
+    check("日程缺时间：要求补充", _o.needs_ask)
+    check("日程缺时间：回执提示", "没写时间" in _o.reply)
+finally:
+    _sh2.rmtree(_d, ignore_errors=True)
+
+# ⑥ 写入失败 → 不崩，给可操作的回执
+_d = _fresh_journal()
+try:
+    def _boom(*a, **k):
+        raise RuntimeError("模拟写入失败")
+
+    _i = _it.Intake(add_todo=_boom, add_event=_boom, add_memo=_boom)
+    _o = _i.handle("交电费", _B)
+    check("写入失败：ok=False 而非抛异常", _o.ok is False)
+    check("写入失败：回执含原因", "模拟写入失败" in _o.reply)
+    check("写入失败：回执给出退路", "手动加" in _o.reply)
+finally:
+    _sh2.rmtree(_d, ignore_errors=True)
+
+# ⑦ 空消息不崩
+_d = _fresh_journal()
+try:
+    _i, _f = _new_intake()
+    for _t in ("", "   "):
+        _o = _i.handle(_t, _B)
+        check(f"空消息 {_t!r} 不崩", _o.ok is False)
+    check("空消息不写入", len(_f.calls) == 0)
+finally:
+    _sh2.rmtree(_d, ignore_errors=True)
+
+# ⑧ journal 必须真的记下来 —— 这里守的是一个真实踩过的 bug：
+#    曾经把参数写反（`_journal(journal.log_error, where=..., detail=...)`），
+#    结果事件名和日志函数的参数混在一起，日志**静默写不进去**。
+#    所以断言"记录数"而不是"函数被调用过"。
+_d = _fresh_journal()
+try:
+    _i, _f = _new_intake()
+    _i.handle("明天交电费", _B)
+    _i.handle("周五下午两点项目周会", _B)
+    _i.handle("想起一件事，备忘内容", _B)
+    _evs = [r["event"] for r in _jr.read_day(_jr._today())]
+    check("journal 记了 3 条 input", _evs.count("input") == 3, str(_evs))
+    check("journal 记了 todo_added", _evs.count("todo_added") == 1)
+    check("journal 记了 event_added", _evs.count("event_added") == 1)
+    check("journal 记了 memo_added", _evs.count("memo_added") == 1)
+finally:
+    _sh2.rmtree(_d, ignore_errors=True)
+
+# ⑨ 写入失败时也要记 error（否则复盘时看不到"当时失败了"）
+_d = _fresh_journal()
+try:
+    def _boom2(*a, **k):
+        raise RuntimeError("x")
+
+    _i = _it.Intake(add_todo=_boom2, add_event=_boom2, add_memo=_boom2)
+    _i.handle("交电费", _B)
+    _evs = [r["event"] for r in _jr.read_day(_jr._today())]
+    check("写入失败也记 error", "error" in _evs, str(_evs))
+    check("写入失败也记 input", "input" in _evs, str(_evs))
+finally:
+    _sh2.rmtree(_d, ignore_errors=True)
+
+# ⑩ 判不出时也要记 input —— 便于复盘"我提过但没记成"
+_d = _fresh_journal()
+try:
+    _i, _f = _new_intake()
+    _i.handle("帮我看下那个表", _B)
+    _evs = [r["event"] for r in _jr.read_day(_jr._today())]
+    check("判不出也记 input", "input" in _evs, str(_evs))
+    check("判不出不写入", len(_f.calls) == 0)
+finally:
+    _sh2.rmtree(_d, ignore_errors=True)
+
+
+section("v4 待办的时间信息不能被丢掉")
+
+# 踩到过：classify 在待办分支写 `when=None`，把已经解析好的时间扔了 ——
+# "明天交电费"里的"明天"白解析，上层再也拿不到。
+# **解析出来的信息不该在分类这一步被丢弃**，用不用是上层的事。
+_c_todo = _cls.classify("明天交电费", _B)
+check("待办也保留解析出的时间", _c_todo.when is not None,
+      "when 被丢掉了")
+check("待办的 when 日期正确",
+      _c_todo.when is not None and _c_todo.when.start.date() == _dt2.date(2026, 10, 4),
+      str(_c_todo.when.start.date() if _c_todo.when else None))
+check("待办的 when 标了 has_date",
+      _c_todo.when is not None and _c_todo.when.has_date is True)
+
+_c_todo2 = _cls.classify("交电费", _B)
+check("无时间的待办 when 为 None", _c_todo2.when is None)
+
+# intake 要把这个时间传给提醒事项端（是否设 due 由该端决定）
+_d = _fresh_journal()
+try:
+    _i, _f = _new_intake()
+    _i.handle("明天交电费", _B)
+    check("intake 把时间传给了待办端",
+          _f.calls[0][2] is not None
+          and _f.calls[0][2].date() == _dt2.date(2026, 10, 4),
+          str(_f.calls[0][2]))
+finally:
+    _sh2.rmtree(_d, ignore_errors=True)
+
+
 # ── 汇总
 
 print()

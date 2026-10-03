@@ -178,9 +178,17 @@ def classify(text: str, base: dt.date | None = None) -> Classified | None:
                           when=when, recurrence=recur)
 
     # ④ 动作动词 → 待办
+    #
+    # 注意保留 `when`：待办也常常带时间（"明天交电费"）。
+    # 曾经这里写 `when=None` 把解析结果丢了 —— 于是"明天"白解析，
+    # 上层再也拿不到。**解析出来的信息不该在分类这一步被丢掉**，
+    # 用不用是上层的事（intake 决定是否设到期日）。
     if has_todo:
+        reason = "含动作动词，判为待办"
+        if when is not None:
+            reason += "（带时间提示）"
         return Classified(Kind.TODO, Confidence.HIGH, body, raw,
-                          reason="含动作动词，判为待办", when=None)
+                          reason=reason, when=when)
 
     # ⑤ 有时间但没动作 → 日程（"明天下午三点"本身就是个日程）
     if when and when.has_time:
