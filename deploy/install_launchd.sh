@@ -8,6 +8,7 @@
 #   ./deploy/install_launchd.sh uninstall   卸载
 #   ./deploy/install_launchd.sh status      查看状态与上次退出码
 #   ./deploy/install_launchd.sh reload      重新加载（改完 plist 后用）
+#   ./deploy/install_launchd.sh restart     重新加载任务（装过但没在跑时用）
 #   ./deploy/install_launchd.sh doctor      体检：配置 + 三处授权 + 通道（只读）
 #   ./deploy/install_launchd.sh test        跑一遍两个任务（不推送、不写入）
 #
@@ -115,11 +116,18 @@ do_install() {
       echo "   如果当前处在受限沙箱，请在你自己的终端里运行同一个命令。" >&2
       exit 1
     fi
-    if launchctl bootstrap "gui/$(id -u)" "$dst" 2>/dev/null \
-       || launchctl load "$dst" 2>/dev/null; then
+    launchctl bootstrap "gui/$(id -u)" "$dst" 2>/dev/null \
+      || launchctl load "$dst" 2>/dev/null || true
+
+    # ⚠️ **不能靠 launchctl 的返回码判断是否加载成功**。
+    # 实测：`launchctl load` 即使失败也返回 0；`bootstrap` 失败返回 5。
+    # 于是 `bootstrap || load` 的写法永远"成功" —— 实测踩到：
+    # 脚本打印 ✅ 已安装，而任务其实没加载，守护一直没在跑。
+    # 唯一可靠的判据是 `launchctl print` 能否查到它。
+    if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
       echo "✅ 已安装 $label"
     else
-      echo "❌ launchctl 加载失败：$label" >&2
+      echo "❌ $label 没有加载成功（launchctl 返回码不可信，用 print 判定）" >&2
       echo "   手动试：launchctl bootstrap gui/$(id -u) $dst" >&2
       exit 1
     fi
@@ -181,12 +189,41 @@ do_status() {
       launchctl print "gui/$(id -u)/$label" 2>/dev/null \
         | grep -E "state =|pid =|last exit code|runs =" | sed 's/^/    /'
     else
-      echo "    （未安装）"
+      if [ -f "$AGENTS/$label.plist" ]; then
+        echo "    ⚠️  文件已安装但任务未加载（用 $0 restart 修复）"
+      else
+        echo "    （未安装）"
+      fi
     fi
   done
   echo
   echo "=== 最近日志 ==="
   ls -lt "$PROJECT/logs" 2>/dev/null | head -6 || echo "    （还没有日志）"
+}
+
+do_restart() {
+  # 重新加载任务。用于"装过但没在跑"（例如被 bootout 后 bootstrap 失败）：
+  # launchd 只会在 bootstrap 时读取 plist，所以文件在 ≠ 任务在跑。
+  echo "重新加载 pdca 任务"
+  echo "════════════════════════════════════════"
+  for label in "${LABELS[@]}"; do
+    local dst="$AGENTS/$label.plist"
+    if [ ! -f "$dst" ]; then
+      echo "⚠️  $label 未安装（先运行：$0 install --allow-unconfigured）"
+      continue
+    fi
+    launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+    launchctl bootstrap "gui/$(id -u)" "$dst" 2>/dev/null \
+      || launchctl load "$dst" 2>/dev/null || true
+    if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
+      echo "✅ $label 已加载"
+    else
+      echo "❌ $label 仍未加载" >&2
+      echo "   查看原因：launchctl print gui/$(id -u)/$label" >&2
+    fi
+  done
+  echo
+  echo "查状态：$0 status"
 }
 
 do_doctor() {
@@ -280,6 +317,7 @@ case "${1:-}" in
   uninstall) do_uninstall ;;
   status)    do_status ;;
   reload)    do_uninstall; do_install ;;
+  restart)   do_restart ;;
   doctor)    do_doctor ;;
   test)      do_test ;;
   *)         usage ;;

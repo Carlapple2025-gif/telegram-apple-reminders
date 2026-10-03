@@ -674,6 +674,19 @@ check("清理失败不中止安装", "已卸载、不会再运行" in _inst2)
 # 写不了 LaunchAgents 时要给出可操作指引，而不是让 set -e 莫名掐断
 check("无法写入时给出明确指引", "受限沙箱" in _inst2)
 
+# ⚠️ **不能靠 launchctl 的返回码判断是否加载成功**。
+# 实测：`launchctl load` 即使失败也返回 0，`bootstrap` 失败返回 5。
+# 于是 `bootstrap || load` 的写法永远"成功" —— 实测踩到：脚本打印
+# "✅ 已安装"，而守护任务其实没加载、一直没在跑。
+# 唯一可靠的判据是 `launchctl print` 能否查到它。
+check("安装后必须用 launchctl print 验证",
+      'launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1' in _inst2
+      or 'launchctl print "gui/$(id -u)/${label}"' in _inst2)
+check("提供 restart 子命令（装过但没在跑时修复）",
+      "do_restart" in _inst2 and "restart)" in _inst2)
+check("status 能识别'文件在但任务未加载'",
+      "文件已安装但任务未加载" in _inst2)
+
 # bash 3.2 的全角字符陷阱：$VAR 后紧跟非 ASCII 会被当成变量名一部分。
 # 这道检查已存在，但**我自己又踩了一次**（新加的 `$label：` 写法），
 # 所以这里覆盖全部 deploy/*.sh 再确认一遍。
