@@ -1455,6 +1455,46 @@ for _fn in ("send", "send_with_buttons", "answer_callback", "get_updates",
     check(f"telegram 提供 {_fn}", hasattr(_tg, _fn))
 
 
+section("真实环境自检脚本（tools/selftest-live.py）")
+
+# 单元测试与冒烟都用**假写入端**，证明不了"真的能写进去"。
+# 这个脚本做真实读写、每步读回验证、跑完清理。
+_live = ROOT / "tools" / "selftest-live.py"
+check("存在 tools/selftest-live.py", _live.is_file())
+
+_live_src = _live.read_text(encoding="utf-8")
+# 三处都要真实读写
+for _what in ("提醒事项", "备忘录", "日历"):
+    check(f"真实自检覆盖{_what}", _what in _live_src)
+# 必须用临时容器并在 finally 里清理（不能污染用户数据）
+check("自检用临时列表/文件夹/日历",
+      "SELFTEST" in _live_src and "PID" in _live_src)
+check("自检在 finally 里清理", _live_src.count("finally:") >= 3)
+# 提供只读模式（先确认权限，再决定要不要写）
+check("自检提供 --readonly", "--readonly" in _live_src)
+# 清理失败要告诉用户手动删什么
+check("自检会提示残留物如何清理", "手动删除" in _live_src)
+
+# 脚本用到的 API 必须都存在 —— 这类"脚本调了不存在的方法"
+# 只有在真实环境跑到那一步才会暴露。
+_lv = _load(SRC / "reminders.py")
+_mv = _load(SRC / "memo.py")
+_av = _load(SRC / "applecal.py")
+for _n in ("verify_list", "create", "all_reminders", "set_completed", "delete"):
+    check(f"Reminders 有 {_n}", hasattr(_lv.Reminders, _n))
+for _n in ("list_folders", "snapshot_ids", "add", "text_of"):
+    check(f"memo 有 {_n}", hasattr(_mv, _n))
+for _n in ("list_calendars", "events_between", "add"):
+    check(f"applecal 有 {_n}", hasattr(_av, _n))
+# Reminders 接受 config 字典（自检用它指向临时列表）
+try:
+    _lv.Reminders({"reminders_list": "X"})
+    _rem_ok = True
+except Exception:
+    _rem_ok = False
+check("Reminders 可用 config 字典构造", _rem_ok)
+
+
 section("v4 对现有模块的调用契约")
 
 # 为什么需要：`intake._real_add_todo` / `_real_add_event` / `_real_add_memo`
