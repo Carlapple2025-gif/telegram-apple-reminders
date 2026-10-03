@@ -341,4 +341,37 @@ journal 每天独立留痕，出问题时你能看见丢了什么。
 | P1 | 周报 | 完成率、连续天数（等一两周真实数据后再做） |
 | P2 | 守护的可观测性 | 现在只能看日志；想要"守护是否健康"的一句话结论 |
 | P3 | 智能体诊断 | 任务失败时交给 headless 智能体先定位，搞不定才推给你 |
-| — | 清理 v1 遗留代码 | `notes/parse/sync/carry_over/completion/...` 已无调用，待确认后删 |
+| — | 清理 v1 遗留代码 | 见下 |
+
+### v1 遗留代码：已标注，**不要顺手删 `parse.py`**
+
+`src/` 下有 11 个文件带着「⚠️ v1 遗留代码 —— v4 不调用本文件」的头部注释：
+
+```
+carry_over.py  cleanup.py  cleanup_reminders.py  completion.py
+daily_report.py  notes.py  probe_reminders.py  push_tasks.py
+read_day.py  reconcile.py  sync.py
+```
+
+**`parse.py` 不在这个名单里，虽然它看起来最像 v1。**
+它是**活代码**：[`src/reminders.py:292`](src/reminders.py#L292) 会 import 它，
+所以删掉会让 v4 的提醒事项功能直接坏掉。判断"哪些是死代码"不能靠文件名或文档，
+要从 deploy 的入口（`daemon.py` / `report.py`）顺着 import 算可达性 ——
+我就是先按文档列名单、算出依赖后才发现 `parse.py` 是活的。
+
+想自己重算：
+
+```bash
+cd src && python3 -c "
+import re,pathlib
+SRC=pathlib.Path('.')
+deps=lambda f:{m.group(1)+'.py' for m in re.finditer(r'^\s*(?:import|from)\s+([a-zA-Z_]\w*)',(SRC/f).read_text(),re.M)} & {p.name for p in SRC.glob('*.py')}
+seen,stack=set(),['daemon.py','report.py']
+while stack:
+    c=stack.pop()
+    if c in seen: continue
+    seen.add(c); stack+=list(deps(c)-seen)
+print('活代码:',sorted(seen))
+print('遗留候选:',sorted({p.name for p in SRC.glob('*.py')}-seen-{'selftest.py'}))
+"
+```
