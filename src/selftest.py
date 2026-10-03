@@ -1888,6 +1888,49 @@ _badsh = _re7.findall(r"\$([A-Za-z_][A-Za-z0-9_]*)(?=[\x80-\xff])", _st)
 check("初始化脚本无全角字符陷阱", not _badsh, str(_badsh))
 
 
+section("日报退出码如实反映推送结果")
+
+# 踩到过：report.main **永远返回 0**，于是推送全失败时 launchd 仍显示
+# "成功"，你会以为日报发出去了。**静默失败比报错更危险。**
+#
+# 现在 run() 返回 (标题, 正文, 推送是否至少一个通道成功)，
+# 退出码据此决定（0 / 3）。
+_rd2 = _P2(_tf2.mkdtemp())
+_old_root2 = _rp.ROOT
+_rp.ROOT = _rd2
+try:
+    _D2 = _dt2.date(2026, 10, 3)
+
+    # 两通道都成功
+    _, _, _ok_a = _rp.run(date=_D2, push=True, data=_rp.ReportData(date=_D2),
+                          sender=lambda t, b, channels=None:
+                          [("telegram", True, "ok"), ("bark", True, "ok")])
+    check("两通道成功 → 判为成功", _ok_a is True)
+
+    # 只一个通道成功：两通道互为冗余，一个够
+    _, _, _ok_b = _rp.run(date=_D2, push=True, data=_rp.ReportData(date=_D2),
+                          sender=lambda t, b, channels=None:
+                          [("telegram", False, "挂了"), ("bark", True, "ok")])
+    check("只一个通道成功 → 仍判为成功（冗余）", _ok_b is True)
+
+    # 全失败：必须判失败，否则 launchd 显示"成功"骗人
+    _, _, _ok_c = _rp.run(date=_D2, push=True, data=_rp.ReportData(date=_D2),
+                          sender=lambda t, b, channels=None:
+                          [("telegram", False, "挂了"), ("bark", False, "也挂了")])
+    check("全通道失败 → 判为失败", _ok_c is False)
+
+    # 不推送（--no-push）视为成功
+    _, _, _ok_d = _rp.run(date=_D2, push=False, data=_rp.ReportData(date=_D2))
+    check("--no-push → 视为成功", _ok_d is True)
+finally:
+    _rp.ROOT = _old_root2
+    _sh2.rmtree(_rd2, ignore_errors=True)
+
+# main 的退出码必须用到这个结果
+_rp_src2 = (SRC / "report.py").read_text(encoding="utf-8")
+check("main 的退出码反映推送结果", "0 if pushed else 3" in _rp_src2)
+
+
 # ── 汇总
 
 print()

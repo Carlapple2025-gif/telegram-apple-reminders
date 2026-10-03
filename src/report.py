@@ -239,11 +239,15 @@ def run(date: dt.date | None = None, push: bool = True,
         channels: list[str] | None = None,
         memo_nag_days: int = MEMO_NAG_DAYS,
         data: ReportData | None = None,
-        sender: Callable[..., list] | None = None) -> tuple[str, str]:
+        sender: Callable[..., list] | None = None) -> tuple[str, str, bool]:
     """
-    生成并（可选）推送日报。返回 (标题, 正文)。
+    生成并（可选）推送日报。返回 (标题, 正文, 推送是否至少一个通道成功)。
 
     `data` 给定时跳过采集（测试用）；`sender` 给定时跳过真实推送。
+
+    ⚠️ 第三个返回值是给**退出码**用的。原先 run 不返回推送结果，
+    main 于是永远返回 0 —— 推送全失败时 launchd 仍显示"成功"，
+    你会以为日报发出去了。**静默失败比报错更危险**，所以必须如实上报。
     """
     today = date or dt.date.today()
     data = data or collect(today, memo_nag_days)
@@ -264,6 +268,7 @@ def run(date: dt.date | None = None, push: bool = True,
     except OSError as e:
         print(f"⚠️ 存档失败（不影响推送）：{e}", file=sys.stderr)
 
+    pushed_ok = True          # 未推送（--no-push）视为成功
     if push:
         import notify
         send = sender or notify.broadcast
@@ -271,8 +276,13 @@ def run(date: dt.date | None = None, push: bool = True,
         print()
         for ch, ok, msg in results:
             print(f"  {'✅' if ok else '❌'} {ch}: {msg}")
+        # 所有通道都失败才算失败 —— 两个通道互为冗余，一个成功就够了
+        pushed_ok = any(ok for _, ok, _ in results)
+        if not pushed_ok:
+            print("⚠️ 所有通道都推送失败（日报已存档，但没送到你手上）",
+                  file=sys.stderr)
 
-    return title, body
+    return title, body, pushed_ok
 
 
 def main() -> int:
@@ -293,10 +303,14 @@ def main() -> int:
         print(f"❌ 日期格式不对（应为 YYYY-MM-DD）：{e}", file=sys.stderr)
         return 1
 
-    run(d, push=not args.no_push,
+    _, _, pushed = run(
+        d, push=not args.no_push,
         channels=[c.strip() for c in args.channels.split(",") if c.strip()],
         memo_nag_days=args.memo_days)
-    return 0
+    # 退出码要如实反映结果：launchd 靠它标记成功/失败。
+    # 全通道推送失败 → 非 0，这样 `launchctl print` 里能看到失败，
+    # 而不是显示"成功"让你以为报表发出去了。
+    return 0 if pushed else 3
 
 
 if __name__ == "__main__":
