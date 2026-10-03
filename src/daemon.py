@@ -239,14 +239,18 @@ def handle_message(text: str, msg_id: int, chat: str) -> None:
         _log(f"→ {out.kind.value if out.kind else '?'} ok={out.ok}")
 
 
-def run_once(offset: int | None = None) -> int | None:
+def run_once(offset: int | None = None, wait: int = 25) -> int | None:
     """
     拉一次更新并处理。返回新的 offset。
 
-    先消费历史（首次启动时），避免把之前发过的消息又记一遍。
+    `wait` 是长轮询的等待秒数：
+      · 常驻运行时用 25（省请求、响应快）
+      · `--once` 验证时用 1（否则要干等 25 秒才返回，很别扭）
+
+    首次调用会先消费历史（由 main 负责），避免把旧消息又记一遍。
     """
     try:
-        ups = tg.get_updates(offset=offset, limit=20, timeout=25)
+        ups = tg.get_updates(offset=offset, limit=20, timeout=wait)
     except tg.TelegramError as e:
         _log(f"拉取失败：{e}")
         time.sleep(5)
@@ -378,7 +382,8 @@ def main() -> int:
         _log(f"启动通知发送失败（不影响运行）：{e}")
 
     while _running:
-        offset = run_once(offset)
+        # --once 用短轮询：验证时不该干等长轮询的超时
+        offset = run_once(offset, wait=1 if args.once else 25)
         if args.once:
             break
         time.sleep(1)
