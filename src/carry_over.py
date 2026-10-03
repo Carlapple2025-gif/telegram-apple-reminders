@@ -54,7 +54,7 @@ DAYS_DIR = ROOT / "data" / "days"
 # 顺延标记。用 ⟳（U+27F3）而不是 "<<" 之类：
 #   · 视觉上和"这条是转过来的"直觉一致
 #   · 不太可能在正文里自然出现，去重判断可靠
-CARRY_MARK = "⟳"
+CARRY_MARK = parser.CARRY_MARK
 
 
 def html_escape_free(line: str) -> str:
@@ -63,35 +63,9 @@ def html_escape_free(line: str) -> str:
     return re.sub(r"[ \t]+", " ", line).strip()
 
 
-def content_fingerprint(text: str) -> str:
-    """
-    内容指纹：用于判断"两行是不是同一件事"。
-
-    把**所有装饰性标记**剥掉后归一化：
-      · 顺延标记 ⟳（可能不止一个 —— 曾经产生过 `⟳ ⟳`）
-      · 复选框 `[ ]` / `[x]`
-      · 行首列表符号 `-` `*` `•`
-      · 时段前缀 `@上午` 等
-
-    为什么必须这么彻底（两次实测教训）：
-      ① 只按原样比较 → 「甲 ⟳」≠「甲」→ 同一条被顺延第二遍
-      ② 只剥 ⟳ 不剥复选框 → 「- [ ] 甲」≠「甲」时又漏
-    所以统一成一个函数，所有需要"判断是不是同一条"的地方都调它。
-    """
-    t = text
-    # 顺延标记可能带来源日期、也可能出现多个（历史遗留），
-    # 必须**连同日期一起**剥掉 —— 只剥 ⟳ 会留下 "10-02"，
-    # 于是「甲 ⟳10-02」的指纹变成 "甲 10-02"，与「甲」对不上（实测踩到）。
-    t = re.sub(rf"{CARRY_MARK}\s*\d{{2}}-\d{{2}}", " ", t)
-    t = t.replace(CARRY_MARK, " ")
-    # 剥掉行首列表符号与复选框
-    body, _ = parser.strip_leading_marker(t)
-    t = body or t
-    return parser.normalize_line(t)
-
-
-# 兼容旧名（selftest 里引用过）
-dedup_key = content_fingerprint
+# 内容指纹统一放在 parse.py（解析层职责），这里只做别名，
+# 避免"同一件事有两份实现"——那正是 bug 的来源。
+content_fingerprint = parser.content_fingerprint
 
 
 def carried_before(line: str, target_date: str, src_date: str = "") -> bool:

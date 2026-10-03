@@ -87,7 +87,7 @@ def resolve(
             out.append(ResolvedEntry(entry, entry.completed is True, "notes"))
             continue
 
-        k = make_key(note_id, entry.line_no, entry.norm)
+        k = make_key(entry.norm)
         r = by_key.get(k)
 
         from_notes = entry.completed is True

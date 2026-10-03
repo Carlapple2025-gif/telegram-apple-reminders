@@ -252,10 +252,39 @@ class Reminders:
 KEY_PREFIX = "pdca:"
 
 
-def make_key(note_id: str, line_no: int, text: str) -> str:
+def make_key(text: str, note_id: str = "", line_no: int = 0) -> str:
+    """
+    生成去重键。
+
+    ⚠️ 键必须基于**内容指纹**，不能用原样文字。
+    同一条待办在不同阶段文字不同：
+        10-02 页面：`勘察表盖章`
+        10-03 页面：`勘察表盖章 ⟳10-02`（顺延带过来的）
+    用原样文字做键 → 被当成两件不同的事 → 提醒事项里同一个待办出现两份
+    （一份旧的已完成、一份新的未完成）。实测踩到过：顺延一次就重建一遍，
+    提醒事项越用越乱 —— 而它存在的意义正是清爽可打钩。
+
+    也**不含 note_id / 行号**：同一件事跨天出现时应映射到**同一条**待办，
+    这正是我们要的（顺延不该在提醒事项里重建一份）。
+
+    保留 note_id / line_no 参数只为调用处兼容，不参与计算。
+    """
     import hashlib
-    h = hashlib.sha256(f"{note_id}|{line_no}|{text}".encode("utf-8")).hexdigest()[:16]
+    fp = _fingerprint(text)
+    h = hashlib.sha256(fp.encode("utf-8")).hexdigest()[:16]
     return f"{KEY_PREFIX}{h}"
+
+
+def _fingerprint(text: str) -> str:
+    """内容指纹：复用解析层的实现，避免"同一件事两份实现"。"""
+    try:
+        import parse as _p
+        return _p.content_fingerprint(text)
+    except Exception:
+        # 兜底：解析层不可用时退化为简单清理（宁可稍宽也不要崩）
+        import re as _re
+        t = _re.sub(r"⟳\s*\d{2}-\d{2}", " ", text)
+        return t.replace("⟳", " ").replace("- [ ]", " ").replace("[ ]", " ").strip()
 
 
 def key_of(reminder: Reminder) -> str | None:
