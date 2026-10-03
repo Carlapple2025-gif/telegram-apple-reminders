@@ -3,6 +3,8 @@
 #
 # 用法：
 #   ./deploy/install_launchd.sh install     安装（常驻收件守护 + 21:30 日报）
+#   ./deploy/install_launchd.sh install --allow-unconfigured
+#                                            未初始化也安装（稍后初始化即自动生效）
 #   ./deploy/install_launchd.sh uninstall   卸载
 #   ./deploy/install_launchd.sh status      查看状态与上次退出码
 #   ./deploy/install_launchd.sh reload      重新加载（改完 plist 后用）
@@ -22,6 +24,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT="$(cd "$HERE/.." && pwd)"
 AGENTS="$HOME/Library/LaunchAgents"
 LABELS=(com.carl.pdca.daemon com.carl.pdca.report)
+
+# 允许在"尚未初始化"时就安装。用途：先把任务装好，等用户完成授权与
+# 初始化后系统自动开始工作，不需要再手动装一次。
+# 两个任务在未配置时都是**安全**的：
+#   · 守护：连不上/写不进去都只记日志，进程不退出（已修崩溃循环）
+#   · 日报：如实报告"读取失败"，而不是假装"今天没有待办"
+ALLOW_UNCONFIGURED=0
 
 # v1 的任务标签。v4 不再需要它们（待办常驻提醒事项，
 # 没有"同步"和"顺延"这两个概念），但**它们可能还装着并在跑** ——
@@ -52,18 +61,28 @@ preflight() {
   fi
   # v4 需要备忘文件夹与目标日历都已配置 —— 否则守护起来后，
   # 每收到一条备忘/日程都会失败，而失败只写在日志里（很容易没发现）。
-  "$PYTHON" - "$PROJECT" <<'PYEOF' || exit 1
+  # 但若显式加了 --allow-unconfigured，就只警告不阻止：先把任务装好，
+  # 等初始化完成后系统自动开始工作。
+  "$PYTHON" - "$PROJECT" "$ALLOW_UNCONFIGURED" <<'PYEOF' || exit 1
 import json, sys
 from pathlib import Path
 cfg = json.loads((Path(sys.argv[1]) / "config.json").read_text(encoding="utf-8"))
+allow = len(sys.argv) > 2 and sys.argv[2] == "1"
 missing = [k for k in ("memo_folder_id", "calendar_name") if not cfg.get(k)]
 if missing:
     names = {"memo_folder_id": "备忘文件夹", "calendar_name": "目标日历"}
-    print("❌ 还没配置：" + "、".join(names[m] for m in missing), file=sys.stderr)
-    print("   请先运行：bash deploy/setup-v4.sh --apply", file=sys.stderr)
-    sys.exit(1)
-print(f"  ✓ 配置就绪：备忘文件夹={cfg.get('memo_folder_name')} "
-      f"日历={cfg.get('calendar_name')} 列表={cfg.get('reminders_list')}")
+    msg = "还没配置：" + "、".join(names[m] for m in missing)
+    if not allow:
+        print("❌ " + msg, file=sys.stderr)
+        print("   请先运行：bash deploy/setup-v4.sh --apply", file=sys.stderr)
+        print("   （若想先装任务、稍后初始化：加 --allow-unconfigured）",
+              file=sys.stderr)
+        sys.exit(1)
+    print("  ⚠️  " + msg + "（已按 --allow-unconfigured 继续）")
+    print("     未配置的部分会失败并写进日志；初始化后自动恢复。")
+else:
+    print(f"  ✓ 配置就绪：备忘文件夹={cfg.get('memo_folder_name')} "
+          f"日历={cfg.get('calendar_name')} 列表={cfg.get('reminders_list')}")
 PYEOF
   if ! mkdir -p "$AGENTS" "$PROJECT/logs" 2>/dev/null; then
     echo "❌ 无法创建 $AGENTS 或 $PROJECT/logs" >&2
@@ -91,9 +110,19 @@ do_install() {
     local dst="$AGENTS/$label.plist"
     [ -f "$src" ] || { echo "❌ 缺少模板 $src" >&2; exit 1; }
     launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
-    render "$src" "$dst"
-    launchctl bootstrap "gui/$(id -u)" "$dst" 2>/dev/null || launchctl load "$dst"
-    echo "✅ 已安装 $label"
+    if ! render "$src" "$dst"; then
+      echo "❌ 无法写入 $dst" >&2
+      echo "   如果当前处在受限沙箱，请在你自己的终端里运行同一个命令。" >&2
+      exit 1
+    fi
+    if launchctl bootstrap "gui/$(id -u)" "$dst" 2>/dev/null \
+       || launchctl load "$dst" 2>/dev/null; then
+      echo "✅ 已安装 $label"
+    else
+      echo "❌ launchctl 加载失败：$label" >&2
+      echo "   手动试：launchctl bootstrap gui/$(id -u) $dst" >&2
+      exit 1
+    fi
   done
   echo
   echo "常驻守护：收到 Telegram 消息即分派（待办/日程/备忘）"
@@ -110,7 +139,7 @@ do_uninstall() {
     launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1 && existed=1
     launchctl bootout "gui/$(id -u)/$label" 2>/dev/null \
       || launchctl unload "$AGENTS/$label.plist" 2>/dev/null || true
-    rm -f "$AGENTS/$label.plist"
+    rm -f "$AGENTS/$label.plist" 2>/dev/null || true
     if [ "$existed" -eq 1 ]; then
       echo "🗑️  已卸载 $label"
     fi
@@ -129,8 +158,14 @@ cleanup_legacy() {
       fi
       launchctl bootout "gui/$(id -u)/$label" 2>/dev/null \
         || launchctl unload "$AGENTS/$label.plist" 2>/dev/null || true
-      rm -f "$AGENTS/$label.plist"
-      echo "   🗑️  已清理 $label"
+      if rm -f "$AGENTS/$label.plist" 2>/dev/null; then
+        echo "   🗑️  已清理 $label"
+      else
+        # 已 bootout 就不会再运行，残留文件无害。
+        # （受限沙箱下 rm 会失败，不该因此中止安装。）
+        echo "   ⏹  已停止 ${label}（文件删不掉，但已卸载、不会再运行）"
+        echo "       手动删可运行：rm ~/Library/LaunchAgents/$label.plist"
+      fi
     fi
   done
   if [ "$found" -eq 1 ]; then
@@ -239,7 +274,9 @@ do_test() {
 }
 
 case "${1:-}" in
-  install)   do_install ;;
+  install)
+    [ "${2:-}" = "--allow-unconfigured" ] && ALLOW_UNCONFIGURED=1
+    do_install ;;
   uninstall) do_uninstall ;;
   status)    do_status ;;
   reload)    do_uninstall; do_install ;;

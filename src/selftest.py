@@ -656,6 +656,37 @@ else:
 
 # ── 关键路线的三个定时任务必须齐全
 
+section("安装脚本的健壮性")
+
+_inst2 = (ROOT / "deploy" / "install_launchd.sh").read_text(encoding="utf-8")
+
+# 未配置也允许安装：先把任务装好，等初始化完成后系统自动开始工作，
+# 不需要再手动装一次。两个任务在未配置时都是安全的 ——
+# 守护失败不退出（已修崩溃循环）、日报如实报告读取失败。
+check("支持 --allow-unconfigured", "--allow-unconfigured" in _inst2)
+check("不带开关时仍会拒绝", 'ALLOW_UNCONFIGURED=0' in _inst2)
+check("未配置时给出提示而非直接失败",
+      "初始化后自动恢复" in _inst2)
+
+# 删不掉遗留 plist 时不该中止（受限沙箱里 rm 会失败）
+check("清理失败不中止安装", "已卸载、不会再运行" in _inst2)
+
+# 写不了 LaunchAgents 时要给出可操作指引，而不是让 set -e 莫名掐断
+check("无法写入时给出明确指引", "受限沙箱" in _inst2)
+
+# bash 3.2 的全角字符陷阱：$VAR 后紧跟非 ASCII 会被当成变量名一部分。
+# 这道检查已存在，但**我自己又踩了一次**（新加的 `$label：` 写法），
+# 所以这里覆盖全部 deploy/*.sh 再确认一遍。
+import re as _reA  # noqa: E402
+_traps: list[str] = []
+for _sh in sorted((ROOT / "deploy").glob("*.sh")):
+    _hits = _reA.findall(rb"\$([A-Za-z_][A-Za-z0-9_]*)(?=[\x80-\xff])",
+                         _sh.read_bytes())
+    if _hits:
+        _traps.append(f"{_sh.name}: {[h.decode() for h in _hits]}")
+check("deploy 下所有脚本无全角字符陷阱", not _traps, "；".join(_traps))
+
+
 section("v4 的定时任务路线")
 
 # v4 的关键路线只有两个任务：
