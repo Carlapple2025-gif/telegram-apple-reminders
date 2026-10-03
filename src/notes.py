@@ -51,12 +51,12 @@ class NotesError(RuntimeError):
 def load_config() -> dict:
     if not CONFIG_PATH.is_file():
         raise NotesError(
-            f"缺少配置文件 {CONFIG_PATH}\n请先运行：bash deploy/init.sh"
+            f"缺少配置文件 {CONFIG_PATH}\n请先运行：bash tools/legacy/init.sh"
         )
     cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     if not cfg.get("folder_id"):
         raise NotesError(
-            f"{CONFIG_PATH} 里没有 folder_id\n请先运行：bash deploy/init.sh"
+            f"{CONFIG_PATH} 里没有 folder_id\n请先运行：bash tools/legacy/init.sh"
         )
     return cfg
 
@@ -137,7 +137,7 @@ class Notes:
         if out == "MISSING":
             raise NotesError(
                 f"配置里的日志文件夹已不存在（id={self.folder_id}）。\n"
-                f"可能被删除了。请重新运行：bash deploy/init.sh"
+                f"可能被删除了。请重新运行：bash tools/legacy/init.sh"
             )
         name, _, count = out.partition("|")
         return name.strip(), int(count.strip() or 0)

@@ -51,7 +51,9 @@ from intake import Intake      # noqa: E402
 from kinds import Kind         # noqa: E402
 
 STATE_FILE = ROOT / "data" / "daemon-state.json"
-PENDING_DIR = ROOT / "data" / "pending"
+# 注：这里曾有 `PENDING_DIR = ROOT / "data" / "pending"`，
+# 随按钮/待补充机制一起删除（见下面那段说明）。留着它会让人以为
+# 还有第二类状态 —— 而"以为还有"本身就是排查时的成本。
 
 # 日志里引用用户内容时的截断长度。
 # 程序日志（logs/）可能被贴出来排查问题，不该带太多个人信息。
@@ -165,13 +167,22 @@ def _make_intake() -> Intake:
     return it
 
 
-def handle_message(text: str, msg_id: int, chat: str) -> None:
+def handle_message(text: str, msg_id: int, chat: str,
+                   base: dt.date | None = None) -> None:
+    """
+    处理一条收到的消息。
+
+    `base` **只给测试用**：生产永远传 None（= 真实的今天）。
+    自检里若不给它，"明天"就随运行日期漂移 ——
+    断言写死 10-04 而实际算成 10-05，跨过午夜就会失败。
+    那种断言测的是"今天是几号"，不是代码对不对。
+    """
     _log(f"收到：{_trunc(text)!r}")
     it = _make_intake()
 
     # 类型由符号声明（routes.py），所以这里**没有**任何"上一条在等什么"
     # 的上下文要传 —— 那类跨消息状态已随追问机制一起删除。
-    out = it.handle(text, msg_id=msg_id)
+    out = it.handle(text, base=base, msg_id=msg_id)
 
     reply = out.reply
     if _OFFLINE:

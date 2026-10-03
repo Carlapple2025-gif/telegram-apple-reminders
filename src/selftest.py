@@ -536,10 +536,19 @@ import re as _re5  # noqa: E402
 # 属性名可以是两个词（`whose completion date is greater than d`），
 # 而且源码里这个子句常常跨行 —— 跨行处会插进 `'` 换行 缩进 `'`
 # （Python 相邻字符串字面量拼接），所以间隙要允许这些字符，不能只允许 \w\s。
+# ⚠️ 扫描范围要**包含归档目录**，否则"把脚本挪到 legacy/" 就成了
+# 让检查失效的捷径 —— 检查看不到的东西等于没检查。
+# （2026-10-03 整理目录时特意确认过：移走的 10 个脚本当时 0 违规，
+#   所以纳入扫描不需要任何豁免。）
+_SHELL_FILES = (sorted((ROOT / "deploy").glob("*.sh"))
+                + sorted((ROOT / "deploy" / "legacy").glob("*.sh"))
+                + sorted((ROOT / "tools").glob("*.sh"))
+                + sorted((ROOT / "tools" / "legacy").glob("*.sh")))
+
 _WHOSE_OK = _re5.compile(r"whose.{0,40}?(is|contains)\b", _re5.S)
 _hits5: list[str] = []
 _scanned5 = 0
-for _f in list((ROOT / "src").glob("*.py")) + list((ROOT / "deploy").glob("*.sh")):
+for _f in list((ROOT / "src").glob("*.py")) + _SHELL_FILES:
     if _f.name == "selftest.py":
         continue
     _lines5 = _f.read_text(encoding="utf-8").splitlines()
@@ -575,7 +584,7 @@ check(f"{_scanned5} 个 whose 子句都带 is/contains",
 
 # 不能出现重复的 is（批量替换时误伤过，产生 "is is"）
 _dup5: list[str] = []
-for _f in list((ROOT / "src").glob("*.py")) + list((ROOT / "deploy").glob("*.sh")):
+for _f in list((ROOT / "src").glob("*.py")) + _SHELL_FILES:
     if _f.name == "selftest.py":
         continue
     for _ln, _line in enumerate(_f.read_text(encoding="utf-8").splitlines(), 1):
@@ -712,7 +721,7 @@ check("status 能识别'文件在但任务未加载'",
 # 所以这里覆盖全部 deploy/*.sh 再确认一遍。
 import re as _reA  # noqa: E402
 _traps: list[str] = []
-for _sh in sorted((ROOT / "deploy").glob("*.sh")):
+for _sh in _SHELL_FILES:
     _hits = _reA.findall(rb"\$([A-Za-z_][A-Za-z0-9_]*)(?=[\x80-\xff])",
                          _sh.read_bytes())
     if _hits:
@@ -843,7 +852,7 @@ section("shell 脚本检查")
 # 这个坑在本项目里踩了三次（两次探测脚本 + 一次 delete-day.sh），
 # 所以固化成检查：$VAR 后面紧跟非 ASCII 字节就是危险写法，必须写 ${VAR}。
 _danger = _re.compile(rb"\$([A-Za-z_][A-Za-z0-9_]*)(?=[\x80-\xff])")
-_shell_files = sorted((ROOT / "deploy").glob("*.sh"))
+_shell_files = _SHELL_FILES
 _bad: list[str] = []
 for _p in _shell_files:
     _hits = _danger.findall(_p.read_bytes())
@@ -1710,7 +1719,6 @@ _dm = _load(SRC / "daemon.py")
 # 跨调用的读取位置必须持久。
 _dm_dir = _P2(_tf2.mkdtemp())
 _dm.STATE_FILE = _dm_dir / "state.json"
-_dm.PENDING_DIR = _dm_dir / "pending"
 try:
     check("初始没有 offset", _dm.load_offset() is None)
 
@@ -1822,7 +1830,13 @@ try:
     check("整链：回执说明去向", "备忘录" in _sent[-1], _sent[-1])
 
     # ③ @ → 日历，标题剥掉时间词、时间算准
-    _dm.handle_message("@明天上午九点 测试 Apple agent 稳定性", 3, "chat")
+    #
+    # ⚠️ 这里**必须把基准日传进 daemon**：`handle_message` 若不传 base，
+    # 用的是**真实的今天**，于是"明天"随运行日期漂移 ——
+    # 断言写 10-04 而实际算成 10-05（跨过午夜就复现）。
+    # 这类断言测的是"今天是几号"，不是代码对不对，属于**脆弱断言**：
+    # 它会在某一天悄悄失效，而那时没人知道该信谁。
+    _dm.handle_message("@明天上午九点 测试 Apple agent 稳定性", 3, "chat", _B)
     check("整链：@ 写日历", _wrote[-1][0] == "event", str(_wrote))
     check("整链：@ 的标题剥掉了时间词",
           _wrote[-1][1] == "测试 Apple agent 稳定性", repr(_wrote[-1][1]))

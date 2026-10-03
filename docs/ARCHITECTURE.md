@@ -233,6 +233,8 @@ pdca/
 │   ├── daemon.py               ★ 收件守护（常驻，offset 落盘）
 │   ├── telegram.py             双向通道（只用 5 个 Bot API 方法）
 │   ├── intake.py               ★ 收件：认符号 + 分发（核心）
+│   ├── routes.py               ★ 按行首符号决定归属（唯一决定落点的地方）
+│   ├── kinds.py                Kind / Item 数据结构
 │   ├── whens.py                ★ 时间解析（全在 Python，避开区域设置坑）
 │   ├── reminders.py            提醒事项（读 + 增）
 │   ├── applecal.py             日历（读 + 增）
@@ -242,15 +244,16 @@ pdca/
 │   ├── report.py               日报（21:30，只读三处快照）
 │   └── selftest.py             自检
 │
-│   ⚠️ classify.py 即将移除（见 docs/SYMBOL-SCHEME.md）：
-│      它用约 700 字词表**猜**类型，将被"行首符号声明"取代。
-│      移除后只保留 Kind / Confidence / Classified 三个数据结构，
-│      其中的重复规则解析（_RECUR_* / parse_recurrence）搬到 whens.py。
-│
-├── deploy/
+├── deploy/                     ← **只放"装机器"要用的**（判断规则见 README）
 │   ├── com.carl.pdca.daemon.plist    常驻
 │   ├── com.carl.pdca.report.plist    21:30
-│   └── install_launchd.sh
+│   ├── install_launchd.sh
+│   ├── setup-v4.sh
+│   └── legacy/                 v1 的两个任务定义（安装时自动清理）
+│
+└── tools/                      ← **只放"验与探"**
+    ├── selftest-live.py / smoke.py / probe_*.py
+    └── legacy/                 v1 的探测与排查脚本
 ```
 
 > **v1 遗留模块**（`notes / parse / sync / carry_over / completion / …`）仍在

@@ -121,7 +121,8 @@ if [ "${APPLY}" -eq 0 ]; then
   try "检查 Python 与依赖" "${PY}" -c "
 import sys
 sys.path.insert(0, 'src')
-for m in ('journal','memo','applecal','reminders','intake','daemon','report','classify','whens','telegram'):
+for m in ('journal','memo','applecal','reminders','intake','daemon','report',
+          'routes','kinds','whens','telegram'):
     __import__(m)
 print('  ✅ 全部模块可导入')
 "

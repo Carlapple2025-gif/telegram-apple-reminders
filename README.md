@@ -194,27 +194,58 @@ pdca/
 │   ├── notify.py              Bark 冗余通道
 │   └── selftest.py            513 项离线自检
 │
-├── deploy/
-│   ├── setup-v4.sh            一键初始化
-│   ├── install_launchd.sh     任务管理（install/status/test/restart/doctor）
-│   ├── com.carl.pdca.*.plist  任务定义
-│   └── probe-*.sh             能力探测脚本（历史存档）
+│   ⚠️ 另有 11 个 v1 遗留模块也在这个目录里（carry_over / notes / sync /
+│      completion / reconcile / push_tasks / read_day / daily_report /
+│      cleanup / cleanup_reminders / probe_reminders），每个文件头都有
+│      「⚠️ v1 遗留代码」标注。
+│      **它们没有被挪进 legacy/，是有原因的**：这 11 个互相之间有 12 处
+│      import 缠在一起，而 `parse.py` 被 v4 的 `reminders.py` 用着 ——
+│      整体搬动要同时改 v4 模块的 import，收益不抵风险。
+│      按文件头标注识别即可。
 │
-├── tools/                     真实环境自检与冒烟
+├── deploy/                    ← **只放"装机器"要用的东西**
+│   ├── setup-v4.sh            一键初始化（干跑 / --apply）
+│   ├── install_launchd.sh     任务管理（install/status/test/restart/doctor）
+│   ├── com.carl.pdca.daemon.plist    常驻收件守护
+│   ├── com.carl.pdca.report.plist    21:30 日报
+│   └── legacy/                v1 的两个定时任务定义（安装时会自动清理，
+│                              留着是为了看清 v1 曾经装了什么）
+│
+├── tools/                     ← **只放"验与探"的东西**
+│   ├── selftest-live.py       真实环境自检（需要授权）
+│   ├── smoke.py               端到端冒烟
+│   ├── probe_calendar.py      日历能力探测
+│   ├── probe_memo_folder.py   备忘文件夹探测
+│   ├── probe-native-dates.py  Apple 原生日期能力探测（见坑 16/17）
+│   └── legacy/                v1 的探测与排查脚本（probe-*/init.sh/delete-day.sh…）
+│
 └── docs/
-    ├── ARCHITECTURE.md        ← 架构定稿（要先看这个）
+    ├── ARCHITECTURE.md        ← 架构定稿（唯一权威）
     ├── PROJECT-STATE.md       ← 现状与决定清单（新会话从这里接续）
-    ├── SYMBOL-SCHEME.md       符号声明方案（已定稿、未实现）
-    ├── TELEGRAM-DESIGN.md     Telegram 层设计（讨论稿）
+    ├── SYMBOL-SCHEME.md       符号声明方案（**已实现**，保留作决策记录）
+    ├── TELEGRAM-DESIGN.md     Telegram 层设计（已裁决）
     ├── USER-GUIDE.md          使用者视角（怎么用、说错了怎么收拾）
     ├── CONCEPT.md             最初的概念（部分已被 ARCHITECTURE 取代）
     ├── archive/               被推翻的 v1 架构（理解"为什么推翻"）
     └── ORIENTATION-ROOTCAUSE.md  照片方向问题排查（与 v4 无关，同属踩坑记录）
 ```
 
+### 判断"某个文件属于哪"的规则
+
+| 目录 | 只放什么 | 判断方法 |
+|---|---|---|
+| `deploy/` | 装机器要用的（初始化、任务管理、任务定义） | "新机器上要跑它才能用起来吗？" |
+| `tools/` | 验与探（自检、冒烟、能力探测） | "它是用来回答'能不能/对不对'的吗？" |
+| `src/` | 运行时模块 | "守护/日报运行时会 import 它吗？" |
+| `*/legacy/` | v1 的、v4 不调用的 | "从 deploy 入口算 import 可达性，到不了吗？" |
+| `docs/archive/` | 被推翻的设计 | "它描述的是已经不做的事吗？" |
+
+**归档不等于可以忘掉**：自检的静态扫描（全角陷阱、`whose is`）
+**覆盖 legacy 目录** —— 否则"挪到 legacy"就成了让检查失效的捷径。
+
 > **文档之间是什么关系**：`ARCHITECTURE.md` 是唯一权威；
-> `SYMBOL-SCHEME.md` 与 `TELEGRAM-DESIGN.md` 是**待实施的方案**（代码还没改）；
-> `PROJECT-STATE.md` 是跨会话的接续点，记录"已定 / 待定 / 下一步"。
+> `PROJECT-STATE.md` 是跨会话的接续点（已定 / 待定 / 下一步）；
+> `CHANGELOG.md` 记"什么时候改了什么、为什么"。
 > 看代码之前先看 `PROJECT-STATE.md`，能省掉重新推导的时间。
 
 ### 两类日志必须分开
