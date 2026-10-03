@@ -704,7 +704,31 @@ for _f in list((ROOT / "src").glob("*.py")) + list((ROOT / "deploy").glob("*.sh"
 check("代码里没有重复的 is", not _dup5, "；".join(_dup5[:3]))
 
 
-print("\n── 17. 通知通道 ──")
+print("\n── 17. 「内容未变」必须视为成功 ──")
+
+# Telegram 对"内容与当前完全一致"的编辑**返回 HTTP 400 错误**：
+#   message is not modified: specified new message content ... exactly the same
+# 若调用方把它当失败 → 重试 → 退化成"发新消息"，
+# 于是**每次点击都多一条消息**（实测踩到：用户看到测试后又连收几条）。
+#
+# 语义上"内容已是目标样子"就是成功，所以必须识别并返回成功。
+_tg_src = (SRC / "telegram.py").read_text(encoding="utf-8")
+check("telegram 定义了 NOT_MODIFIED 常量", "NOT_MODIFIED" in _tg_src)
+check("edit_with_buttons 处理「内容未变」",
+      "NOT_MODIFIED in str(e)" in _tg_src)
+
+_sig_edit = inspect.signature(_tg.edit_with_buttons)
+check("edit_with_buttons 签名正常", "message_id" in _sig_edit.parameters)
+
+# render() 的退化路径必须只在**真的连续失败**时才走，
+# 且要有日志 —— 否则"多发消息"这种问题会静默发生。
+_ask_src2 = (SRC / "ask_slots.py").read_text(encoding="utf-8")
+check("render 退化前会记日志", "退化为发新消息" in _ask_src2)
+check("finish_ui 用 edit_with_buttons（能处理未变）",
+      "tg.edit_with_buttons(sess.message_id" in _ask_src2)
+
+
+print("\n── 18. 通知通道 ──")
 
 _notify = _load(SRC / "notify.py")
 
@@ -731,7 +755,7 @@ check("定时任务的日报已启用 --ask", "<string>--ask</string>" in _plist
 check("定时任务的日报已启用 --sync", "<string>--sync</string>" in _plist)
 
 
-print("\n── 17. 系统 Python 兼容性 ──")
+print("\n── 19. 系统 Python 兼容性 ──")
 
 # 为什么单独查这个：launchd 任务用的是 **/usr/bin/python3（3.9）**，
 # 而我平时用自带运行时（3.12）。若代码用了运行时求值的类型标注
@@ -765,7 +789,7 @@ else:
 
 # ── 11. 密钥不进版本库
 
-print("\n── 18. 密钥保护检查 ──")
+print("\n── 20. 密钥保护检查 ──")
 
 # 为什么值得单独查：Telegram token 一旦被提交，等于把 bot 交给别人。
 # 加 telegram.py 时就发现 .gitignore 里**没有 .env** —— 而下一步就要往
@@ -783,7 +807,7 @@ check(".env.example 可被提交（它是模板）", _r.returncode != 0)
 
 # ── 18. shell 脚本静态检查：bash 3.2 的全角字符陷阱
 
-print("\n── 19. shell 脚本检查 ──")
+print("\n── 21. shell 脚本检查 ──")
 
 # macOS 自带 bash 3.2 会把**全角字符的字节**当成变量名的一部分。
 # 于是 `echo "「$TARGET」"` 会去找名为 `TARGET」` 的变量，报

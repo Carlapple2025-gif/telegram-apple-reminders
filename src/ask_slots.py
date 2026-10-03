@@ -245,6 +245,9 @@ def render(sess: Session) -> None:
 
     # 重试一次：网络抖动导致的瞬时失败很常见，一次退避就能救回来。
     # 仍然失败才退化为发新消息（至少界面是对的）。
+    #
+    # 注意："内容未变"已经在 edit_with_buttons 内部被当作成功返回了，
+    # 不会走到这里 —— 否则每次点击都会多发一条消息（实测踩过）。
     for attempt in (1, 2):
         try:
             tg.edit_with_buttons(sess.message_id, text, kb)
@@ -253,6 +256,9 @@ def render(sess: Session) -> None:
             if sess.verbose:
                 print(f"    [重绘失败 {attempt}] {str(e)[:80]}", flush=True)
             time.sleep(0.6)
+    # 退化为发新消息前先记一笔：这说明编辑连续失败，值得排查
+    if sess.verbose:
+        print("    [退化为发新消息]", flush=True)
     r = tg.send_with_buttons(text, kb)
     sess.message_id = r.get("message_id")
 
@@ -303,12 +309,9 @@ def finish_ui(sess: Session) -> None:
         tail = "✅ 已完成" if sess.decided_count == len(sess.answers) else \
                f"已结束（{sess.decided_count}/{len(sess.answers)} 条已选）"
         base = confirm_text(sess) if sess.confirming else frame_text(sess)
-        token, chat = tg.load_config()
-        tg._call(token, "editMessageText", {
-            "chat_id": chat,
-            "message_id": sess.message_id,
-            "text": f"{base}\n\n{tail}",
-        })
+        # 用 edit_with_buttons 并传空键盘：它会正确处理"内容没变"
+        # （返回 {} 而非抛错），同时撤掉按钮。
+        tg.edit_with_buttons(sess.message_id, f"{base}\n\n{tail}", [])
     except tg.TelegramError:
         # 收尾失败不影响结果：数据已经拿到，按钮顶多留一会儿。
         pass

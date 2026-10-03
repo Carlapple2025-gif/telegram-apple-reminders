@@ -136,6 +136,12 @@ def send(text: str, chat_id: str | None = None,
 
 CALLBACK_MAX_BYTES = 64
 
+# Telegram 对"内容与当前完全一致"的编辑**返回错误**而非静默成功：
+#   HTTP 400 Bad Request: message is not modified: ...
+# 必须当作**成功**处理。否则调用方会误判失败 → 重试 → 退化成"发新消息"，
+# 于是每次点击都多一条消息（实测踩到：用户看到测试后又连收几条）。
+NOT_MODIFIED = "message is not modified"
+
 
 def send_with_buttons(text: str, keyboard: list[list[tuple[str, str]]],
                       chat_id: str | None = None) -> dict:
@@ -165,7 +171,12 @@ def edit_with_buttons(message_id: int, text: str,
         "text": text,
         "reply_markup": _build_keyboard(keyboard),
     }
-    return _call(token, "editMessageText", payload)
+    try:
+        return _call(token, "editMessageText", payload)
+    except TelegramError as e:
+        if NOT_MODIFIED in str(e):
+            return {}          # 内容没变 = 无需重绘 = 成功（不是失败！）
+        raise
 
 
 def answer_callback(callback_id: str, text: str | None = None,
