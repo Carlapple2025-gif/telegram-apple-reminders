@@ -97,7 +97,12 @@ def carry_text(entry: parser.Entry, from_date: str = "") -> str:
     （实测发生过：10-02 的条目被带到 10-03，然后又被带到 10-04）。
     带上来源日期后，就能判断"这条已经带过一次了，别再带"。
     """
+    # 先剥掉**已有的**顺延标记再写新的。
+    # 否则标记会越积越多：`⟳10-02` → `⟳10-02 ⟳10-03` → …，一天天变长。
+    # 只保留"最近一次从哪天带过来"就够了 —— 那才是需要知道的信息。
     base = html_escape_free(entry.text)
+    base = re.sub(rf"\s*{CARRY_MARK}\s*\d{{2}}-\d{{2}}", "", base)
+    base = base.replace(CARRY_MARK, "").strip()
     tag = f"{CARRY_MARK}{from_date[5:]}" if from_date else CARRY_MARK
     return f"- [ ] {base} {tag}"
 
@@ -112,21 +117,35 @@ def build_plan(prev: parser.ParseResult, next_text: str | None,
       · 次日页已带 ⟳ 的旧顺延项 → 视为已处理
       · 相似度高的也提示，但不静默丢（交给人看）
     """
+    # 目标页已有内容，准备两份：
+    #   existing_norm    —— 未带日期的指纹，用于**相似度**比较
+    #   existing_scoped  —— 带源日期的指纹，用于**幂等**判断
+    #
+    # 为什么要分两份：带日期的指纹不适合算相似度（比较的是
+    # `2026-10-02|提交结算单B` 与 `提交结算单B`，相似度会掉到 0.83 以下，
+    # 于是本该跳过的重复项被当成新内容又带一遍）。实测踩到过。
+    #
+    # 幂等为什么要带日期：同一条内容在不同天出现是**正常**的
+    # （今天没做完 → 明天该再出现一次）。不带日期就无法区分
+    # "同一次重复运行"与"跨天正常顺延"，会把该带过去的也拦住。
     existing_lines: list[str] = []
     existing_norm: list[str] = []
+    existing_scoped: list[str] = []
     if next_text:
         for raw in next_text.replace("\r\n", "\n").split("\n"):
             if not raw.strip():
                 continue
             existing_lines.append(raw)
-            existing_norm.append(content_fingerprint(raw))
+            fp = content_fingerprint(raw)
+            existing_norm.append(fp)
+            existing_scoped.append(f"{src_date}|{fp}")
 
     plan: list[str] = []
     skipped: list[str] = []
 
     # 目标页里已经存在的"历史顺延项" —— 用来判断哪些条目已被带过一次
     already_carried = {
-        content_fingerprint(l) for l in existing_lines
+        f"{src_date}|{content_fingerprint(l)}" for l in existing_lines
         if carried_before(l, target_date, src_date)
     }
 
@@ -136,21 +155,19 @@ def build_plan(prev: parser.ParseResult, next_text: str | None,
             skipped.append(f"第 {entry.line_no} 行内容为空，跳过")
             continue
 
-        norm = content_fingerprint(text)
+        norm = f"{src_date}|{content_fingerprint(text)}"
 
-        # 防链式顺延（两条判据，缺一不可）：
+        # 幂等判据：目标页已有同内容就跳过。
         #
-        # 判据 A：**来源条目自己就带旧 ⟳ 标记** —— 说明它在更早的某天
-        #   已经被顺延过一次了。这条是主力：实测 10-02 的条目被带到 10-03 后，
-        #   10-03 的条目仍带 ⟳10-02，再跑就会继续往 10-04 传。
-        # 判据 B：目标页里已有同内容的 ⟳ 项 —— 覆盖"重复运行"的场景
-        #   （同一天跑两次，第一次已写入、第二次不该再写）。
+        # ⚠️ 这里曾经还有一条判据 ——"来源条目自带旧 ⟳ 标记就跳过"，
+        # 用来"防止链式顺延"。**那条是错的，而且危害很大**：
+        # 顺延过来的条目本来就都带 ⟳ 标记，于是它们**再也不会被往后带** ——
+        # 实测：10-03 的 3 条未完成待办在"顺延到 10-04"时被全部拦住，
+        # 等于**静默丢失**用户还没做的事。
         #
-        # 两个判据分别对应两种不同的重复来源，只留一个都会漏。
-        if carried_before(entry.raw, target_date, src_date):
-            skipped.append(f"「{text}」在更早的某天已顺延过，不再往后传")
-            continue
-        if norm in already_carried:
+        # 正确的认识：链式顺延本身不是问题 —— 用户没做完的事**就该一天天
+        # 往后带**。需要防的只是"同一次里重复写"，而那由下面这条判据覆盖。
+        if norm in already_carried or norm in existing_scoped:
             skipped.append(f"「{text}」目标页已有 ⟳ 项，不再重复带")
             continue
 
