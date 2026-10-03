@@ -10,7 +10,8 @@
 
 ## 一、一句话现状
 
-**v4 已上线可用，但"分类靠猜"这个设计缺陷已确认，符号声明方案已定、尚未实施。**
+**符号声明方案已落地（2026-10-03，提交 `5ce5a4b`）：类型由你在行首写符号声明，代码不再猜。**
+v4 已上线运行，自检 513 项全过。
 
 ---
 
@@ -147,7 +148,7 @@ journal 是**追加不改**的传感器读数，所以这些记录会永久保�
 | 文档 | 性质 | 看它的场合 |
 |---|---|---|
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | **唯一权威** | 任何设计犹豫时 |
-| [`SYMBOL-SCHEME.md`](SYMBOL-SCHEME.md) | **已定稿，未实现** | 动手改分类时 |
+| [`SYMBOL-SCHEME.md`](SYMBOL-SCHEME.md) | **已实现**（决策记录）| 想知道为什么删掉"猜语义" |
 | [`TELEGRAM-DESIGN.md`](TELEGRAM-DESIGN.md) | **讨论稿** | 讨论 Telegram 层时 |
 | [`PROJECT-STATE.md`](PROJECT-STATE.md) | 本文，接续点 | 新会话开始时 |
 | [`USER-GUIDE.md`](USER-GUIDE.md) | 使用者视角 | 忘了怎么用 |
@@ -160,27 +161,39 @@ journal 是**追加不改**的传感器读数，所以这些记录会永久保�
 
 ## 八、下一步
 
-### 8.1 已批准、待实施（用户已说"就按这个"）
+### 8.1 ✅ 已完成：符号声明方案
 
-**符号声明方案** —— 见 [`SYMBOL-SCHEME.md`](SYMBOL-SCHEME.md) §4 的改动清单：
+**2026-10-03 落地**（提交 `5ce5a4b`，净减 253 行）：
 
 ```
-parse.py    补 # / @ 剥除，取消 @时段特例
-whens.py    接收 _RECUR_* + parse_recurrence（从 classify.py 搬）
-classify.py 删约 240 行，只留 Kind / Confidence / Classified
-intake.py   改按符号路由
-daemon.py   去掉 classify 调用（L312 的"假跳过分类"）
-selftest.py 减旧断言、补符号路由断言
+parse.py     ✅ 剥 #（不定类型）；符号判定归 routes.py
+whens.py     ✅ 接收 _RECUR_* + parse_recurrence + first_occurrence
+                + strip_time_phrases（这一步最容易漏，会弄脏标题）
+classify.py  ✅ 整个删除（405 行，含 39 行本来就是死代码）
+kinds.py     ✅ 新增：Kind + Item（数据结构本身是对的，搬出来留用）
+routes.py    ✅ 新增：唯一决定归属的地方 + 3 条拒绝路径
+intake.py    ✅ 改按符号路由，去掉 ask 分支
+daemon.py    ✅ 去掉 classify 调用 + 删掉按钮/pending 机制（203 行）
+selftest.py  ✅ 526 → 513 项（减是有意的：没有"猜得准不准"可验了）
 ```
 
-**用户明确要求：先不动手。** 等 Telegram 层的讨论（§4.2）有结论后一起改。
+**过程中踩到并修掉的三个真问题**（详见提交信息）：
 
-### 8.2 未批准、待讨论
+1. `@明天上午九点开会` 的日期被 v1 旧前缀吃掉（它的词表含"明天"）
+2. 符号语义一开始放进 `parse.py`，**弄坏了 v1 的顺延** ——
+   v1 的词表没有 `event`，`carry_over` 把它当未知静默丢掉
+3. `#` 没进 `content_fingerprint` → 会重复建条目
 
-- Telegram 层五个设计点（TELEGRAM-DESIGN §5）；
-- 建议顺序：**先定 Telegram 层 → 再一起实施**（避免改两次）。
+### 8.2 下一步（唯一的待办）
 
----
+| # | 事项 | 状态 |
+|---|---|---|
+| T1 | 回执要不要发（倾向：发，极简一行）| 待你确认 |
+| T5 | 长轮询 25 秒延迟（倾向：保持，但回执先发）| 与 T1 联动 |
+| D2 | 提醒事项里的重复条目要不要清 | 待你决定 |
+| D3 | journal 里那条错误记录要不要改 | 待你决定 |
+
+**Telegram 层三项裁决（不做引用 / 只报错 / 删 pending）已随本次实施完成。**
 
 ## 九、怎么验证"改对了"
 
