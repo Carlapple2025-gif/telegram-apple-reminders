@@ -40,9 +40,23 @@ def check(name: str, ok: bool, detail: str = "") -> None:
         failures.append(name)
 
 
-# ── 1. 静态契约：上层调用的方法必须存在
+# ── 段落编号
+#
+# 用变量统一维护，不手工写死在标题里。手工编号会随增删段落失配 ——
+# 实测出现过两个 "19."（注释改了，print 里的没跟上）。
+_sec_no = 0
 
-print("── 1. 静态契约检查（方法是否存在）──")
+
+def section(title: str) -> None:
+    """打印带序号的段落标题。"""
+    global _sec_no
+    _sec_no += 1
+    print(f"\n── {_sec_no}. {title} ──")
+
+
+# ── 静态契约：上层调用的方法必须存在
+
+section("静态契约检查（方法是否存在）")
 
 notes_tree = ast.parse((SRC / "notes.py").read_text(encoding="utf-8"))
 notes_cls = next(
@@ -87,9 +101,9 @@ check(
 )
 
 
-# ── 2. 解析器行为（纯函数，离线可测）
+# ── 解析器行为（纯函数，离线可测）
 
-print("\n── @. 解析器行为检查 ──")
+section("解析器行为检查")
 import parse as parser  # noqa: E402
 
 
@@ -149,9 +163,9 @@ res = parser.parse(raw)
 check("原文逐字保留", res.entries[1].raw == "- [ ] 甲 乙  丙")
 
 
-# ── 3. 顺延逻辑（离线可测 —— 这些分支在沙箱里必须能验掉）
+# ── 顺延逻辑（离线可测 —— 这些分支在沙箱里必须能验掉）
 
-print("\n── @. 顺延逻辑检查 ──")
+section("顺延逻辑检查")
 import carry_over  # noqa: E402
 
 
@@ -204,9 +218,9 @@ check("⟳ 标记在归一化后保持不变",
       carry_over.CARRY_MARK in parser.normalize_line(f"甲 {carry_over.CARRY_MARK}"))
 
 
-# ── 4. 留档渲染
+# ── 留档渲染
 
-print("\n── @. 留档渲染检查 ──")
+section("留档渲染检查")
 res = parser.parse("2026-10-02\n- [ ] 甲\n* 乙")
 md = parser.render_archive(res, {"date": "2026-10-02", "source": "test"})
 check("留档含原文段", "## 原文（逐字保留）" in md)
@@ -214,9 +228,9 @@ check("留档含解析段", "## 解析结果" in md)
 check("留档含日期", "date: 2026-10-02" in md)
 
 
-# ── 5. AppleScript 字面量转义
+# ── AppleScript 字面量转义
 
-print("\n── @. AppleScript 转义检查 ──")
+section("AppleScript 转义检查")
 import re as _re  # noqa: E402
 import notes as _notes  # noqa: E402
 
@@ -235,9 +249,9 @@ check("反斜杠先于引号转义",
       _notes._as_literal('\\"'))
 
 
-# ── 6. 清理判据（哪些能删、哪些必须留）
+# ── 清理判据（哪些能删、哪些必须留）
 
-print("\n── @. 清理判据检查 ──")
+section("清理判据检查")
 import datetime as _dt  # noqa: E402
 import importlib.util as _ilu  # noqa: E402
 
@@ -257,9 +271,9 @@ for _n in ["2026-10-02", "2026-10-01", "国际象棋", "2026-10-02 备注",
     check(f"应留：{_n[:24]}", _cleanup.classify(_n, _today) is None)
 
 
-# ── 7. 提醒事项同步规则
+# ── 提醒事项同步规则
 
-print("\n── @. 提醒事项同步规则 ──")
+section("提醒事项同步规则")
 import importlib.util as _ilu2  # noqa: E402
 
 def _load(path):
@@ -350,9 +364,9 @@ check("顺延标记不影响去重键（不重复建条目）",
       len({_rems.make_key(t, _NOTE) for t in _fp_forms}) == 1)
 
 
-# ── 8. 完成状态合并（权威 = 提醒事项）
+# ── 完成状态合并（权威 = 提醒事项）
 
-print("\n── @. 完成状态合并规则 ──")
+section("完成状态合并规则")
 _completion = _load(SRC / "completion.py")
 
 _CNOTE = "x-coredata://TEST/ICNote/p1"
@@ -406,9 +420,9 @@ _n = _completion.write_back(_pg3, _completion.resolve(_pg3, _CNOTE, _FakeReminde
 check("回填留档只改有差异的条目", _n == 1 and [e.completed for e in _pg3.todos] == [False, True, False])
 
 
-# ── 9. 顺延的完成状态来自留档（权威链路的落点）
+# ── 顺延的完成状态来自留档（权威链路的落点）
 
-print("\n── @. 顺延依据留档里的完成状态 ──")
+section("顺延依据留档里的完成状态")
 
 # 这是整条权威链路的关键一环：
 #   21:30 日报 resolve(提醒事项) → write_back → save_archive（落盘）
@@ -429,9 +443,9 @@ _plan, _ = _co.build_plan(_prev_all, None, "2026-10-02", "2026-10-03")
 check("留档里全部完成 → 不顺延任何条目", len(_plan) == 0)
 
 
-# ── 10. 顺延的幂等与防链式
+# ── 顺延的幂等与防链式
 
-print("\n── @. 顺延幂等 / 不链式往后传 ──")
+section("顺延幂等 / 不链式往后传")
 
 _prev02 = parser.parse("2026-10-02\n@中午 勘察表盖章\n明天要交电费")
 
@@ -463,9 +477,9 @@ _fps = {_co.content_fingerprint(t) for t in
 check("不同标记写法归一到同一指纹", len(_fps) == 1, str(_fps))
 
 
-# ── 11. AppleScript 语法校验（osacompile，只编译不执行）
+# ── AppleScript 语法校验（osacompile，只编译不执行）
 
-print("\n── @. AppleScript 语法校验 ──")
+section("AppleScript 语法校验")
 
 import subprocess as _sp  # noqa: E402
 
@@ -501,9 +515,9 @@ check(f"{len(_as_templates)} 个 AppleScript 模板语法正确",
       not _as_fail, "；".join(_as_fail))
 
 
-# ── 12. 系统 Python 3.9 兼容性
+# ── 系统 Python 3.9 兼容性
 
-print("\n── @. AppleScript 的 whose 子句 ──")
+section("AppleScript 的 whose 子句")
 
 # 反复踩到的坑：`whose id "..."` 缺 `is` 会**编译失败**（-2741），
 # 报错只说"期望逗号但找到引号"，完全看不出是缺 is —— 骗了我好几次。
@@ -552,7 +566,7 @@ for _f in list((ROOT / "src").glob("*.py")) + list((ROOT / "deploy").glob("*.sh"
 check("代码里没有重复的 is", not _dup5, "；".join(_dup5[:3]))
 
 
-print("\n── @. 顺延后必须为次日页建留档 ──")
+section("顺延后必须为次日页建留档")
 
 # 实测踩到：顺延在备忘录里建了 10-03，但没建留档 ——
 # 于是"新的一页不在系统视野内"：日报读不到它、时段询问扫描不到它、
@@ -567,7 +581,7 @@ check("建留档失败不阻断顺延（备忘录已写入）",
       "建立留档失败" in _co_src)
 
 
-print("\n── @. 「内容未变」必须视为成功 ──")
+section("「内容未变」必须视为成功")
 
 # Telegram 对"内容与当前完全一致"的编辑**返回 HTTP 400 错误**：
 #   message is not modified: specified new message content ... exactly the same
@@ -587,7 +601,7 @@ check("telegram 提供 drain_stale_callbacks（清理过期按钮）",
       hasattr(_tg, "drain_stale_callbacks"))
 
 
-print("\n── @. 通知通道 ──")
+section("通知通道")
 
 _notify = _load(SRC / "notify.py")
 
@@ -612,7 +626,7 @@ _plist = (ROOT / "deploy" / "com.carl.pdca.report.plist").read_text(encoding="ut
 check("定时任务的日报已启用 --sync", "<string>--sync</string>" in _plist)
 
 
-print("\n── @. 系统 Python 兼容性 ──")
+section("系统 Python 兼容性")
 
 # 为什么单独查这个：launchd 任务用的是 **/usr/bin/python3（3.9）**，
 # 而我平时用自带运行时（3.12）。若代码用了运行时求值的类型标注
@@ -644,9 +658,9 @@ else:
           not _bad, "；".join(_bad))
 
 
-# ── 13. 关键路线的三个定时任务必须齐全
+# ── 关键路线的三个定时任务必须齐全
 
-print("\n── 13. 关键路线的定时任务 ──")
+section("关键路线的定时任务")
 
 # 关键路线（最小模型）：
 #   ① 09:00 同步待办 → 提醒事项   ← 没它就没地方打钩，完成状态无从谈起
@@ -670,9 +684,9 @@ check("同步任务带 --apply", "<string>--apply</string>" in _sync_plist)
 check("同步任务带 --refresh", "<string>--refresh</string>" in _sync_plist)
 
 
-# ── 14. 顺延必须依据**当前**权威状态
+# ── 顺延必须依据**当前**权威状态
 
-print("\n── 14. 顺延依据当前权威状态 ──")
+section("顺延依据当前权威状态")
 
 # 实测踩到：用户 22:00 在提醒事项打了钩，但留档停在 21:52，
 # 次日 07:02 的顺延把**已完成的事**也带到了新的一天，
@@ -694,7 +708,7 @@ check("调和会读回验证", "读回验证" in _rec_src)
 
 
 
-print("\n── @. 密钥保护检查 ──")
+section("密钥保护检查")
 
 # 为什么值得单独查：Telegram token 一旦被提交，等于把 bot 交给别人。
 # 加 telegram.py 时就发现 .gitignore 里**没有 .env** —— 而下一步就要往
@@ -710,9 +724,9 @@ _r = _sp2.run(["git", "check-ignore", ".env.example"], cwd=str(ROOT),
 check(".env.example 可被提交（它是模板）", _r.returncode != 0)
 
 
-# ── 15. shell 脚本静态检查：bash 3.2 的全角字符陷阱
+# ── shell 脚本静态检查：bash 3.2 的全角字符陷阱
 
-print("\n── @. shell 脚本检查 ──")
+section("shell 脚本检查")
 
 # macOS 自带 bash 3.2 会把**全角字符的字节**当成变量名的一部分。
 # 于是 `echo "「$TARGET」"` 会去找名为 `TARGET」` 的变量，报
@@ -736,13 +750,13 @@ check(
 )
 
 
-# ── 16. v4 纯函数模块（时间解析 + 命令分类）
+# ── v4 纯函数模块（时间解析 + 命令分类）
 #
 # 这三个模块是 v4 的核心判断逻辑，且**完全纯函数**（不碰 AppleScript），
 # 所以能在这里彻底验证。日期计算的错误极难在生产中发现
 # （表现为"差一天""时段不对"），必须靠固定基准日的断言守住。
 
-print("\n── 16. v4 时间解析（whens）──")
+section("v4 时间解析（whens）")
 
 _whens = _load(SRC / "whens.py")
 import datetime as _dt2  # noqa: E402
@@ -810,7 +824,7 @@ check("只给日期 → 全天", _whens.parse_when("明天", _B).all_day is True
 check("给了时刻 → 非全天", _whens.parse_when("明天下午两点", _B).all_day is False)
 
 
-print("\n── 17. v4 命令分类（classify）──")
+section("v4 命令分类（classify）")
 
 _cls = _load(SRC / "classify.py")
 
@@ -875,7 +889,7 @@ check("空输入 → None", _cls.classify("", _B) is None)
 check("纯空白 → None", _cls.classify("   ", _B) is None)
 
 
-print("\n── 18. v4 用户日志（journal）──")
+section("v4 用户日志（journal）")
 
 _jr = _load(SRC / "journal.py")
 import json as _json2  # noqa: E402
@@ -918,7 +932,29 @@ finally:
     _sh2.rmtree(_tmpdir, ignore_errors=True)
 
 
-print("\n── 19. v4 备忘录解析（memo，纯函数部分）──")
+section("模块名不遮蔽标准库")
+
+# 踩到过：把日历模块命名为 calendar.py，于是 `import calendar` 会拿到
+# **我们的**模块而不是标准库。当前项目没用到标准库 calendar 所以没爆，
+# 但这是定时炸弹 —— 以后引入任何依赖（dateutil 等会 import calendar）都会中招。
+#
+# 这类问题在"能跑"的情况下完全看不出来，必须静态检查。
+import sys as _sys3  # noqa: E402
+import sysconfig as _sc3  # noqa: E402
+
+_stdlib_dir = _sc3.get_paths()["stdlib"]
+_stdlib_names = {p.stem for p in Path(_stdlib_dir).glob("*.py")}
+_shadow = []
+for _f in (SRC).glob("*.py"):
+    if _f.stem in _stdlib_names:
+        _shadow.append(_f.name)
+
+check("src/ 下没有模块遮蔽标准库",
+      not _shadow,
+      f"这些会遮蔽标准库：{_shadow} → 请改名")
+
+
+section("v4 备忘录解析（memo，纯函数部分）")
 
 _mm = _load(SRC / "memo.py")
 
