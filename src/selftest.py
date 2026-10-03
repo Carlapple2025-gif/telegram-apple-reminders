@@ -1542,16 +1542,27 @@ _inst = _inst_path.read_text(encoding="utf-8")
 # 只装 v4 的两个任务（v1 的三个 plist 文件保留但不再安装）
 check("安装脚本只装 daemon 与 report",
       "LABELS=(com.carl.pdca.daemon com.carl.pdca.report)" in _inst)
-check("安装脚本不再包含 v1 的任务",
-      "com.carl.pdca.carryover" not in _inst
-      and "com.carl.pdca.sync" not in _inst)
+# 安装脚本**不安装** v1 任务，但会**清理**它们 ——
+# 实测踩到：换架构时只装新的、不管旧的，旧任务会继续按老逻辑动数据
+# （v1 的 report 会在 21:30 发一份基于旧留档的误导日报）。
+check("安装列表只含 v4 两个任务",
+      "LABELS=(com.carl.pdca.daemon com.carl.pdca.report)" in _inst)
+check("安装脚本会清理 v1 遗留任务", "cleanup_legacy" in _inst
+      and "LEGACY_LABELS" in _inst)
+check("v1 任务被标为遗留而非安装",
+      "LEGACY_LABELS=(com.carl.pdca.carryover com.carl.pdca.sync)" in _inst)
 
 # v1 的 test 会跑 daily_report/carry_over —— v4 必须换成新入口，
 # 否则"验证安装"验证的是已经不用了的代码
 check("安装脚本的 test 跑新入口",
       "src/report.py" in _inst and "src/daemon.py" in _inst)
-check("安装脚本的 test 不再跑 v1 入口",
-      "daily_report.py" not in _inst and "carry_over.py" not in _inst)
+# 判据要限定在 test 函数体内：整份脚本会在注释里提到 v1 脚本名
+# （说明为什么不跑它们），全局搜会误报 —— 这个"扫描器不排除非代码部分"
+# 的坑本项目踩过多次。
+_inst_test = _inst[_inst.index("do_test() {"):_inst.index("case \"${1:-}\"")]
+check("test 不再跑 v1 入口",
+      "daily_report.py" not in _inst_test and "carry_over.py" not in _inst_test,
+      "test 函数里出现了 v1 脚本名")
 
 # 验证据说不能顺手发一条重复日报
 check("test 用 --no-push（不重复推送）", "--no-push" in _inst)
