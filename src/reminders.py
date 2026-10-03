@@ -34,11 +34,27 @@ def lit(s: str) -> str:
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def run(source: str) -> str:
-    proc = subprocess.run(["osascript", "-e", source], capture_output=True, text=True)
-    out = proc.stdout.strip()
-    err = proc.stderr.strip()
-    if err:
+# AppleEvent 超时（-1712）值得重试。原因很实际：launchd 在早上 07:00 触发时，
+# 提醒事项 App 很可能**没在运行** —— 首次调用要等它冷启动，容易超时。
+# 实测踩到过：07:00 那次顺延报 "-1712 AppleEvent 逾时"，只好退化成读备忘录标记。
+#
+# 只对超时重试，不对权限错误重试 —— 权限问题重试多少次都一样，
+# 只会白白拖慢流程。
+RETRYABLE = ("-1712", "AppleEvent", "timed out", "逾时", "逾時")
+
+
+def run(source: str, retries: int = 3, backoff: float = 1.5) -> str:
+    """执行 AppleScript。超时可重试，权限错误立即抛出。"""
+    import time as _time
+    last_err = ""
+    for attempt in range(1, retries + 1):
+        proc = subprocess.run(["osascript", "-e", source],
+                              capture_output=True, text=True)
+        out = proc.stdout.strip()
+        err = proc.stderr.strip()
+        if not err:
+            return out
+
         if "-10004" in err or "privilege violation" in err:
             raise RemindersError(
                 "提醒事项拒绝访问（-10004 越权）。\n"
@@ -48,8 +64,17 @@ def run(source: str) -> str:
             raise RemindersError(
                 "系统不允许向「提醒事项」发送 Apple 事件（-1743）。同上需授权。"
             )
+
+        last_err = err
+        if any(k in err for k in RETRYABLE) and attempt < retries:
+            # 顺便"唤醒"一下提醒事项，让它的冷启动发生在重试之前
+            subprocess.run(["osascript", "-e", 'tell application "Reminders" to activate'],
+                           capture_output=True)
+            _time.sleep(backoff * attempt)
+            continue
         raise RemindersError(f"AppleScript 失败：{err}")
-    return out
+
+    raise RemindersError(f"AppleScript 连续 {retries} 次失败：{last_err}")
 
 
 @dataclass

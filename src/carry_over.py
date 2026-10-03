@@ -63,25 +63,73 @@ def html_escape_free(line: str) -> str:
     return re.sub(r"[ \t]+", " ", line).strip()
 
 
-def dedup_key(text: str) -> str:
+def content_fingerprint(text: str) -> str:
     """
-    去重比较用的键：**必须先剥掉顺延标记再归一化**。
+    内容指纹：用于判断"两行是不是同一件事"。
 
-    这是实测踩到的坑：次日页里存的是「甲 ⟳」，而来源是「甲」，
-    直接比较归一化结果会不相等 —— 于是同一条被顺延了第二遍，
-    幂等性失效。剥掉标记后两者都是「甲」，才真正幂等。
+    把**所有装饰性标记**剥掉后归一化：
+      · 顺延标记 ⟳（可能不止一个 —— 曾经产生过 `⟳ ⟳`）
+      · 复选框 `[ ]` / `[x]`
+      · 行首列表符号 `-` `*` `•`
+      · 时段前缀 `@上午` 等
+
+    为什么必须这么彻底（两次实测教训）：
+      ① 只按原样比较 → 「甲 ⟳」≠「甲」→ 同一条被顺延第二遍
+      ② 只剥 ⟳ 不剥复选框 → 「- [ ] 甲」≠「甲」时又漏
+    所以统一成一个函数，所有需要"判断是不是同一条"的地方都调它。
     """
-    t = text.replace(CARRY_MARK, " ")
+    t = text
+    # 顺延标记可能带来源日期、也可能出现多个（历史遗留），
+    # 必须**连同日期一起**剥掉 —— 只剥 ⟳ 会留下 "10-02"，
+    # 于是「甲 ⟳10-02」的指纹变成 "甲 10-02"，与「甲」对不上（实测踩到）。
+    t = re.sub(rf"{CARRY_MARK}\s*\d{{2}}-\d{{2}}", " ", t)
+    t = t.replace(CARRY_MARK, " ")
+    # 剥掉行首列表符号与复选框
+    body, _, _ = parser.strip_leading_marker(t)
+    t = body or t
     return parser.normalize_line(t)
 
 
-def carry_text(entry: parser.Entry) -> str:
-    """把一条待办转成顺延到次日页的那一行。"""
+# 兼容旧名（selftest 里引用过）
+dedup_key = content_fingerprint
+
+
+def carried_before(line: str, target_date: str, src_date: str = "") -> bool:
+    """
+    这一行是不是"已经被顺延过一次"的？
+
+    判据（宽严并济）：
+      · 行里有 ⟳ 且**没有**日期 → 无法证明是本次写的 → 视为历史遗留，排除。
+        宁可漏带一条（你会看到并手动补），也不要重复带（会积累成一串 ⟳）。
+      · 行里有 ⟳MM-DD：等于 src_date 的月日 → 是本次要写的；其余 → 历史遗留。
+    """
+    if CARRY_MARK not in line:
+        return False
+    m = re.search(rf"{CARRY_MARK}\s*(\d{{2}}-\d{{2}})", line)
+    if not m:
+        return True                      # 裸 ⟳ → 当作历史遗留
+    if not src_date:
+        return True
+    return m.group(1) != src_date[5:]   # 日期不是"本次来源" → 历史遗留
+
+
+def carry_text(entry: parser.Entry, from_date: str = "") -> str:
+    """
+    把一条待办转成顺延到次日页的那一行。
+
+    标记写成 `⟳10-02`（带来源日期）而不是裸 `⟳`：
+    裸标记虽然好看，但**无法区分"这条是从更早带过来的"**，
+    于是它会在下一次顺延时又被带走一次 —— 形成链式顺延
+    （实测发生过：10-02 的条目被带到 10-03，然后又被带到 10-04）。
+    带上来源日期后，就能判断"这条已经带过一次了，别再带"。
+    """
     base = html_escape_free(entry.text)
-    return f"- [ ] {base} {CARRY_MARK}"
+    tag = f"{CARRY_MARK}{from_date[5:]}" if from_date else CARRY_MARK
+    return f"- [ ] {base} {tag}"
 
 
-def build_plan(prev: parser.ParseResult, next_text: str | None) -> tuple[list[str], list[str]]:
+def build_plan(prev: parser.ParseResult, next_text: str | None,
+               src_date: str, target_date: str) -> tuple[list[str], list[str]]:
     """
     计算要顺延的行。返回 (要追加的行, 跳过原因说明)。
 
@@ -97,11 +145,16 @@ def build_plan(prev: parser.ParseResult, next_text: str | None) -> tuple[list[st
             if not raw.strip():
                 continue
             existing_lines.append(raw)
-            body, _, _ = parser.strip_leading_marker(raw)
-            existing_norm.append(dedup_key(body or raw))
+            existing_norm.append(content_fingerprint(raw))
 
     plan: list[str] = []
     skipped: list[str] = []
+
+    # 目标页里已经存在的"历史顺延项" —— 用来判断哪些条目已被带过一次
+    already_carried = {
+        content_fingerprint(l) for l in existing_lines
+        if carried_before(l, target_date, src_date)
+    }
 
     for entry in prev.open_todos:
         text = html_escape_free(entry.text)
@@ -109,7 +162,23 @@ def build_plan(prev: parser.ParseResult, next_text: str | None) -> tuple[list[st
             skipped.append(f"第 {entry.line_no} 行内容为空，跳过")
             continue
 
-        norm = dedup_key(text)
+        norm = content_fingerprint(text)
+
+        # 防链式顺延（两条判据，缺一不可）：
+        #
+        # 判据 A：**来源条目自己就带旧 ⟳ 标记** —— 说明它在更早的某天
+        #   已经被顺延过一次了。这条是主力：实测 10-02 的条目被带到 10-03 后，
+        #   10-03 的条目仍带 ⟳10-02，再跑就会继续往 10-04 传。
+        # 判据 B：目标页里已有同内容的 ⟳ 项 —— 覆盖"重复运行"的场景
+        #   （同一天跑两次，第一次已写入、第二次不该再写）。
+        #
+        # 两个判据分别对应两种不同的重复来源，只留一个都会漏。
+        if carried_before(entry.raw, target_date, src_date):
+            skipped.append(f"「{text}」在更早的某天已顺延过，不再往后传")
+            continue
+        if norm in already_carried:
+            skipped.append(f"「{text}」目标页已有 ⟳ 项，不再重复带")
+            continue
 
         # 完全一致 → 已经有这条了
         if norm in existing_norm:
@@ -126,7 +195,7 @@ def build_plan(prev: parser.ParseResult, next_text: str | None) -> tuple[list[st
             )
             continue
 
-        plan.append(carry_text(entry))
+        plan.append(carry_text(entry, src_date))
 
     return plan, skipped
 
@@ -219,7 +288,8 @@ def main() -> int:
             next_text = target.plaintext
 
     # ── 计算计划
-    plan, skipped = build_plan(prev, next_text)
+    plan, skipped = build_plan(prev, next_text,
+                               target_date=next_date_str, src_date=src_date_str)
 
     print()
     print("── 计划写入的内容 " + "─" * 40)

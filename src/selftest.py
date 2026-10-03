@@ -166,7 +166,7 @@ import carry_over  # noqa: E402
 
 def plan_of(prev_text: str, next_text: str | None) -> tuple[list[str], list[str]]:
     prev = parser.parse(prev_text)
-    return carry_over.build_plan(prev, next_text)
+    return carry_over.build_plan(prev, next_text, "2026-10-02", "2026-10-03")
 
 
 # 基本顺延
@@ -180,13 +180,18 @@ check("备忘不被顺延", len(plan) == 1)
 
 # 顺延行的格式
 plan, _ = plan_of("2026-10-02\n- [ ] 甲", None)
-check("顺延行带 ⟳ 标记", plan and plan[0].endswith(carry_over.CARRY_MARK))
+check("顺延行带 ⟳ 标记（含来源日期）",
+      bool(plan) and carry_over.CARRY_MARK in plan[0])
 check("顺延行是未完成复选框", plan and plan[0].startswith("- [ ] "))
 
 # 幂等性 —— 这是实测踩到的 bug：次日页里是「甲 ⟳」，来源是「甲」，
 # 不剥标记就比不相等，于是同一条被顺延第二遍。
+plan, skipped = plan_of("2026-10-02\n- [ ] 甲", "2026-10-03\n- [ ] 甲 ⟳10-02\n")
+check("幂等：目标页已有「甲 ⟳10-02」时不重复顺延", len(plan) == 0, f"实际 {plan}")
+
+# 裸 ⟳（无日期）也要能识别为历史项 —— 历史遗留的写法可能没有日期
 plan, skipped = plan_of("2026-10-02\n- [ ] 甲", "2026-10-03\n- [ ] 甲 ⟳\n")
-check("幂等：已有「甲 ⟳」时不重复顺延", len(plan) == 0, f"实际 {plan}")
+check("幂等：裸「⟳」标记也算历史项", len(plan) == 0, f"实际 {plan}")
 
 plan, _ = plan_of("2026-10-02\n- [ ] 甲", "2026-10-03\n- [ ] 甲\n")
 check("幂等：次日页有无标记的同名项也不重复", len(plan) == 0)
@@ -407,7 +412,7 @@ print("\n── 9. 顺延依据留档里的完成状态 ──")
 _prev_done = parser.parse("2026-10-02\n- [ ] 甲\n- [ ] 乙")
 _prev_done.entries[2].completed = True   # 模拟"留档里乙已完成（来自提醒事项）"
 import carry_over as _co  # noqa: E402
-_plan, _ = _co.build_plan(_prev_done, None)
+_plan, _ = _co.build_plan(_prev_done, None, "2026-10-02", "2026-10-03")
 check("留档标记为完成的条目不参与顺延",
       len(_plan) == 1 and "甲" in _plan[0], f"实际 {_plan}")
 
@@ -415,7 +420,7 @@ check("留档标记为完成的条目不参与顺延",
 _prev_all = parser.parse("2026-10-02\n- [ ] 甲\n- [ ] 乙")
 for _e in _prev_all.entries:
     _e.completed = True
-_plan, _ = _co.build_plan(_prev_all, None)
+_plan, _ = _co.build_plan(_prev_all, None, "2026-10-02", "2026-10-03")
 check("留档里全部完成 → 不顺延任何条目", len(_plan) == 0)
 
 
@@ -529,9 +534,37 @@ _s8.answers[0].decided = True
 check("标记备忘后仍算已决定", _s8.decided_count == 1)
 
 
-# ── 12. 按钮回调不丢失（两次实测踩坑）
+# ── 12. 顺延的幂等与防链式
 
-print("\n── 12. 按钮回调不丢失 ──")
+print("\n── 12. 顺延幂等 / 不链式往后传 ──")
+
+_prev02 = parser.parse("2026-10-02\n@中午 勘察表盖章\n明天要交电费")
+
+# 首次顺延：应写 2 行，标记带来源日期
+_plan, _ = _co.build_plan(_prev02, None, "2026-10-02", "2026-10-03")
+check("首次顺延标记带来源日期",
+      len(_plan) == 2 and all("⟳10-02" in l for l in _plan), str(_plan[:1]))
+
+# 再跑一次（目标页已有这些行）→ 必须是 0，这才是幂等
+_next03 = "2026-10-03\n" + "\n".join(_plan)
+_plan2, _ = _co.build_plan(_prev02, _next03, "2026-10-02", "2026-10-03")
+check("重复运行不重复写入（幂等）", len(_plan2) == 0, str(_plan2))
+
+# 关键：次日不该把"已顺延过"的继续往后传（实测出现过 10-02→10-03→10-04）
+_prev03 = parser.parse(_next03)
+_plan3, _sk3 = _co.build_plan(_prev03, None, "2026-10-03", "2026-10-04")
+check("已顺延过的条目不再往后传（防链式）", len(_plan3) == 0, str(_plan3))
+
+# 各种写法都要归一到同一个指纹（曾产生 `⟳ ⟳`）
+_fps = {_co.content_fingerprint(t) for t in
+        ["勘察表盖章", "勘察表盖章 ⟳", "勘察表盖章 ⟳ ⟳",
+         "- [ ] 勘察表盖章 ⟳", "@中午 勘察表盖章"]}
+check("不同标记写法归一到同一指纹", len(_fps) == 1, str(_fps))
+
+
+# ── 18. 按钮回调不丢失（两次实测踩坑）
+
+print("\n── 13. 按钮回调不丢失 ──")
 
 _tg.answer_callback = lambda *a, **k: None   # 离线时静默
 
@@ -565,9 +598,9 @@ _src = inspect.getsource(_tg.wait_for_callback)
 check("回调返回整批而非单个", '"batch"' in _src)
 
 
-# ── 13. 过期按钮必须有响应
+# ── 18. 过期按钮必须有响应
 
-print("\n── 13. 过期按钮的处理 ──")
+print("\n── 14. 过期按钮的处理 ──")
 
 # 用户实测踩到：会话结束后再点按钮，没有任何响应、按钮一直转圈
 # （演示消息的按钮被点了 11 次）。这里验证两件事：
@@ -582,9 +615,9 @@ check("收尾会去掉按钮（不传 reply_markup）",
       "reply_markup" not in _src_finish)
 
 
-# ── 14. AppleScript 语法校验（osacompile，只编译不执行）
+# ── 18. AppleScript 语法校验（osacompile，只编译不执行）
 
-print("\n── 12. AppleScript 语法校验 ──")
+print("\n── 15. AppleScript 语法校验 ──")
 
 import subprocess as _sp  # noqa: E402
 
@@ -620,9 +653,9 @@ check(f"{len(_as_templates)} 个 AppleScript 模板语法正确",
       not _as_fail, "；".join(_as_fail))
 
 
-# ── 15. 系统 Python 3.9 兼容性
+# ── 18. 系统 Python 3.9 兼容性
 
-print("\n── 15. 系统 Python 兼容性 ──")
+print("\n── 16. 系统 Python 兼容性 ──")
 
 # 为什么单独查这个：launchd 任务用的是 **/usr/bin/python3（3.9）**，
 # 而我平时用自带运行时（3.12）。若代码用了运行时求值的类型标注
@@ -656,7 +689,7 @@ else:
 
 # ── 11. 密钥不进版本库
 
-print("\n── 16. 密钥保护检查 ──")
+print("\n── 17. 密钥保护检查 ──")
 
 # 为什么值得单独查：Telegram token 一旦被提交，等于把 bot 交给别人。
 # 加 telegram.py 时就发现 .gitignore 里**没有 .env** —— 而下一步就要往
@@ -672,9 +705,9 @@ _r = _sp2.run(["git", "check-ignore", ".env.example"], cwd=str(ROOT),
 check(".env.example 可被提交（它是模板）", _r.returncode != 0)
 
 
-# ── 17. shell 脚本静态检查：bash 3.2 的全角字符陷阱
+# ── 18. shell 脚本静态检查：bash 3.2 的全角字符陷阱
 
-print("\n── 17. shell 脚本检查 ──")
+print("\n── 18. shell 脚本检查 ──")
 
 # macOS 自带 bash 3.2 会把**全角字符的字节**当成变量名的一部分。
 # 于是 `echo "「$TARGET」"` 会去找名为 `TARGET」` 的变量，报
