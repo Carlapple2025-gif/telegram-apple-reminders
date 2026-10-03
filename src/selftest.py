@@ -1684,14 +1684,52 @@ try:
     _dm.STATE_FILE.write_text("{坏 JSON", encoding="utf-8")
     check("损坏的状态文件返回 None 而非崩", _dm.load_offset() is None)
 
-    # 待确认项落盘 → 按钮不依赖内存（进程重启后照样能用）
+    # 待补充项落盘 → 按钮不依赖内存（进程重启后照样能用）
     _dm.save_pending(42, "帮我看下那个表")
-    check("待确认项可读回", _dm.load_pending(42) == "帮我看下那个表")
-    check("不存在的待确认项返回 None", _dm.load_pending(999) is None)
+    check("待补充项可读回", _dm.load_pending() == "帮我看下那个表")
+    check("按消息号校验：属于这条消息时能读到",
+          _dm.load_pending(42) == "帮我看下那个表")
+
+    # ⚠️ **只有一个槽位**：这条断言锁住"不需要猜接哪一条"这个设计。
+    # 曾经按消息号各存一份，于是"点按钮 → 系统追问 → 用户补时间"
+    # 会留下两份记录，补时间时只能猜 —— 端到端实测的结果是
+    # `有多条待补充，无法确定接哪条 → 不合并`，修复等于没生效。
+    _dm.save_pending(77, "后来的一条")
+    check("新的一条会顶掉旧的（只有一个槽位）",
+          _dm.load_pending() == "后来的一条", str(_dm.load_pending()))
+    check("旧消息号的按钮已失效（不会删错东西）",
+          _dm.load_pending(42) is None)
     _dm.clear_pending(42)
-    check("清除后为 None", _dm.load_pending(42) is None)
-    _dm.clear_pending(42)
+    check("旧按钮点击不会清掉当前槽位",
+          _dm.load_pending() == "后来的一条")
+
+    # 过期的待补充不再认（隔一天的"补时间"接上去只会更困惑）
+    _rec = _json2.loads(_dm._pending_path().read_text(encoding="utf-8"))
+    _rec["at"] = (_dt2.datetime.now()
+                  - _dt2.timedelta(hours=_dm.PENDING_TTL_HOURS + 1)).isoformat()
+    _dm._pending_path().write_text(_json2.dumps(_rec, ensure_ascii=False),
+                                   encoding="utf-8")
+    check("过期（超 TTL）的待补充不再认", _dm.load_pending() is None,
+          "过期的补时间接上去只会更让人困惑")
+
+    _dm.clear_pending()
+    check("清除后为 None", _dm.load_pending() is None)
+    _dm.clear_pending()
     check("重复清除不崩", True)
+
+    # 升级兼容：只存在旧格式（<msg_id>.json）时也要认，并且**清对文件**。
+    # 不认它的话，升级瞬间正好挂着一条待补充，用户补时间就接不上 ——
+    # 又回到"标题变成时间"那个 bug。
+    _legacy = _dm.PENDING_DIR / "84.json"
+    _dm.PENDING_DIR.mkdir(parents=True, exist_ok=True)
+    _legacy.write_text(_json2.dumps(
+        {"text": "旧格式的待补充", "at": _dt2.datetime.now().isoformat()},
+        ensure_ascii=False), encoding="utf-8")
+    check("能读旧格式的待补充项",
+          _dm.load_pending() == "旧格式的待补充", str(_dm.load_pending()))
+    _dm.clear_pending()
+    check("清的是旧格式那个文件（没留垃圾）",
+          not _legacy.exists() and _dm.load_pending() is None)
 finally:
     _sh2.rmtree(_dm_dir, ignore_errors=True)
 
@@ -1734,6 +1772,73 @@ finally:
 for _fn in ("send", "send_with_buttons", "answer_callback", "get_updates",
             "load_config"):
     check(f"telegram 提供 {_fn}", hasattr(_tg, _fn))
+
+
+section("v4 整链：发消息 → 按钮 → 补时间（用户实测的那条路）")
+
+# ⚠️ 这个 bug **活着到了用户手上**，原因就是自检只测到 intake 那一层：
+#   intake 层单测全绿（"给 pending_text 就能合并"），
+#   但 daemon 层"点按钮后把待补充项清掉了"，于是补时间时没有上一条可接。
+#   实测链条：发「测试Apple- agent稳定性」→ 判不准 → 点「日程」
+#   → 追问"再说一次带上时间" → 回「上午九点」
+#   → **标题变成「上午九点」、时间落在今天 09:00（已过去）、原标题丢失**。
+#
+# 教训：**跨模块的接线本身也要测**。每一层都对，接起来仍可能是错的。
+_d = _fresh_journal()
+_dm_dir2 = _P2(_tf2.mkdtemp())
+_saved = (_dm.PENDING_DIR, _dm._make_intake, _dm.tg.send,
+          _dm.tg.send_with_buttons, _dm.tg.answer_callback)
+_dm.PENDING_DIR = _dm_dir2 / "pending"
+try:
+    _sent = []
+    _mids = [1000]
+
+    def _swb(_t, _kb):
+        _mids[0] += 1
+        _sent.append(_t)
+        return {"message_id": _mids[0]}
+
+    _wrote = []
+    _sinks = _FakeSinks()
+
+    def _make(_sinks=_sinks, _wrote=_wrote):
+        return _it.Intake(
+            add_todo=lambda t, w=None: (_wrote.append(("todo", t)), "T1")[1],
+            add_event=lambda s, a, b, **k: (_wrote.append(("event", s, a)), "E1")[1],
+            add_memo=lambda t: (_wrote.append(("memo", t)), "M1")[1],
+            testing=True)
+
+    _dm._make_intake = _make
+    _dm.tg.send = lambda t: _sent.append(t)
+    _dm.tg.send_with_buttons = _swb
+    _dm.tg.answer_callback = lambda *a, **k: None
+
+    # ① 用户发消息 → 判不准 → 存下待补充 + 发按钮
+    _dm.handle_message("测试Apple- agent稳定性", 84, "chat")
+    check("整链①：判不准时存下待补充项",
+          _dm.load_pending() == "测试Apple- agent稳定性", str(_dm.load_pending()))
+    check("整链①：发出了确认按钮", _dm.load_pending() is not None)
+
+    # ② 点「日程」按钮 → 缺时间 → 追问，且**待补充项必须还在**
+    _dm._handle_callback("e:84", "cb1", "chat")
+    check("整链②：缺时间时不写入日历", not _wrote, str(_wrote))
+    check("整链②：追问后待补充项仍在（这是曾经漏掉的一环）",
+          _dm.load_pending() == "测试Apple- agent稳定性", str(_dm.load_pending()))
+
+    # ③ 回一句纯时间 → 必须接到上一条上，标题是原文
+    _dm.handle_message("上午九点", 89, "chat")
+    check("整链③：写了一条且只写一条", len(_wrote) == 1, str(_wrote))
+    check("整链③：写的是日历端", _wrote[0][0] == "event", str(_wrote))
+    check("整链③：标题是原来的事由（不是「上午九点」）",
+          _wrote[0][1] == "测试Apple- agent稳定性", repr(_wrote[0][1]))
+    check("整链③：回执说明接在上一条", "接在你上一条上" in _sent[-1])
+    check("整链③：用掉后槽位清空", _dm.load_pending() is None,
+          str(_dm.load_pending()))
+finally:
+    (_dm.PENDING_DIR, _dm._make_intake, _dm.tg.send,
+     _dm.tg.send_with_buttons, _dm.tg.answer_callback) = _saved
+    _sh2.rmtree(_d, ignore_errors=True)
+    _sh2.rmtree(_dm_dir2, ignore_errors=True)
 
 
 check("真实自检用分钟精度断言（与 applecal.add 一致）",

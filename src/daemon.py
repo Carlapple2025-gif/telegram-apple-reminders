@@ -116,40 +116,117 @@ def save_offset(offset: int) -> None:
     update_state(offset=offset)
 
 
-# ── 待确认项（按钮用）
+# ── 待补充项（按钮 + "补时间"共用）
 #
 # 原始文本落盘，所以按钮不依赖内存 —— 进程重启后按钮照样能用。
+#
+# ⚠️ **只有一个槽位。** 这是刻意的，也是被实测逼出来的：
+#
+# 最初按消息号存（`<msg_id>.json`），于是"用户点了按钮 / 系统发出追问 /
+# 用户回一句时间"这一串下来会留下**两份**记录（原消息一份、追问一份），
+# 而补时间时系统面对两份就只能"猜接哪一条" —— 端到端实测的结果是
+# `有多条待补充，无法确定接哪条 → 不合并`，修复等于没生效。
+#
+# 改成一个槽位后：新的待补充来了就**替掉**旧的，
+# 于是"最近一条还没处理完的"天然只有一份，不需要猜。
+# 按钮仍然能用 —— 消息号存在记录**里面**（`msg_id` 字段），
+# 回调时按它校验"这个按钮是不是还对应着当前这条"。
 
-def _pending_path(msg_id: int) -> Path:
-    return PENDING_DIR / f"{msg_id}.json"
+PENDING_TTL_HOURS = 24
+
+
+def _pending_path() -> Path:
+    return PENDING_DIR / "current.json"
 
 
 def save_pending(msg_id: int, text: str) -> None:
-    PENDING_DIR.mkdir(parents=True, exist_ok=True)
-    _pending_path(msg_id).write_text(
-        json.dumps({"text": text, "at": dt.datetime.now().isoformat()},
-                   ensure_ascii=False), encoding="utf-8")
+    """把"当前待补充的那条"存下来（**替换**掉上一份）。"""
+    try:
+        PENDING_DIR.mkdir(parents=True, exist_ok=True)
+        _pending_path().write_text(
+            json.dumps({"text": text, "msg_id": msg_id,
+                        "at": dt.datetime.now().isoformat()},
+                       ensure_ascii=False), encoding="utf-8")
+    except OSError as e:
+        # 存不下不该让收件失败（与 journal 同一条原则：日志/状态坏了不影响主流程）
+        _log(f"待补充状态保存失败（不影响回执）：{_trunc(str(e))}")
 
 
-def load_pending(msg_id: int) -> str | None:
-    p = _pending_path(msg_id)
-    if not p.is_file():
+def _pending_file() -> Path | None:
+    """
+    当前待补充项**实际所在的文件**（没有则 None）。
+
+    正常情况下就是 `current.json`；若只存在旧格式（`<msg_id>.json`）则返回它 ——
+    读、清都必须用同一个解析结果，否则会出现"读到了旧的、清的却是新文件"
+    这种既丢状态又留垃圾的组合。
+    """
+    cur = _pending_path()
+    if cur.is_file():
+        return cur
+    if not PENDING_DIR.is_dir():
+        return None
+    legacy = [q for q in PENDING_DIR.glob("*.json")]
+    if not legacy:
+        return None
+    return max(legacy, key=lambda q: q.stat().st_mtime)
+
+
+def _load_pending_record() -> dict | None:
+    p = _pending_file()
+    if p is None:
         return None
     try:
-        return json.loads(p.read_text(encoding="utf-8")).get("text")
+        rec = json.loads(p.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
+    if not isinstance(rec, dict) or not rec.get("text"):
+        return None
+    rec.setdefault("msg_id", None)
+    # 过期就不认了 —— 隔了一天的"补时间"接上去只会更让人困惑
+    at = rec.get("at") or ""
+    try:
+        when = dt.datetime.fromisoformat(at)
+        if dt.datetime.now() - when > dt.timedelta(hours=PENDING_TTL_HOURS):
+            return None
+    except ValueError:
+        pass
+    return rec
 
 
-def clear_pending(msg_id: int) -> None:
+def load_pending(msg_id: int | None = None) -> str | None:
     """
-    删除待确认项。
+    取"当前待补充"的原文。
+
+    传 `msg_id` 时只在该记录正属于这条消息时才返回 ——
+    按钮回调靠它判断"这个按钮是否已过期/已被别的条目顶掉"。
+    """
+    rec = _load_pending_record()
+    if rec is None:
+        return None
+    if msg_id is not None and rec.get("msg_id") != msg_id:
+        return None
+    return rec.get("text")
+
+
+def clear_pending(msg_id: int | None = None) -> None:
+    """
+    清掉待补充项。
 
     ⚠️ 这是本模块唯一的删除动作，删的是**自己刚写的临时文件**，
     不碰任何 Apple 应用里的东西 —— 不违反"agent 不删"的约束。
+
+    传 `msg_id` 时只清"确实属于这条消息"的那份，
+    避免旧的按钮点击把新的待补充项误删。
     """
+    if msg_id is not None:
+        rec = _load_pending_record()
+        if rec is None or rec.get("msg_id") != msg_id:
+            return
+    p = _pending_file()
+    if p is None:
+        return
     try:
-        _pending_path(msg_id).unlink(missing_ok=True)
+        p.unlink(missing_ok=True)
     except OSError:
         pass
 
@@ -188,6 +265,27 @@ def _handle_callback(data: str, callback_id: str, chat: str) -> None:
     # 用强制类型走同一条分派路径 —— 不再重新分类（用户已经告诉我们了）
     out = _dispatch_forced(it, kind, text)
     tg.send(out.reply)
+
+    if out.needs_ask:
+        # ⚠️ 追问发出去了，就**不能**把待补充项清掉 —— 否则用户照着追问
+        # 回一句「上午九点」时，系统已经没有上一条可接了，
+        # 又会把它当成新的一条日程（标题变成「上午九点」）。
+        #
+        # 实测踩到过：端到端跑一遍，按钮这一步清了标记，下一步果然没接上。
+        # 追问是**新发出的一条消息**，所以槽位的 msg_id 要跟着挪到追问上，
+        # 让"回追问"这条路能接住（回原消息那条路也仍然通，
+        # 因为槽位里存的原文没变、按钮只认原文）。
+        ask_msg_id = None
+        try:
+            r = tg.send_with_buttons("回一句时间就行：", _ask_keyboard(msg_id))
+            ask_msg_id = r.get("message_id") if isinstance(r, dict) else None
+        except Exception as e:  # noqa: BLE001
+            _log(f"追问按钮发送失败（文字已发出，不影响）：{_trunc(str(e))}")
+        save_pending(int(ask_msg_id) if ask_msg_id else msg_id, text)
+        journal.append("button_resolved", text=text, kind=kind.value,
+                       ok=out.ok, needs_more=True)
+        return
+
     clear_pending(msg_id)
     journal.append("button_resolved", text=text, kind=kind.value, ok=out.ok)
 
@@ -253,11 +351,9 @@ def handle_message(text: str, msg_id: int, chat: str) -> None:
     # 为什么需要：用户被追问"日程没写时间"时，最自然的回答是"上午九点"。
     # 那是一条没有内容的消息 —— 实测踩到：它被当成**新的一条日程**建出来，
     # 标题就是「上午九点」，而原来那条的事由丢了。
-    # 这里把 pending 里本来就存着的原文交给 handle，让它接到上一条上。
     #
-    # 不引入新状态：pending 是按钮机制**原本就有的**那份记录
-    # （key 是消息号），这里只是把它多读一次。
-    pending_text = load_pending(msg_id)
+    # 只有一个槽位，所以这里不需要判断"接哪一条"（见 PENDING 段的注释）。
+    pending_text = load_pending()
     out = it.handle(text, msg_id=msg_id, pending_text=pending_text)
 
     reply = out.reply
@@ -275,29 +371,13 @@ def handle_message(text: str, msg_id: int, chat: str) -> None:
         save_pending(msg_id, text)
         _log(f"已发出确认按钮（msg {r.get('message_id')}）")
     else:
-        # 无论成功还是失败都清掉"待补充"标记，避免陈旧状态下次又来插一脚。
-        # 注意：这里只清"本条消息自己的" pending（key 是 msg_id），
-        # 而"接上一条"用的是 pending 的**另一个** msg_id ——
-        # 所以合并成功后还要把那条也清掉，否则下次补时间又会接到它上面。
-        clear_pending(msg_id)
-        if pending_text is not None and out.ok:
-            for stale in _pending_ids():
-                if stale != msg_id:
-                    clear_pending(stale)
-                    _log(f"已清掉待补充标记 msg {stale}（本条已接上）")
+        # ⚠️ 只在**本条成功接上/写成功**时才清掉槽位。
+        # 失败时留着，用户还能照着再补一次 —— 清了就再也接不上了。
+        if out.ok:
+            clear_pending()
+            if pending_text is not None and pending_text != text:
+                _log(f"已用掉待补充项（原文 {_trunc(pending_text)!r}）")
         _log(f"→ {out.kind.value if out.kind else '?'} ok={out.ok}")
-
-
-def _pending_ids() -> list[int]:
-    """列出当前所有"待补充"的消息号（正常情况下最多一条）。"""
-    out: list[int] = []
-    try:
-        for p in PENDING_DIR.glob("*.json"):
-            if p.stem.isdigit():
-                out.append(int(p.stem))
-    except OSError:
-        pass
-    return out
 
 
 def run_once(offset: int | None = None, wait: int = 25) -> int | None:
