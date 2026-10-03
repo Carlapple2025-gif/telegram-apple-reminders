@@ -704,6 +704,33 @@ for _f in list((ROOT / "src").glob("*.py")) + list((ROOT / "deploy").glob("*.sh"
 check("代码里没有重复的 is", not _dup5, "；".join(_dup5[:3]))
 
 
+print("\n── 17. 通知通道 ──")
+
+_notify = _load(SRC / "notify.py")
+
+# 双通道是有意的设计：互为冗余，任一不可用另一条仍能到达
+check("notify 提供 broadcast（多通道）", hasattr(_notify, "broadcast"))
+check("notify 提供 Telegram 发送", hasattr(_notify, "send_telegram"))
+check("notify 保留 Bark 发送", hasattr(_notify, "send_bark"))
+
+import inspect as _insp2  # noqa: E402
+_bc_sig = _insp2.signature(_notify.broadcast)
+check("broadcast 支持指定通道", "channels" in _bc_sig.parameters)
+_bc_src = _insp2.getsource(_notify.broadcast)
+check("默认同时发 Telegram 与 Bark",
+      '"telegram"' in _bc_src and '"bark"' in _bc_src)
+
+# 日报默认走双通道，且支持 --ask（渐进式披露的落地点）
+_dr_src = (SRC / "daily_report.py").read_text(encoding="utf-8")
+check("日报默认双通道", "telegram,bark" in _dr_src)
+check("日报支持 --ask 询问时段", '"--ask"' in _dr_src)
+
+# 定时任务里必须真的带上 --ask，否则"接了但没启用"
+_plist = (ROOT / "deploy" / "com.carl.pdca.report.plist").read_text(encoding="utf-8")
+check("定时任务的日报已启用 --ask", "<string>--ask</string>" in _plist)
+check("定时任务的日报已启用 --sync", "<string>--sync</string>" in _plist)
+
+
 print("\n── 17. 系统 Python 兼容性 ──")
 
 # 为什么单独查这个：launchd 任务用的是 **/usr/bin/python3（3.9）**，

@@ -105,6 +105,10 @@ def main() -> int:
                     help="推送前先从备忘录重新读取（默认读留档快照）")
     ap.add_argument("--sync", action="store_true",
                     help="推送前先把待办同步到提醒事项（保证状态查得到）")
+    ap.add_argument("--ask", action="store_true",
+                    help="推送后，若有「时段未指定」的条目，用 Telegram 按钮询问")
+    ap.add_argument("--channels", default="telegram,bark",
+                    help="推送通道，逗号分隔（默认 telegram,bark —— 互为冗余）")
     args = ap.parse_args()
 
     date_str = args.date or dt.date.today().isoformat()
@@ -175,10 +179,46 @@ def main() -> int:
         return 0
 
     url = note_url(note_id)
-    ok, msg = notify.send_bark(title, body, url=url)
+    results = notify.broadcast(
+        title, body,
+        channels=[c.strip() for c in args.channels.split(",") if c.strip()],
+        bark_url=url,
+    )
     print()
-    print(("✅ " if ok else "❌ ") + msg)
-    return 0 if ok else 3
+    for ch, ok, msg in results:
+        print(f"  {'✅' if ok else '❌'} {ch}: {msg}")
+
+    # 至少一个通道成功就算推送完成 —— 两个通道互为冗余，
+    # 全挂才算失败（那时你会从日志里发现）。
+    ok_any = any(ok for _, ok, _ in results)
+
+    # ── 可选：用按钮询问「时段未指定」的条目
+    if args.ask:
+        pending = [r for r in resolved.open if not r.entry.slot]
+        if pending:
+            print()
+            print(f"有 {len(pending)} 条时段未指定 → 发按钮询问")
+            try:
+                import ask_slots
+                items = [ask_slots.Answer(line_no=r.entry.line_no,
+                                          text=r.entry.text, date=date_str)
+                         for r in pending]
+                sess = ask_slots.run_session(items, timeout_sec=900)
+                changed, touched = ask_slots.apply_answers(date_str, sess)
+                if changed:
+                    print(f"✅ 你的选择已写入留档（{changed} 条）")
+                    for p2 in touched:
+                        print(f"   {p2.name}")
+                elif sess.decided_count == 0:
+                    print("（你未做选择，时段保持未指定）")
+            except Exception as e:  # noqa: BLE001
+                # 询问失败不该影响日报已送达的事实
+                print(f"⚠️ 询问环节出错：{e}", file=sys.stderr)
+        else:
+            print()
+            print("（所有待办都已有时段，无需询问）")
+
+    return 0 if ok_any else 3
 
 
 if __name__ == "__main__":

@@ -108,19 +108,102 @@ def send_bark(title: str, body: str, url: str | None = None,
         return False, f"发送失败：{e}"
 
 
+# ── Telegram 通道
+#
+# 与 Bark 的分工（刻意分开，理由见 docs/ARCHITECTURE.md）：
+#   · Bark   = 强提醒：穿透专注模式，直连无依赖 → 用于"需要你立刻处理"的事
+#   · Telegram = 对话与归档：可回看、可搜索、能收你的回复 → 日报/周报
+# 所以日报走 Telegram 的同时**保留 Bark**：万一 Telegram 因网络不可用，
+# Bark 那条仍能把你叫起来（不让关键路径依赖单一通道）。
+
+
+def send_telegram(title: str, body: str) -> tuple[bool, str]:
+    """发 Telegram 消息。未配置时返回 (False, 说明)，由调用方决定是否在意。"""
+    try:
+        import telegram as tg
+    except ImportError as e:
+        return False, f"无法加载 telegram 模块：{e}"
+
+    token, chat = tg.load_config()
+    if not token or not chat:
+        return False, "Telegram 未配置（缺 TELEGRAM_BOT_TOKEN 或 TELEGRAM_CHAT_ID）"
+
+    text = f"{title}\n\n{body}" if title else body
+    try:
+        r = tg.send(text)
+        return True, f"已发送（message_id={r.get('message_id')}）"
+    except tg.TelegramError as e:
+        return False, f"发送失败：{e}"
+
+
+def broadcast(title: str, body: str, channels: list[str] | None = None,
+              bark_url: str | None = None) -> list[tuple[str, bool, str]]:
+    """
+    按指定通道发送。返回 [(通道, 是否成功, 说明)]。
+
+    `channels` 默认 ["telegram", "bark"] —— **两个都发**是有意的：
+    两个通道互为冗余，任一不可用另一条仍能到达。
+    """
+    channels = channels or ["telegram", "bark"]
+    results: list[tuple[str, bool, str]] = []
+
+    for ch in channels:
+        if ch == "telegram":
+            ok, msg = send_telegram(title, body)
+        elif ch == "bark":
+            ok, msg = send_bark(title, body, url=bark_url)
+        else:
+            ok, msg = False, f"未知通道：{ch}"
+        results.append((ch, ok, msg))
+
+    return results
+
+
 def main() -> int:
     """命令行自测：python3 src/notify.py '标题' '正文' [url]"""
-    if len(sys.argv) < 3:
-        print("用法：python3 src/notify.py <标题> <正文> [url]")
-        print()
-        key, source = load_bark_key()
-        print(f"当前 key 来源：{source}")
-        print(f"key 是否可用：{'是' if key else '否'}")
-        return 1
+    import argparse
 
-    ok, msg = send_bark(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
-    print(("✅ " if ok else "❌ ") + msg)
-    return 0 if ok else 2
+    ap = argparse.ArgumentParser(description="通知通道自测")
+    ap.add_argument("title", nargs="?", help="标题")
+    ap.add_argument("body", nargs="?", help="正文")
+    ap.add_argument("url", nargs="?", help="Bark 的跳转链接（可选）")
+    ap.add_argument("--channels", default="telegram,bark",
+                    help="要测的通道，逗号分隔（默认 telegram,bark）")
+    ap.add_argument("--status", action="store_true", help="只查看配置状态")
+    args = ap.parse_args()
+
+    if args.status or not args.title:
+        key, source = load_bark_key()
+        print("通道配置状态：")
+        print(f"  Bark:     {'✅ 可用' if key else '❌ 不可用'}  （来源：{source}）")
+        try:
+            import telegram as tg
+            token, chat = tg.load_config()
+            if token and chat:
+                try:
+                    me = tg._call(token, "getMe")
+                    print(f"  Telegram: ✅ 可用  @{me.get('username')}"
+                          f"（chat {chat}）")
+                except tg.TelegramError as e:
+                    print(f"  Telegram: ⚠️ 有配置但连不上：{e}")
+            else:
+                print(f"  Telegram: ❌ 未配置"
+                      f"（token={'有' if token else '无'} chat={'有' if chat else '无'}）")
+        except ImportError:
+            print("  Telegram: ❌ 模块不可用")
+        if not args.title:
+            return 0
+
+    results = broadcast(args.title, args.body or "", 
+                        channels=[c.strip() for c in args.channels.split(",") if c.strip()],
+                        bark_url=args.url)
+    ok_all = True
+    for ch, ok, msg in results:
+        mark = "✅" if ok else "❌"
+        if not ok:
+            ok_all = False
+        print(f"  {mark} {ch}: {msg}")
+    return 0 if ok_all else 2
 
 
 if __name__ == "__main__":
