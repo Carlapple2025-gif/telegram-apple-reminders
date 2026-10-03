@@ -736,6 +736,220 @@ check(
 )
 
 
+# ── 16. v4 纯函数模块（时间解析 + 命令分类）
+#
+# 这三个模块是 v4 的核心判断逻辑，且**完全纯函数**（不碰 AppleScript），
+# 所以能在这里彻底验证。日期计算的错误极难在生产中发现
+# （表现为"差一天""时段不对"），必须靠固定基准日的断言守住。
+
+print("\n── 16. v4 时间解析（whens）──")
+
+_whens = _load(SRC / "whens.py")
+import datetime as _dt2  # noqa: E402
+
+_B = _dt2.date(2026, 10, 3)      # 周六。固定基准日 → 结果不随运行日期变化
+
+# 中文数字（时间场景只用到 1-59）
+for _s, _want in [("一", 1), ("两", 2), ("十", 10), ("十一", 11), ("十五", 15),
+                  ("二十", 20), ("二十五", 25), ("三十", 30), ("三十一", 31),
+                  ("59", 59), ("", None), ("abc", None)]:
+    check(f"中文数字 {_s!r}", _whens.cn_number(_s) == _want,
+          f"得到 {_whens.cn_number(_s)!r}")
+
+# 相对日期
+for _s, _want in [("今天", _dt2.date(2026, 10, 3)), ("明天", _dt2.date(2026, 10, 4)),
+                  ("后天", _dt2.date(2026, 10, 5)),
+                  ("大后天", _dt2.date(2026, 10, 6)),
+                  ("昨天", _dt2.date(2026, 10, 2))]:
+    _w = _whens.parse_when(_s, _B)
+    check(f"{_s} 的日期", _w is not None and _w.start.date() == _want)
+
+# 星期（基准周六）：无前缀取"最近的将来"
+for _s, _want in [("周六", _dt2.date(2026, 10, 3)),   # 今天
+                  ("周日", _dt2.date(2026, 10, 4)),
+                  ("周一", _dt2.date(2026, 10, 5)),
+                  ("周五", _dt2.date(2026, 10, 9)),   # 最近的将来那个
+                  ("这周五", _dt2.date(2026, 10, 9)),
+                  ("下周五", _dt2.date(2026, 10, 16)),  # 下周五必然是下周
+                  ("下下周五", _dt2.date(2026, 10, 23)),
+                  ("星期日", _dt2.date(2026, 10, 4)),
+                  ("礼拜一", _dt2.date(2026, 10, 5))]:
+    _w = _whens.parse_when(_s, _B)
+    check(f"{_s} 的星期计算", _w is not None and _w.start.date() == _want,
+          f"得到 {_w.start.date() if _w else None}")
+
+# 时段补正（12 → 24 小时制）。这是最容易错的地方。
+for _s, _h, _m in [("下午两点", 14, 0), ("下午2点", 14, 0), ("晚上8点", 20, 0),
+                   ("早上9点", 9, 0), ("上午十点", 10, 0), ("凌晨1点", 1, 0),
+                   ("中午12点", 12, 0), ("下午2点半", 14, 30),
+                   ("下午14点", 14, 0), ("20点", 20, 0),
+                   ("14:30", 14, 30), ("9:05", 9, 5)]:
+    _w = _whens.parse_when(_s, _B)
+    check(f"{_s} 的时刻补正",
+          _w is not None and (_w.start.hour, _w.start.minute) == (_h, _m),
+          f"得到 {(_w.start.hour, _w.start.minute) if _w else None}")
+
+# 绝对日期与非法日期
+for _s, _want in [("10月8日", _dt2.date(2026, 10, 8)),
+                  ("10月8号", _dt2.date(2026, 10, 8)),
+                  ("2026-12-25", _dt2.date(2026, 12, 25)),
+                  ("2027年1月1日", _dt2.date(2027, 1, 1)),
+                  ("1月1日", _dt2.date(2027, 1, 1))]:   # 已过 → 明年
+    _w = _whens.parse_when(_s, _B)
+    check(f"绝对日期 {_s}", _w is not None and _w.start.date() == _want)
+
+check("非法日期 2月30日 → None", _whens.parse_when("2月30日", _B) is None)
+check("非法日期 13月1日 → None", _whens.parse_when("13月1日", _B) is None)
+
+# 无时间信息
+for _s in ["交电费", "想起一件事", "", "   "]:
+    check(f"{_s!r} 无时间信息", _whens.parse_when(_s, _B) is None)
+
+# 全天 vs 定时
+check("只给日期 → 全天", _whens.parse_when("明天", _B).all_day is True)
+check("给了时刻 → 非全天", _whens.parse_when("明天下午两点", _B).all_day is False)
+
+
+print("\n── 17. v4 命令分类（classify）──")
+
+_cls = _load(SRC / "classify.py")
+
+# 待办：有动作动词
+for _s in ["交电费", "勘察表盖章", "明天交电费", "跟进修缮", "买猫粮",
+           "回复邮件", "提交结算单", "盖章"]:
+    _c = _cls.classify(_s, _B)
+    check(f"{_s!r} → 待办", _c is not None and _c.kind == _cls.Kind.TODO,
+          f"得到 {_c.kind.value if _c else None}")
+
+# 日程：有事件名词
+for _s in ["周五下午两点项目周会", "下周三体检", "10月8日评审会", "周一上午开庭"]:
+    _c = _cls.classify(_s, _B)
+    check(f"{_s!r} → 日程", _c is not None and _c.kind == _cls.Kind.EVENT,
+          f"得到 {_c.kind.value if _c else None}")
+
+# 备忘：有备忘信号词
+for _s in ["想起一件事，荷载要按名称命名", "记一下这个想法"]:
+    _c = _cls.classify(_s, _B)
+    check(f"{_s!r} → 备忘", _c is not None and _c.kind == _cls.Kind.MEMO,
+          f"得到 {_c.kind.value if _c else None}")
+
+# 周期 → 日程 + RRULE（日历独有的重复能力；提醒事项不支持 repeat）
+for _s, _rrule in [("每周一交周报", "FREQ=WEEKLY;BYDAY=MO"),
+                   ("每天跑步", "FREQ=DAILY"),
+                   ("每个工作日站会", "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR"),
+                   ("每月1日交房租", "FREQ=MONTHLY;BYMONTHDAY=1"),
+                   ("每周五例会", "FREQ=WEEKLY;BYDAY=FR")]:
+    _c = _cls.classify(_s, _B)
+    check(f"{_s!r} → 日程", _c is not None and _c.kind == _cls.Kind.EVENT,
+          f"得到 {_c.kind.value if _c else None}")
+    check(f"{_s!r} 的 RRULE", _c.recurrence == _rrule, f"得到 {_c.recurrence!r}")
+    check(f"{_s!r} 有起始日", _c.when is not None)
+
+# 周期事件的起始日必须落在正确的星期
+_c = _cls.classify("每周一交周报", _B)
+check("每周一 → 起始日落在周一", _c.when.start.date() == _dt2.date(2026, 10, 5),
+      f"得到 {_c.when.start.date()}")
+_c = _cls.classify("每周日大扫除", _B)
+check("每周日 → 起始日落在周日", _c.when.start.date() == _dt2.date(2026, 10, 4),
+      f"得到 {_c.when.start.date()}")
+
+# 需确认（真的判不出）—— 这是"判断归用户"的落点
+for _s in ["帮我看下那个表", "那个东西弄一下"]:
+    _c = _cls.classify(_s, _B)
+    check(f"{_s!r} → 需确认", _c.confidence == _cls.Confidence.ASK)
+    check(f"{_s!r} 给了三个候选", len(_c.candidates) == 3)
+
+# 动作优先于"有时间" —— 明天交电费是待办，不是日程
+for _s in ["明天交电费", "周五上午交材料", "下周一提交报告"]:
+    _c = _cls.classify(_s, _B)
+    check(f"{_s!r} 是待办而非日程", _c.kind == _cls.Kind.TODO)
+
+# 正文剥离（回执里显示的应该是"事情本身"）
+for _s, _want in [("明天交电费", "交电费"), ("每天跑步", "跑步"),
+                  ("每月1日交房租", "交房租"), ("周五下午两点项目周会", "项目周会"),
+                  ("下周三体检", "体检")]:
+    _c = _cls.classify(_s, _B)
+    check(f"{_s!r} 的正文", _c.text == _want, f"得到 {_c.text!r}")
+
+check("空输入 → None", _cls.classify("", _B) is None)
+check("纯空白 → None", _cls.classify("   ", _B) is None)
+
+
+print("\n── 18. v4 用户日志（journal）──")
+
+_jr = _load(SRC / "journal.py")
+import json as _json2  # noqa: E402
+import tempfile as _tf2  # noqa: E402
+import shutil as _sh2  # noqa: E402
+from pathlib import Path as _P2  # noqa: E402
+
+_tmpdir = _P2(_tf2.mkdtemp())
+_jr.JOURNAL_DIR = _tmpdir
+try:
+    _jr.log_input("明天交电费", msg_id=1)
+    _jr.log_todo("交电费", reminder_id="pdca:x", ok=True)
+    _jr.log_memo("荷载要按名称命名", memo_id="m1")
+    _jr.log_memo("想起要买猫粮", memo_id="m2")
+
+    _recs = _jr.read_day(_jr._today())
+    check("追加可读回", len(_recs) == 4, f"得到 {len(_recs)}")
+    check("原始输入原样保存",
+          any(r["event"] == "input" and r["text"] == "明天交电费" for r in _recs))
+
+    _sub = _jr.submitted_memos()
+    check("台账含两条备忘", set(_sub) == {"m1", "m2"}, f"得到 {set(_sub)}")
+
+    _jr.log_memo_cleared("m1", "荷载要按名称命名")
+    _sub2 = _jr.submitted_memos()
+    check("已清除的移出台账", set(_sub2) == {"m2"}, f"得到 {set(_sub2)}")
+
+    # 追加不破坏历史
+    _n0 = len(_jr.read_day(_jr._today()))
+    _jr.log_input("再记一条")
+    check("追加是纯追加", len(_jr.read_day(_jr._today())) == _n0 + 1)
+
+    # 坏行容错：一行坏了不该让整份日志读不出来
+    _p2 = _tmpdir / f"{_jr._today()}.jsonl"
+    with _p2.open("a", encoding="utf-8") as _f2:
+        _f2.write("{这不是合法 JSON\n")
+    _jr.log_input("坏行之后")
+    check("单行损坏不影响整份读取", len(_jr.read_day(_jr._today())) == _n0 + 2)
+finally:
+    _sh2.rmtree(_tmpdir, ignore_errors=True)
+
+
+print("\n── 19. v4 备忘录解析（memo，纯函数部分）──")
+
+_mm = _load(SRC / "memo.py")
+
+_raw = ("x-coredata://A/ICNote/p1\u0001荷载要按名称命名\u0002"
+        "x-coredata://A/ICNote/p2\u0001想起要买猫粮\u0002\n")
+_memos = _mm.parse_snapshot(_raw)
+check("快照解析出 2 条", len(_memos) == 2, f"得到 {len(_memos)}")
+check("取到 note_id", _memos[0].note_id == "x-coredata://A/ICNote/p1")
+
+# 标题里含竖线、换行都不能误切（所以用不可见字符做分隔符）
+_m2 = _mm.parse_snapshot("idA\u0001第一行\n第二行|带竖线\u0002")
+check("标题含竖线/换行不误切",
+      len(_m2) == 1 and _m2[0].note_id == "idA" and "带竖线" in _m2[0].name)
+
+check("空输入 → 空列表", _mm.parse_snapshot("") == [])
+check("纯空白 → 空列表", _mm.parse_snapshot("\n\n") == [])
+check("残缺块被跳过而非崩", len(_mm.parse_snapshot("垃圾\u0002idB\u0001正常\u0002")) == 1)
+
+# AppleScript 转义：反斜杠必须**先**转，否则会吃掉后续引号
+check("转义：反斜杠先于引号",
+      _mm._as_literal('a\\"b') == '"a\\\\\\"b"',
+      _mm._as_literal('a\\"b'))
+check("转义：普通引号", _mm._as_literal('说"hi"') == '"说\\"hi\\""')
+check("HTML 转义", _mm._html_escape("a<b&c>d") == "a&lt;b&amp;c&gt;d")
+
+# memo 模块**不能有删除能力** —— 这是架构约束（用户保留删除权）
+_mm_src = (SRC / "memo.py").read_text(encoding="utf-8")
+check("memo 模块不含 delete 命令",
+      "delete " not in _mm_src.replace("# ", ""))
+
+
 # ── 汇总
 
 print()
