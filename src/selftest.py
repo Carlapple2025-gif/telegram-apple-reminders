@@ -299,8 +299,8 @@ def _rem(rid, name, completed, body=""):
 
 
 _page = parser.parse("2026-10-02\n- [ ] 甲\n- [ ] 乙")
-_keyA = _rems.make_key("甲")
-_keyB = _rems.make_key("乙")
+_keyA = _rems.make_key("甲", _NOTE)
+_keyB = _rems.make_key("乙", _NOTE)
 
 # 空列表 → 全部新建（备忘不参与）
 _p = _push.build_plan(_page, [], _NOTE)
@@ -325,14 +325,14 @@ check("已完成的条目绝不回退", len(_p.complete) == 0 and len(_p.already
 
 # 换一天 → 不误判为重复（key 含 note_id）
 _p = _push.build_plan(_page, [_rem("r1", "甲", False, _keyA)], "x-coredata://TEST/ICNote/p2")
-# 跨天行为（设计决定）：同一条待办跨天出现时应**映射到同一条提醒事项条目**，
-# 而不是新建一份。理由：顺延会把昨天的未完项带到今天，若按"跨天算新的"
-# 就会在提醒事项里出现两份（一份旧的已完成、一份新的未完成），
-# 越用越乱 —— 而提醒事项的价值正是清爽可打钩。实测踩到过。
+# 跨天行为（设计决定）：**每天是独立的一次待办**。
+# 曾把键做成"跨天同一条"，结果是新一天继承了旧一天的"已完成"，
+# 于是今天没有可打钩的东西 —— 实测踩到。
+# 正确语义：10-02 的「交电费」完成了是那天的记录；
+#          10-03 的「交电费」又要做，该是一条新的未完成项。
 _p = _push.build_plan(_page, [_rem("r1", "甲", False, _keyA)], "x-coredata://TEST/ICNote/p2")
-check("跨天映射到同一条待办（不重建）",
-      len(_p.create) == 1 and len(_p.unchanged) == 1,
-      f"create={len(_p.create)} unchanged={len(_p.unchanged)}")
+check("跨天各自独立（今天有得打钩）", len(_p.create) == 2,
+      f"create={len(_p.create)}")
 
 # 孤儿条目只报告（可能是你手动加的），不自动删
 _p = _push.build_plan(_page, [_rem("r9", "手动加的", False)], _NOTE)
@@ -340,14 +340,14 @@ check("孤儿条目只报告不自动删", len(_p.orphan) == 1)
 
 # 去重键要能区分内容
 check("改文字后视为新内容",
-      _rems.make_key("甲") != _rems.make_key("甲改过了"))
+      _rems.make_key("甲", _NOTE) != _rems.make_key("甲改过了", _NOTE))
 
 # **关键回归**：顺延过的条目在提醒事项里必须映射到同一条待办，
 # 否则每顺延一次就重建一份（实测踩到：提醒事项里出现重复条目）。
 _fp_forms = ["勘察表盖章", "勘察表盖章 ⟳10-02", "勘察表盖章 ⟳",
              "- [ ] 勘察表盖章 ⟳10-02"]
 check("顺延标记不影响去重键（不重复建条目）",
-      len({_rems.make_key(t) for t in _fp_forms}) == 1)
+      len({_rems.make_key(t, _NOTE) for t in _fp_forms}) == 1)
 
 
 # ── 8. 完成状态合并（权威 = 提醒事项）
@@ -373,7 +373,7 @@ class _FakeReminders:
 
 def _r2(name, completed, line_no):
     return _rems.Reminder(id=f"r{line_no}", name=name, completed=completed,
-                          body=_rems.make_key(name), due="")
+                          body=_rems.make_key(name, _CNOTE), due="")
 
 
 _pg = parser.parse("2026-10-02\n- [ ] 甲\n- [ ] 乙\n- [ ] 丙\n* 备忘")

@@ -56,6 +56,26 @@ def sync_day(date_str: str, notes: Notes | None = None) -> SyncResult | None:
     if result.date is None:
         result.date = date_str
 
+    # 保留上一次解析出的 completed。
+    #
+    # ⚠️ 为什么必须做：completed 的权威是**提醒事项**，而重新解析只能看到
+    # 备忘录里的 `[ ]`/`[x]`。不保留的话，每次 --refresh/日报同步都会把
+    # 权威状态冲成"未完成" —— 于是顺延又把已完成的事带一遍（实测踩到）。
+    #
+    # 键用**内容指纹**（不用行号）：行号会随编辑位移，而内容才是身份。
+    _prev = load_archive(date_str)
+    if _prev is not None:
+        _prev_done = {
+            parser.content_fingerprint(e.text): e.completed
+            for e in _prev.entries if e.kind == "todo" and e.completed is not None
+        }
+        for e in result.entries:
+            if e.kind != "todo":
+                continue
+            fp = parser.content_fingerprint(e.text)
+            if fp in _prev_done and e.completed is not True:
+                e.completed = _prev_done[fp]
+
     DAYS_DIR.mkdir(parents=True, exist_ok=True)
     md_path = DAYS_DIR / f"{date_str}.md"
     json_path = DAYS_DIR / f"{date_str}.json"

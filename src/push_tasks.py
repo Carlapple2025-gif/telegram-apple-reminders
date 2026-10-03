@@ -79,7 +79,7 @@ def build_plan(result: parser.ParseResult, existing: list[Reminder],
 
     used_keys: set[str] = set()
     for entry in result.todos:
-        k = make_key(entry.norm)
+        k = make_key(entry.norm, note_id)
         used_keys.add(k)
         current = by_key.get(k)
 
