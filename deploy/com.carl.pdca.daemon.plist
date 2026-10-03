@@ -24,8 +24,17 @@
 	<key>WorkingDirectory</key>
 	<string>__PROJECT__</string>
 
+	<!-- KeepAlive 用**字典**写法而不是 <true/>：
+	     <true/> 的语义是"非正常退出就重启"，若进程成功退出（返回 0）
+	     launchd 就认为"任务完成了"，不再拉起 —— 实测踩到：
+	     收到 SIGTERM 后守护正常退出，launchd 从此不管它，
+	     表现是"已加载"但 state = SIGTERMed、没有活进程。
+	     字典写法明确"崩溃就重启"，语义无歧义。 -->
 	<key>KeepAlive</key>
-	<true/>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
 
 	<!-- 异常退出后至少等 10 秒再重启，避免疯狂循环 -->
 	<key>ThrottleInterval</key>

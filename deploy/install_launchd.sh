@@ -213,13 +213,25 @@ do_restart() {
       continue
     fi
     launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
-    launchctl bootstrap "gui/$(id -u)" "$dst" 2>/dev/null \
-      || launchctl load "$dst" 2>/dev/null || true
-    if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
+    # ⚠️ bootout 是**异步**的：立刻 bootstrap 会撞上 launchd 还在清理旧任务，
+    # 报 "Input/output error: 5"，结果是"旧的停了、新的没起"
+    # （实测表现：state = SIGTERMed 但 job state = running，没有活进程）。
+    # 所以等一下再装，并重试几次。
+    sleep 1
+    local ok=0
+    for attempt in 1 2 3; do
+      if launchctl bootstrap "gui/$(id -u)" "$dst" 2>/dev/null; then
+        ok=1; break
+      fi
+      launchctl load "$dst" 2>/dev/null && { ok=1; break; }
+      sleep 2
+    done
+    if [ "$ok" -eq 1 ] && launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
       echo "✅ $label 已加载"
     else
-      echo "❌ $label 仍未加载" >&2
+      echo "❌ $label 仍未加载（已重试 3 次）" >&2
       echo "   查看原因：launchctl print gui/$(id -u)/$label" >&2
+      echo "   或看系统日志：log show --last 2m --predicate 'process == \"launchd\"'" >&2
     fi
   done
   echo

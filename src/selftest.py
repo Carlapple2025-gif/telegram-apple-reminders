@@ -1790,6 +1790,39 @@ finally:
     _ur2.urlopen = _orig_open
 
 
+section("守护的停止与重启语义")
+
+# ⚠️ launchd 的 KeepAlive 只重启**非正常退出**的进程。
+# 踩到过：守护收到 SIGTERM（restart 时 bootout 发的）后 `return 0`
+# 干净退出，launchd 认为"任务完成了"，从此不再拉起 ——
+# 表现是 `✅ 已加载` 但 state = SIGTERMed、没有活进程，
+# 于是用户发的消息**没人接、也没回复**。
+_dm_src3 = (SRC / "daemon.py").read_text(encoding="utf-8")
+
+check("区分'信号停止'与'异常退出'",
+      "_stopped_by_signal" in _dm_src3)
+check("信号停止返回 0（正常退出，不重启）",
+      "return 0 if _stopped_by_signal else 1" in _dm_src3)
+
+# 主循环异常跳出时必须返回非 0，否则 KeepAlive 不会拉起
+check("异常退出返回非 0", "else 1" in _dm_src3)
+
+# plist 的 KeepAlive 要能覆盖"崩溃即重启"的语义。
+# <true/> 的语义是"非正常退出就重启"，进程成功退出就不管了 ——
+# 用字典写法明确表达更稳妥。
+_daemon_plist = (ROOT / "deploy" / "com.carl.pdca.daemon.plist").read_text(
+    encoding="utf-8")
+check("守护 plist 用显式 KeepAlive 条件",
+      "SuccessfulExit" in _daemon_plist,
+      "建议用 <dict><key>SuccessfulExit</key><false/></dict>")
+
+# 安装脚本：bootout 是异步的，立刻 bootstrap 会撞上清理中 → 报
+# "Input/output error: 5"，结果"旧的停了、新的没起"。必须等一下并重试。
+_inst3 = (ROOT / "deploy" / "install_launchd.sh").read_text(encoding="utf-8")
+check("安装脚本在 bootout 后有延迟", "sleep 1" in _inst3)
+check("安装脚本 bootstrap 会重试", "for attempt in 1 2 3" in _inst3)
+
+
 section("v4 守护的崩溃循环防护")
 
 # ⚠️ 这是 KeepAlive 会放大的风险：守护是常驻 + 自动重启的，

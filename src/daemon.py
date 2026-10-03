@@ -358,10 +358,17 @@ def _mark_notified() -> None:
         microsecond=0).isoformat())
 
 
+# 退出原因。区分"主动停止"与"异常退出"很关键 ——
+# launchd 的 KeepAlive 只重启**非正常退出**的进程。
+# 所以收到信号（launchd 要求停止）应算正常退出，而异常应算失败。
+_stopped_by_signal = False
+
+
 def _stop(signum, frame):  # noqa: ANN001
-    global _running
+    global _running, _stopped_by_signal
     _running = False
-    _log(f"收到信号 {signum}，准备退出")
+    _stopped_by_signal = True
+    _log(f"收到信号 {signum}，准备退出（正常停止，不应被重启）")
 
 
 def main() -> int:
@@ -459,7 +466,9 @@ def main() -> int:
         time.sleep(1)
 
     _log("已退出")
-    return 0
+    # 收到信号 → 正常停止（返回 0，KeepAlive 不重启）；
+    # 异常跳出循环 → 返回非 0，让 KeepAlive 把守护拉起来。
+    return 0 if _stopped_by_signal else 1
 
 
 if __name__ == "__main__":
