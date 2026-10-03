@@ -1,34 +1,34 @@
 #!/usr/bin/env python3
 """
-收件守护：常驻监听 Telegram，收到即分派。
+收件守护：常驻监听 Telegram，收到即写入对应 App。
 
-## 两条关键设计
+## 唯一的职责
 
-### ① offset 必须持久化
+    收到一条消息 → `intake.handle()` → 写进 App → 回执
+
+**它不做任何判断。** 类型由你写的行首符号声明（见 `routes.py` /
+[`docs/SYMBOL-SCHEME.md`](../docs/SYMBOL-SCHEME.md)），
+守护只负责"收到就交出去"。
+
+## 唯一的状态：offset 必须持久化
 
 Telegram 的 `getUpdates` 靠 offset 推进读取位置。offset 只存在内存里的话：
 
   · 进程重启 → 重新拉到旧消息 → **同一条被记两遍**（重复建待办）
   · 崩溃恢复 → 同上
 
-所以 offset 落盘到 `data/daemon-state.json`。这条与 v1 的按钮 bug 同源：
+所以 offset 落盘到 `data/daemon-state.json`。
 **跨调用的读取位置必须持久，不能只活在内存里。**
 
-### ② 确认按钮是"动作触发点"，不是"对话载体"
+## 为什么这一层没有别的状态了
 
-分类不确定时给三个按钮（待办/日程/备忘），点一下就把这条补记到对应应用。
-严格守住（docs/ARCHITECTURE.md 的防掉坑判据）：
+曾经有第二类状态：`data/pending/`（"判不准 → 发按钮 → 等你点"）。
+2026-10-03 整体删除（裁决见 SYMBOL-SCHEME §4.6），因为它要跨消息
+记住"在等什么"，命中 `ARCHITECTURE.md` §十一 判据 1
+（✗ 需要跨两次交互记住东西），并贡献了两次真实故障。
 
-  · 不需要跨两次点击记住东西 —— callback_data 里自带 message_id 和选择
-  · 不需要重绘整条消息体现进度 —— 点完就回复一句，不重绘
-  · 没有超时/重入/确认屏 —— 按钮点晚了也能用（只要那条消息还在）
-
-原始文本从 `data/pending/` 取（按 message_id 命名），所以按钮不依赖内存状态。
-
-## 为什么不做成"对话"
-
-v1 的时段选择器之所以失控（551 行），是因为它把"问一次"做成了
-"一段有状态的对话"。这里刻意只做**一问一答**，答完即止。
+删掉之后，Telegram 层只剩 `offset` 这一个状态 —— 它是**通道机制**，
+与业务无关。业务上没有任何状态，就不可能和 Apple 应用不一致。
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ sys.path.insert(0, str(ROOT / "src"))
 import telegram as tg          # noqa: E402
 import journal                 # noqa: E402
 from intake import Intake      # noqa: E402
-from classify import Kind      # noqa: E402
+from kinds import Kind         # noqa: E402
 
 STATE_FILE = ROOT / "data" / "daemon-state.json"
 PENDING_DIR = ROOT / "data" / "pending"
@@ -116,207 +116,20 @@ def save_offset(offset: int) -> None:
     update_state(offset=offset)
 
 
-# ── 待补充项（按钮 + "补时间"共用）
+# ── （已删除）待补充项与按钮
 #
-# 原始文本落盘，所以按钮不依赖内存 —— 进程重启后按钮照样能用。
+# 这里曾有约 120 行：`save_pending` / `load_pending` / `clear_pending` /
+# `PENDING_TTL_HOURS` / `_ask_keyboard` / `_handle_callback` / `_dispatch_forced` ——
+# 一整套"判不准 → 发按钮 → 等你点 → 补时间"的跨消息状态机。
 #
-# ⚠️ **只有一个槽位。** 这是刻意的，也是被实测逼出来的：
+# **2026-10-03 整体删除**（裁决见 docs/SYMBOL-SCHEME.md §4.6）：
+#   · 类型现在由**你写的符号**声明，不存在"判不准"，也就没有要问的
+#   · 这套机制要跨消息记住"在等什么"，命中 ARCHITECTURE.md §十一 判据 1
+#   · 它贡献了两次真实故障：待补充槽位被清、按钮绑错了消息号
 #
-# 最初按消息号存（`<msg_id>.json`），于是"用户点了按钮 / 系统发出追问 /
-# 用户回一句时间"这一串下来会留下**两份**记录（原消息一份、追问一份），
-# 而补时间时系统面对两份就只能"猜接哪一条" —— 端到端实测的结果是
-# `有多条待补充，无法确定接哪条 → 不合并`，修复等于没生效。
-#
-# 改成一个槽位后：新的待补充来了就**替掉**旧的，
-# 于是"最近一条还没处理完的"天然只有一份，不需要猜。
-# 按钮仍然能用 —— 消息号存在记录**里面**（`msg_id` 字段），
-# 回调时按它校验"这个按钮是不是还对应着当前这条"。
-
-PENDING_TTL_HOURS = 24
-
-
-def _pending_path() -> Path:
-    return PENDING_DIR / "current.json"
-
-
-def save_pending(msg_id: int, text: str) -> None:
-    """把"当前待补充的那条"存下来（**替换**掉上一份）。"""
-    try:
-        # 写之前先确保目录在 —— 实测被自检打脸过：目录被清掉后
-        # 这里直接 FileNotFoundError 抛出，而它跑在收件主路径上。
-        PENDING_DIR.mkdir(parents=True, exist_ok=True)
-        _pending_path().write_text(
-            json.dumps({"text": text, "msg_id": msg_id,
-                        "at": dt.datetime.now().isoformat()},
-                       ensure_ascii=False), encoding="utf-8")
-    except OSError as e:
-        # 存不下不该让收件失败（与 journal 同一条原则：状态坏了不影响主流程）
-        _log(f"待补充状态保存失败（不影响回执）：{_trunc(str(e))}")
-
-
-def _pending_file() -> Path | None:
-    """
-    当前待补充项**实际所在的文件**（没有则 None）。
-
-    正常情况下就是 `current.json`；若只存在旧格式（`<msg_id>.json`）则返回它 ——
-    读、清都必须用同一个解析结果，否则会出现"读到了旧的、清的却是新文件"
-    这种既丢状态又留垃圾的组合。
-    """
-    cur = _pending_path()
-    if cur.is_file():
-        return cur
-    if not PENDING_DIR.is_dir():
-        return None
-    legacy = [q for q in PENDING_DIR.glob("*.json")]
-    if not legacy:
-        return None
-    return max(legacy, key=lambda q: q.stat().st_mtime)
-
-
-def _load_pending_record() -> dict | None:
-    p = _pending_file()
-    if p is None:
-        return None
-    try:
-        rec = json.loads(p.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
-    if not isinstance(rec, dict) or not rec.get("text"):
-        return None
-    rec.setdefault("msg_id", None)
-    # 过期就不认了 —— 隔了一天的"补时间"接上去只会更让人困惑
-    at = rec.get("at") or ""
-    try:
-        when = dt.datetime.fromisoformat(at)
-        if dt.datetime.now() - when > dt.timedelta(hours=PENDING_TTL_HOURS):
-            return None
-    except ValueError:
-        pass
-    return rec
-
-
-def load_pending(msg_id: int | None = None) -> str | None:
-    """
-    取"当前待补充"的原文。
-
-    `msg_id` 是**兼容参数**：只有一个槽位，"当前槽位"就是唯一答案，
-    所以这里不再拿消息号去卡。踩过的坑：追问是**另一条新消息**，
-    按钮却绑在原消息号上，两边一对不上，用户点按钮只得到
-    "这条已经处理过了（或已过期）"—— 而追问文案还在让他点按钮。
-    与其维护"哪个 id 才算数"，不如让按钮就解析当前槽位（TTL 负责挡过期）。
-    """
-    rec = _load_pending_record()
-    if rec is None:
-        return None
-    return rec.get("text")
-
-
-def clear_pending(msg_id: int | None = None) -> None:
-    """
-    清掉待补充项（清的就是"当前那个"，只有一个）。
-
-    ⚠️ 这是本模块唯一的删除动作，删的是**自己刚写的临时文件**，
-    不碰任何 Apple 应用里的东西 —— 不违反"agent 不删"的约束。
-
-    `msg_id` 保留为兼容参数，仅记一行日志（见 load_pending 的说明）。
-    """
-    if msg_id is not None:
-        rec = _load_pending_record()
-        if rec is not None and rec.get("msg_id") not in (None, msg_id):
-            _log(f"清槽位的调用来自 msg {msg_id}，槽位属于 "
-                 f"msg {rec.get('msg_id')} —— 仍是同一个槽位，照清")
-    p = _pending_file()
-    if p is None:
-        return
-    try:
-        p.unlink(missing_ok=True)
-    except OSError:
-        pass
-
-
-# ── 按钮
-
-_CB_CARRY = {"t": Kind.TODO, "e": Kind.EVENT, "m": Kind.MEMO}
-
-
-def _ask_keyboard(msg_id: int) -> list[list[tuple[str, str]]]:
-    # callback_data 上限 64 字节 —— 只放"选择 + 消息号"，不放正文
-    return [[("待办", f"t:{msg_id}"), ("日程", f"e:{msg_id}"), ("备忘", f"m:{msg_id}")]]
-
-
-def _handle_callback(data: str, callback_id: str, chat: str) -> None:
-    """
-    处理一次按钮点击。**一问一答，答完即止。**
-
-    这里严守"动作触发点"定位：不重绘原消息、不需要跨点击状态。
-    """
-    tg.answer_callback(callback_id, text="收到")
-
-    kind_code, _, mid_s = data.partition(":")
-    kind = _CB_CARRY.get(kind_code)
-    if kind is None or not mid_s.isdigit():
-        return
-    msg_id = int(mid_s)
-
-    text = load_pending(msg_id)
-    if text is None:
-        tg.send("这条已经处理过了（或已过期）。")
-        return
-
-    _log(f"按钮：把 {_trunc(text)!r} 记为 {kind.value}")
-    it = _make_intake()
-    # 用强制类型走同一条分派路径 —— 不再重新分类（用户已经告诉我们了）
-    out = _dispatch_forced(it, kind, text)
-    tg.send(out.reply)
-
-    if out.needs_ask:
-        # ⚠️ 追问发出去了，就**不能**把待补充项清掉 —— 否则用户照着追问
-        # 回一句「上午九点」时，系统已经没有上一条可接了，
-        # 又会把它当成新的一条日程（标题变成「上午九点」）。
-        #
-        # 实测踩到过：端到端跑一遍，按钮这一步清了标记，下一步果然没接上。
-        #
-        # ⚠️ 这里也踩过一次"按钮绑错消息号"：槽位挪到追问那条消息，
-        # 按钮却仍绑原消息号，于是点任何一个都只回"这条已经处理过了"，
-        # 而追问文案还在说"点下面的按钮"。
-        # 修法不是在两个 id 之间对齐（追问消息号要等发送返回才知道，
-        # 很容易再错一次），而是让**按钮就解析当前槽位**（见 load_pending）。
-        # 只有一个槽位，所以"当前那个"就是唯一答案，不需要 id 对齐。
-        ask_msg_id = None
-        try:
-            r = tg.send_with_buttons("回一句时间就行：",
-                                     _ask_keyboard(msg_id))
-            ask_msg_id = r.get("message_id") if isinstance(r, dict) else None
-        except Exception as e:  # noqa: BLE001
-            _log(f"追问按钮发送失败（文字已发出，不影响）：{_trunc(str(e))}")
-
-        # 槽位记下"追问那条消息号"只为排查方便；解析不依赖它
-        save_pending(int(ask_msg_id) if ask_msg_id else msg_id, text)
-        journal.append("button_resolved", text=text, kind=kind.value,
-                       ok=out.ok, needs_more=True)
-        return
-
-    clear_pending(msg_id)
-    journal.append("button_resolved", text=text, kind=kind.value, ok=out.ok)
-
-
-def _dispatch_forced(it: Intake, kind: Kind, text: str):
-    """
-    按用户指定的类型分派（跳过分类）。
-
-    日程缺时间的情况仍会返回"要求补充"—— 因为一个没有时间的日程
-    在日历里没有意义，这时宁可让用户重说一句。
-    """
-    import classify
-    import datetime as _dt
-    c = classify.classify(text) or classify.Classified(
-        kind, classify.Confidence.HIGH, text, text)
-    c.kind = kind
-    if kind is Kind.TODO:
-        return it._do_todo(c)
-    if kind is Kind.EVENT:
-        return it._do_event(c)
-    return it._do_memo(c)
+# 删除后 Telegram 层只剩一个状态：`offset`（通道必需，与业务无关）。
+# 缺什么信息就**带符号重发一条完整的** —— 代价是重打几个字，
+# 收益是这一类故障从根上不存在。
 
 
 # ── 主循环
@@ -356,15 +169,9 @@ def handle_message(text: str, msg_id: int, chat: str) -> None:
     _log(f"收到：{_trunc(text)!r}")
     it = _make_intake()
 
-    # 把"上一条还在等补充的内容"传进去。
-    #
-    # 为什么需要：用户被追问"日程没写时间"时，最自然的回答是"上午九点"。
-    # 那是一条没有内容的消息 —— 实测踩到：它被当成**新的一条日程**建出来，
-    # 标题就是「上午九点」，而原来那条的事由丢了。
-    #
-    # 只有一个槽位，所以这里不需要判断"接哪一条"（见 PENDING 段的注释）。
-    pending_text = load_pending()
-    out = it.handle(text, msg_id=msg_id, pending_text=pending_text)
+    # 类型由符号声明（routes.py），所以这里**没有**任何"上一条在等什么"
+    # 的上下文要传 —— 那类跨消息状态已随追问机制一起删除。
+    out = it.handle(text, msg_id=msg_id)
 
     reply = out.reply
     if _OFFLINE:
@@ -375,19 +182,9 @@ def handle_message(text: str, msg_id: int, chat: str) -> None:
             reply += "\n\n【离线模式】不写入任何东西"
     tg.send(reply)
 
-    if out.needs_ask:
-        # 存下原文，按钮回调时取用 —— 这样按钮不依赖内存状态
-        r = tg.send_with_buttons("选一个：", _ask_keyboard(msg_id))
-        save_pending(msg_id, text)
-        _log(f"已发出确认按钮（msg {r.get('message_id')}）")
-    else:
-        # ⚠️ 只在**本条成功接上/写成功**时才清掉槽位。
-        # 失败时留着，用户还能照着再补一次 —— 清了就再也接不上了。
-        if out.ok:
-            clear_pending()
-            if pending_text is not None and pending_text != text:
-                _log(f"已用掉待补充项（原文 {_trunc(pending_text)!r}）")
-        _log(f"→ {out.kind.value if out.kind else '?'} ok={out.ok}")
+    # `needs_ask` 分支已删除：不再有"判不准就问一次"。
+    # 写成功与否都只记一行，用户从回执本身就能看出结果。
+    _log(f"→ {out.kind.value if out.kind else '?'} ok={out.ok}")
 
 
 def run_once(offset: int | None = None, wait: int = 25) -> int | None:
@@ -416,14 +213,11 @@ def run_once(offset: int | None = None, wait: int = 25) -> int | None:
     for u in ups:
         new_offset = max(new_offset or 0, u.get("update_id", 0) + 1)
 
+        # 回调（按钮点击）不再处理：按钮机制已整体删除。
+        # 保留这个分支只为**忽略**这类更新并推进 offset ——
+        # 否则历史遗留的老按钮被点一下，会让这一批更新反复重放。
         if "callback_query" in u:
-            cb = u["callback_query"]
-            m = cb.get("message") or {}
-            chat = str(m.get("chat", {}).get("id", ""))
-            try:
-                _handle_callback(cb.get("data") or "", cb.get("id") or "", chat)
-            except Exception as e:  # noqa: BLE001
-                _log(f"按钮处理失败：{type(e).__name__}: {_trunc(str(e))}")
+            _log("忽略按钮回调（按钮机制已删除）")
             continue
 
         msg = u.get("message")

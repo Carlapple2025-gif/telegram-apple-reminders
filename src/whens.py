@@ -395,6 +395,158 @@ def main() -> int:
     return 0
 
 
+# ════════════════════════════════════════════════════════════════════════
+# 重复规则（2026-10-03 从 classify.py 搬来）
+#
+# **为什么归这里**：本模块是"时间词汇的归属地"。重复规则（每周一、每天）
+# 是**时间字面量解析**，跟"这条消息属于哪个 App"无关 ——
+# 后者已由符号声明（见 docs/SYMBOL-SCHEME.md），不再由代码推断。
+#
+# 判断标准：凡是从字符串里认出时间/日期/重复规则的，都归本模块；
+# 凡是猜语义的，已全部删除。
+# ════════════════════════════════════════════════════════════════════════
+
+_RECUR_WEEKLY = re.compile(
+    r"(每|各)\s*(?:周|星期|礼拜)\s*([一二三四五六日天1234567])")
+_RECUR_DAILY = re.compile(r"(每天|每日)")
+_RECUR_MONTHLY = re.compile(r"(每月|每个?月)\s*(\d{1,2})\s*[日号]")
+
+# RRULE 里 BYDAY 用的两个字母 → isoweekday
+_BYDAY_NUM = {"MO": 1, "TU": 2, "WE": 3, "TH": 4, "FR": 5, "SA": 6, "SU": 7}
+
+
+def parse_recurrence(text: str) -> str:
+    """
+    解析周期性表达，返回 iCal RRULE 片段。
+
+    日历的 `recurrence` 属性接受 iCal RRULE 字符串 —— 这是日历
+    相对提醒事项的独特能力（提醒事项的脚本接口无 repeat，
+    所以"每周一交周报"这类只有日历能做到）。
+    """
+    m = _RECUR_WEEKLY.search(text)
+    if m:
+        wd = {"一": "MO", "二": "TU", "三": "WE", "四": "TH", "五": "FR",
+              "六": "SA", "日": "SU", "天": "SU",
+              "1": "MO", "2": "TU", "3": "WE", "4": "TH", "5": "FR",
+              "6": "SA", "7": "SU"}.get(m.group(2))
+        if wd:
+            return f"FREQ=WEEKLY;BYDAY={wd}"
+
+    if _RECUR_DAILY.search(text):
+        return "FREQ=DAILY"
+
+    m = _RECUR_MONTHLY.search(text)
+    if m:
+        return f"FREQ=MONTHLY;BYMONTHDAY={int(m.group(2))}"
+
+    if "每个工作日" in text or "每工作日" in text:
+        return "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR"
+
+    return ""
+
+
+def first_occurrence(rrule: str, base: dt.date) -> "When":
+    """
+    从重复规则推出**下一次发生**的日期，用作日历事件的起始时间。
+
+    为什么需要：日历事件必须有 start date，而"每周一交周报"这类说法
+    没写"从哪天开始"。取下一次发生日最符合直觉（今天就是周一则用今天）。
+
+    时刻默认 09:00（与只给日期时的默认一致），全天 —— 周期表达通常
+    不带具体时刻。
+
+    （与 `parse_recurrence` 配套：只解析出规则而不管起始日，
+      日历里会落在一个奇怪的日子上。）
+    """
+    d = base
+
+    if "BYDAY=" in rrule:
+        days = rrule.split("BYDAY=", 1)[1].split(";", 1)[0].split(",")
+        targets = sorted(_BYDAY_NUM[x] for x in days if x in _BYDAY_NUM)
+        if targets:
+            for i in range(8):          # 最多看一周
+                cand = base + dt.timedelta(days=i)
+                if cand.isoweekday() in targets:
+                    d = cand
+                    break
+    elif "BYMONTHDAY=" in rrule:
+        try:
+            dom = int(rrule.split("BYMONTHDAY=", 1)[1].split(";", 1)[0])
+        except ValueError:
+            dom = 1
+        for month_offset in (0, 1):
+            y, m = base.year, base.month + month_offset
+            if m > 12:
+                y, m = y + 1, m - 12
+            try:
+                cand = dt.date(y, m, dom)
+            except ValueError:
+                continue            # 该月没有这一天（如 31 日）
+            if cand >= base:
+                d = cand
+                break
+    # FREQ=DAILY 无需调整：就是今天
+
+    start = dt.datetime.combine(d, dt.time(9, 0))
+    return When(start=start, end=start + dt.timedelta(days=1),
+                all_day=True, has_date=True, has_time=False,
+                date_text="", time_text="")
+
+
+# 时间短语本身不构成正文，但**只在它独立出现时才剥** ——
+# 不能把"10月5日评审"剥成"评审"就丢了日期线索（日期已在 When 里）。
+# 这里保守处理：只剥句首的时间词，句中保留（避免误伤"下周一交周报"的"周报"）。
+_LEADING_TIME = re.compile(
+    r"^\s*(?:"
+    # 周期表达（要放在"周X"之前，"每个工作日"才不会被"每个"半途匹配）
+    r"(?:每|各)\s*(?:个)?\s*工作日"
+    r"|(?:每周|每星期|每个?礼拜)\s*[一二三四五六日天1234567]"
+    r"|(?:每天|每日|每周|每月|每个?月)"
+    r"|(?:每|各)\s*(?:周|星期|礼拜)\s*[一二三四五六日天1234567]"
+    # 相对日
+    r"|(?:今天|明天|后天|大后天|昨天|前天|今日|明日)"
+    # 星期
+    r"|(?:下下|下|这|本|上)?\s*(?:周|星期|礼拜)\s*[一二三四五六日天1234567]"
+    # 裸日期（"1日""15号"，通常跟在"每月"之后）
+    r"|(?:\d{1,2}\s*[日号])"
+    # 绝对日期
+    r"|(?:\d{4}\s*[-/.年]\s*\d{1,2}\s*[-/.月]\s*\d{1,2}\s*[日号]?)"
+    r"|(?:\d{1,2}\s*[-/.月]\s*\d{1,2}\s*[日号])"
+    # 时刻
+    r"|(?:凌晨|早上|早晨|上午|中午|下午|傍晚|晚上|夜里)"
+    r"|(?:\d{1,2}\s*[:：]\s*\d{2})"
+    r"|(?:\d{1,2}|[零〇一二两三四五六七八九十]{1,3})\s*[点时時]\s*(?:半|\d{2}|[零〇一二两三四五六七八九十]{1,3})?\s*分?"
+    r")[\s，,、]*")
+
+
+def strip_time_phrases(s: str) -> str:
+    """
+    剥掉句首的时间短语，得到"事情本身"。
+
+    只剥**句首连续出现**的时间词，不做全局替换 ——
+    全局替换会把"周报""月会"这类词里的字误伤掉。
+
+    ⚠️ **这一步最容易被漏掉**。它原本藏在 `classify.py` 里，
+    而 `classify.py` 的分类逻辑已整体删除。若只删不搬，标题会变成
+    "周五下午两点 项目周会"（时间词混在标题里）—— 实测过这个后果。
+
+    `@周五下午两点 项目周会` → `项目周会`
+    """
+    prev = None
+    out = s
+    while out != prev:
+        prev = out
+        out = _LEADING_TIME.sub("", out, count=1)
+    return out.strip() or s
+
+
+def clean_text(s: str) -> str:
+    """清理正文：折叠空白、去首尾标点。（同样从 classify.py 搬来）"""
+    s = re.sub(r"\s+", " ", s or "").strip()
+    s = s.strip("，,。.、；;：:!！?？ ")
+    return s
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(main())

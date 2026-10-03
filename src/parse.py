@@ -7,18 +7,29 @@
   · 原文逐字保留 —— 便于人工核对，也让去重不会因为改写而失效
   · 无法识别的行不丢弃 —— 归为「待定」交给上层询问，绝不静默丢掉
 
-标记约定（**只有三种，刻意保持最少**）：
-  - [ ] xxx   待办，未完成
-  - [x] xxx   待办，已完成
-  * xxx       备忘（不进待办）
-  其它非空行   待办
-  # 开头       元信息，跳过
+标记约定（**v4 的符号声明表，见 docs/SYMBOL-SCHEME.md**）。
+类型由你写的符号决定，解析器**不猜**：
+
+  `# 内容`      备忘（备忘录）
+  `@内容`       日历（payload 里要有可解析的时间，否则报错不写入）
+  `- [ ] 内容`  待办（提醒事项）
+  `- [x] 内容`  待办，已完成
+  `* 内容`      备忘（v1 以来的项目符号，等同 `#`）
+  裸内容        待办（最高频情况，零符号）
+
+> **两处与 v1 的语义冲突已裁决**（见常量区注释）：
+> `#` 从"元信息"改为**备忘**；`@` 从"时段"改为**日历**。
+>
+> ⚠️ 本模块的 `parse()` / `render_archive()` 是 **v1 一天一页**的解析器，
+> v4 不调用它们（v4 只用 `strip_leading_marker` 与 `content_fingerprint`）。
+> 所以下面的 `kind` 仍是 v1 词表 `'todo'|'note'|'meta'|'unknown'`；
+> v4 的路由判定在 `routes.py`。
 
 为什么不做时段（@上午 之类）：
   曾经实现过"粗粒度时段 + 时段未指定时用按钮询问"，为此写了 550 行的
   交互选择器，还要处理留档写回、跨天保留、按钮翻页……而收益只是
   "这件事放上午还是下午"。投入产出严重不成比例，已整体移除。
-  现在只保留最小模型：**待办 / 备忘 / 完成** 三态。
+  现在只保留最小模型：**待办 / 备忘 / 日程 / 完成**。
 """
 
 from __future__ import annotations
@@ -38,6 +49,10 @@ from difflib import SequenceMatcher
 # 用户会以为标记生效了、实际没有 —— 那是静默错误，必须容忍。
 DASH_CHARS = "-–—−‐"
 BULLET_CHARS = "*•·・"
+
+# 备忘声明符号（v4）。**只剥不定类型** —— 类型判定归 routes.py。
+# 这里必须剥，否则 `# 学原理` 与裸 `学原理` 的指纹对不上 → 重复建条目。
+_MEMO_MARK = "#＃"
 
 # 已完成 / 未完成的复选框。半角全角都接受。
 CHECKED = re.compile(r"^\[[xX✓✔]\]")
@@ -81,7 +96,19 @@ def content_fingerprint(text: str) -> str:
     t = _CARRY_PATTERN.sub(" ", text)
     while CARRY_MARK in t:
         t = t.replace(CARRY_MARK, " ")
+    # ⚠️ 历史 `@时段` 前缀在**这里**剥，不在 strip_leading_marker 里。
+    # 原因：那个词表含"明天"，放在通用剥标记里会把 `@明天上午九点开会`
+    # 的日期吃掉（实测）。而指纹只需要它来接住 10-02 那批历史写法
+    # （`@中午 勘察表盖章`），历史笔记不会再有新的，所以放在这条
+    # 只为去重服务的路径上最安全。
+    #
+    # ⚠️⚠️ 顺序：**先剥列表标记，再剥 @时段**。
+    # 反过来会漏 —— `- [ ] @中午 甲` 的第一位是 `-`，
+    # `^@` 匹配不上，于是 `@中午` 残留在键里，
+    # 与 `甲` 的键对不上 → 重复建条目。（真实存在的组合：v1 留档里
+    # 历史时段写法和复选框会同时出现。）
     body, _ = strip_leading_marker(t)
+    body = _LEGACY_SLOT_PREFIX.sub("", body or t)
     return normalize_line(body or t)
 
 
@@ -100,12 +127,38 @@ def normalize_line(s: str) -> str:
 # 去重键对不上就会**重复建条目**。实测过这个风险。
 _LEGACY_SLOT_PREFIX = re.compile(r"^[@＠]\s*(?:上午|中午|下午|晚上|明天)\s*")
 
+# ── v4 的符号声明表见 docs/SYMBOL-SCHEME.md
+#
+#   # 内容      → 备忘（备忘录）
+#   @内容      → 日历（payload 里要有可解析的时间）
+#   - [ ] 内容  → 待办（提醒事项）
+#   裸内容      → 待办（最高频，零符号）
+#
+# ⚠️ **`#` 与 `@` 的符号判定不在本模块** —— 它们在 `routes.py`。
+# 本模块只做"机械剥除"（列表符号、复选框）。
+#
+# 为什么这样分：`parse()` 是 **v1 一天一页**的解析器，它的 kind 词表是
+# `todo|note|meta|unknown` —— **没有 `event` 这一项**。
+#
+# 踩过的坑：一开始把 `@` 判成 `event` 放在本模块，结果 v1 的 `parse()`
+# 拿到 "event" 不认识，`carry_over.build_plan` 把它当未知**静默丢掉** ——
+# 历史笔记里 `@中午 勘察表盖章` 从此不再被顺延。
+# 教训：新符号的语义归新模块，别让它污染 v1 的词表。
+
 
 def strip_leading_marker(line: str) -> tuple[str, str | None]:
     """
-    剥掉行首标记，返回 (剩余内容, 类型)。
+    剥掉行首的**列表标记**，返回 (剩余内容, 类型)。
 
-    类型：'todo' | 'note' | None（没识别到标记）
+    类型是 v1 词表：`'todo'` | `'note'` | None（没识别到标记）。
+
+    ⚠️ 它**不判定** `#` / `@` 的类型（那是 `routes.py` 的事），
+    但**会剥掉 `#`**（见下面注释）；`@` 留在这里不动。
+
+    ⚠️ 这里也**不做** `@时段` 的历史兼容 —— 那个词表含"明天"，
+    会把 `@明天上午九点开会` 的日期吃掉（实测）。
+    需要它的地方是 `content_fingerprint()`：那里是去重键的入口，
+    历史笔记的键必须稳定。
     """
     s = line.strip()
     if not s:
@@ -113,8 +166,15 @@ def strip_leading_marker(line: str) -> tuple[str, str | None]:
 
     kind = None
 
+    # 备忘声明的 `#`：剥掉，但**不定类型**（类型归 routes 判）。
+    # ⚠️ 必须在这里剥：`content_fingerprint()` 依赖它 ——
+    # 若 `# 学原理` 的键是 `# 学原理` 而裸 `学原理` 的键是 `学原理`，
+    # 两者对不上就会**重复建条目**。
+    if s[0] in _MEMO_MARK:
+        s = s[1:].lstrip()
+
     # 行首的列表符号（- * • 等）。归一化后再判断。
-    if s[0] in DASH_CHARS or s[0] in BULLET_CHARS:
+    if s and (s[0] in DASH_CHARS or s[0] in BULLET_CHARS):
         marker = s[0]
         rest = s[1:].lstrip()
         kind = "note" if marker in BULLET_CHARS else "todo"
@@ -131,9 +191,6 @@ def strip_leading_marker(line: str) -> tuple[str, str | None]:
         s = s[m_open.end():].lstrip()
         if kind is None:
             kind = "todo"
-
-    # 兼容：剥掉遗留的 @时段 前缀（不是功能，只是不让它污染正文）
-    s = _LEGACY_SLOT_PREFIX.sub("", s)
 
     return s, kind
 
@@ -215,6 +272,12 @@ def parse(text: str) -> ParseResult:
                 continue
 
         body, kind = strip_leading_marker(raw)
+
+        # 遗留的 `@时段` 前缀（`@中午 勘察表盖章`）在这里机械剥掉。
+        # ⚠️ 这是 **v1 兼容**，不是功能 —— 时段功能早已砍掉。
+        # 不能放进 strip_leading_marker：那个词表含"明天"，会把
+        # v4 的 `@明天上午九点开会` 日期吃掉（实测）。
+        body = _LEGACY_SLOT_PREFIX.sub("", body)
 
         if kind is None:
             # 没有标记 → 按约定视为待办（裸行是最高频情况，零符号）

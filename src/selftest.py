@@ -118,7 +118,8 @@ check("识别日期标题", r[0][0] == "meta" and r[0][1] == "2026-10-02")
 check("未完成待办", r[1] == ("todo", "待办甲", False))
 check("已完成待办", r[2] == ("todo", "待办乙", True))
 check("备忘不进待办", r[3][0] == "note" and r[3][1] == "备忘丙")
-check("旧 @时段 前缀被剥掉（兼容历史笔记）", r[4][1] == "时段丁")
+check("旧 @时段 前缀被剥掉（v1 兼容；v4 的 @ 是日历符号）",
+      r[4][1] == "时段丁")
 
 # 裸行 = 待办（最高频情况，零符号）
 r = kinds("裸行没有符号")
@@ -931,94 +932,135 @@ check("只给日期 → 全天", _whens.parse_when("明天", _B).all_day is True
 check("给了时刻 → 非全天", _whens.parse_when("明天下午两点", _B).all_day is False)
 
 
-section("v4 命令分类（classify）")
+section("v4 符号路由（routes）—— 类型由声明决定，不猜")
 
-_cls = _load(SRC / "classify.py")
+# ⚠️ 这一段**取代**了原来的 90 行"命令分类（classify）"断言。
+#
+# 被取代的原因值得记下来：那套断言全都在验"猜得准不准" ——
+# 30 多个句子逐条断言它被判成什么。而 2026-10-03 的实测是
+# **4 次真实交互错 3 次**，其中一段 89 字的感慨被判成待办写进了提醒事项。
+#
+# 判据从"猜语义"改成"认符号"之后，那类断言**不该存在** ——
+# 类型是你写的，不是代码推断的，所以没有"准不准"可验。
+# 这里改为验：符号认得对不对、载荷剥得对不对、缺东西时拒绝得对不对。
+#
+# 自检项目数因此下降，那不是退步：判据少了，测试也该少。
+_rt = _load(SRC / "routes.py")
+_K = _load(SRC / "kinds.py")
 
-# 待办：有动作动词
-for _s in ["交电费", "勘察表盖章", "明天交电费", "跟进修缮", "买猫粮",
-           "回复邮件", "提交结算单", "盖章"]:
-    _c = _cls.classify(_s, _B)
-    check(f"{_s!r} → 待办", _c is not None and _c.kind == _cls.Kind.TODO,
-          f"得到 {_c.kind.value if _c else None}")
+# ① 三个符号各归各家
+for _s, _wk, _wt in [
+        ("- [ ] 交电费", "todo", "交电费"),
+        ("- [x] 已完成的", "todo", "已完成的"),
+        ("* 一条感想", "memo", "一条感想"),
+        ("# 学原理比学语法重要", "memo", "学原理比学语法重要"),
+        ("＃ 全角井号", "memo", "全角井号"),
+        ("@明天上午九点 测试稳定性", "event", "测试稳定性"),
+]:
+    _it = _rt.route(_s, _B)
+    check(f"{_s!r} → {_wk}", _it.kind.value == _wk, f"得到 {_it.kind.value}")
+    check(f"{_s!r} 的正文", _it.text == _wt, f"得到 {_it.text!r}")
 
-# 日程：有事件名词
-for _s in ["周五下午两点项目周会", "下周三体检", "10月8日评审会", "周一上午开庭"]:
-    _c = _cls.classify(_s, _B)
-    check(f"{_s!r} → 日程", _c is not None and _c.kind == _cls.Kind.EVENT,
-          f"得到 {_c.kind.value if _c else None}")
+# ② 裸输入 = 待办（用户 2026-10-03 明确选的默认）
+#
+# 代价要记住：一段"感慨"不打 # 就会进提醒事项的打钩清单。
+# 换来的是最高频的动作零成本。这条断言锁住的是**选择**，不是对错。
+for _s in ["交电费", "勘察表盖章", "明天交电费"]:
+    _it = _rt.route(_s, _B)
+    check(f"裸输入 {_s!r} → 待办", _it.kind.value == "todo",
+          f"得到 {_it.kind.value}")
 
-# 备忘：有备忘信号词
-for _s in ["想起一件事，荷载要按名称命名", "记一下这个想法"]:
-    _c = _cls.classify(_s, _B)
-    check(f"{_s!r} → 备忘", _c is not None and _c.kind == _cls.Kind.MEMO,
-          f"得到 {_c.kind.value if _c else None}")
+# ③ 待办保留时间提示（只放进备注，不改归属）
+_it = _rt.route("明天交电费", _B)
+check("待办也解析出时间", _it.when is not None)
+check("待办的 when 日期正确", _it.when.start.date() == _dt2.date(2026, 10, 4),
+      str(_it.when.start.date()))
+check("待办正文剥掉时间词", _it.text == "交电费", repr(_it.text))
 
-# 周期 → 日程 + RRULE（日历独有的重复能力；提醒事项不支持 repeat）
-for _s, _rrule in [("每周一交周报", "FREQ=WEEKLY;BYDAY=MO"),
-                   ("每天跑步", "FREQ=DAILY"),
-                   ("每个工作日站会", "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR"),
-                   ("每月1日交房租", "FREQ=MONTHLY;BYMONTHDAY=1"),
-                   ("每周五例会", "FREQ=WEEKLY;BYDAY=FR")]:
-    _c = _cls.classify(_s, _B)
-    check(f"{_s!r} → 日程", _c is not None and _c.kind == _cls.Kind.EVENT,
-          f"得到 {_c.kind.value if _c else None}")
-    check(f"{_s!r} 的 RRULE", _c.recurrence == _rrule, f"得到 {_c.recurrence!r}")
-    check(f"{_s!r} 有起始日", _c.when is not None)
+# ④ 日程必须有事由 + 有时间，否则**报错不写入**
+#
+# 这一条是 2026-10-03 那次故障的直接对立面：当时 `@` 缺时间，
+# 系统拿时间当了标题建出一条「上午九点」的日程。
+# 现在的行为是拒绝，而拒绝的三条边界各有一个用例。
+for _s in ["@上午九点",      # 只有时间、没有事由
+           "@明天",          # 只有日期
+           "@下辈子 交电费",  # 时间认不出来
+           "#",             # 只有符号
+           "@"]:
+    try:
+        _bad = _rt.route(_s, _B)
+        check(f"{_s!r} 应被拒绝", False, f"却得到 {_bad.kind.value} {_bad.text!r}")
+    except _rt.RouteError:
+        check(f"{_s!r} 被拒绝（不写入）", True)
 
-# 周期事件的起始日必须落在正确的星期
-_c = _cls.classify("每周一交周报", _B)
-check("每周一 → 起始日落在周一", _c.when.start.date() == _dt2.date(2026, 10, 5),
-      f"得到 {_c.when.start.date()}")
-_c = _cls.classify("每周日大扫除", _B)
-check("每周日 → 起始日落在周日", _c.when.start.date() == _dt2.date(2026, 10, 4),
-      f"得到 {_c.when.start.date()}")
+# ⑤ 日程标题必须剥掉时间短语 —— **这一步最容易漏**
+#
+# 它原本藏在 classify.py 的 `_strip_time_phrases` 里，而那个模块已整体删除。
+# 若只删不搬，标题会变成"周五下午两点 项目周会"（时间词混进标题）。
+for _s, _want in [("@周五下午两点 项目周会", "项目周会"),
+                  ("@明天上午九点 测试 Apple agent 稳定性",
+                   "测试 Apple agent 稳定性"),
+                  ("@下周三 体检", "体检"),
+                  ("@10月8日 评审会", "评审会")]:
+    _it = _rt.route(_s, _B)
+    check(f"{_s!r} 的标题", _it.text == _want, f"得到 {_it.text!r}")
 
-# 需确认（真的判不出）—— 这是"判断归用户"的落点
-for _s in ["帮我看下那个表", "那个东西弄一下"]:
-    _c = _cls.classify(_s, _B)
-    check(f"{_s!r} → 需确认", _c.confidence == _cls.Confidence.ASK)
-    check(f"{_s!r} 给了三个候选", len(_c.candidates) == 3)
+# ⑥ 周期表达 → 日历的重复规则（这是日历相对提醒事项的独有能力）
+for _s, _rrule in [("@每周一 交周报", "FREQ=WEEKLY;BYDAY=MO"),
+                   ("@每天 跑步", "FREQ=DAILY"),
+                   ("@每个工作日 站会", "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR"),
+                   ("@每月1日 交房租", "FREQ=MONTHLY;BYMONTHDAY=1")]:
+    _it = _rt.route(_s, _B)
+    check(f"{_s!r} 的 RRULE", _it.recurrence == _rrule, f"得到 {_it.recurrence!r}")
+    check(f"{_s!r} 有起始日", _it.when is not None)
 
-# 动作优先于"有时间" —— 明天交电费是待办，不是日程
-for _s in ["明天交电费", "周五上午交材料", "下周一提交报告"]:
-    _c = _cls.classify(_s, _B)
-    check(f"{_s!r} 是待办而非日程", _c.kind == _cls.Kind.TODO)
+# ⑦ 周期事件的起始日必须落在正确的星期（否则日历里落错天）
+_it = _rt.route("@每周一 交周报", _B)
+check("每周一 → 起始日落在周一（基准周六）",
+      _it.when.start.date() == _dt2.date(2026, 10, 5), str(_it.when.start.date()))
+_it = _rt.route("@每周日 大扫除", _B)
+check("每周日 → 起始日落在周日",
+      _it.when.start.date() == _dt2.date(2026, 10, 4), str(_it.when.start.date()))
 
-# 正文剥离（回执里显示的应该是"事情本身"）
-for _s, _want in [("明天交电费", "交电费"), ("每天跑步", "跑步"),
-                  ("每月1日交房租", "交房租"), ("周五下午两点项目周会", "项目周会"),
-                  ("下周三体检", "体检")]:
-    _c = _cls.classify(_s, _B)
-    check(f"{_s!r} 的正文", _c.text == _want, f"得到 {_c.text!r}")
-
-check("空输入 → None", _cls.classify("", _B) is None)
-check("纯空白 → None", _cls.classify("   ", _B) is None)
+# ⑧ 说了日期就不顺延；只给时刻且今天已过 → 顺延次日
+_it = _rt.route("@明天 14:00 项目周会", _B)
+check("写了日期不顺延", _it.rolled is False)
+check("写了日期用那天", _it.when.start.date() == _dt2.date(2026, 10, 4),
+      str(_it.when.start.date()))
 
 
-section("分类判据收紧（真实误判的教训）")
+section("v4 删除的判据：不许把'猜'请回来")
 
-# 实测踩到：用户发了一段 89 字的感慨，被判成**待办**写进了提醒事项。
-# 根因：`交`、`写`、`学` 这类单字动词**命中任意位置**就算数。
-# 现在收紧为：动词要在开头附近 + 正文不太长。
-_VERBOSE = ("这个年代真正要学的是原理和工程思想，例如浏览器如何工作，"
-            "React 背后的实现，JS的单线程本质，如何测试等等，知识面至少是"
-            "个全栈，至于编码那种茴字四种写法的事情，交给 AI 吧")
-_c9 = _cls.classify(_VERBOSE, _B)
-check("长感慨不再判成待办（真实误判）",
-      _c9.kind != _cls.Kind.TODO,
-      f"得到 {_c9.kind.value}")
+# 这一段是**反向断言**：锁住"已经删掉的东西不会被无意中加回来"。
+# 本项目吃过这个亏 —— `reclassify` 的删除口子写在文档里却没实现，
+# 而文档和代码各说各话了很久。
+_rt_src = (SRC / "routes.py").read_text(encoding="utf-8")
+check("routes 不含任何词表", "_WORDS" not in _rt_src and "_VERBS" not in _rt_src)
+check("routes 不导入 classify", "classify" not in _rt_src)
 
-# 真实待办必须仍然判对（收紧不能误伤）
-for _s in ("交电费", "跟进修缮", "记得给车做保养", "整理上季度所有客户的合同并按地区分类归档"):
-    _c = _cls.classify(_s, _B)
-    check(f"{_s[:12]!r} 仍判待办", _c.kind == _cls.Kind.TODO,
-          f"得到 {_c.kind.value}")
+# classify.py 必须不存在了（猜语义的整条链路）
+check("classify.py 已删除", not (SRC / "classify.py").exists(),
+      "它用约 700 字词表猜类型，已被符号声明取代")
 
-# 判据本身：动词要在开头附近
-check("动词在开头 → 祈使句", _cls._verb_leads("交电费"))
-check("动词在句中 → 非祈使句", not _cls._verb_leads(_VERBOSE))
-check("待办长度上限存在", hasattr(_cls, "TODO_MAX_LEN"))
+# 追问/按钮那一整套跨消息状态必须消失
+_dm_src_now = (SRC / "daemon.py").read_text(encoding="utf-8")
+# ⚠️ 判据用"定义/赋值"的形式，不用裸名字 ——
+# 删除处的注释里**特意提到了**这些名字（否则以后没人知道这里曾有什么），
+# 用裸名字会把说明文字当成残留代码，那会逼着人删掉注释来讨好断言。
+for _gone in ("def save_pending", "def load_pending", "def clear_pending",
+              "def _ask_keyboard", "def _handle_callback",
+              "def _dispatch_forced"):
+    check(f"daemon 已无 {_gone}", _gone not in _dm_src_now)
+check("daemon 已无 PENDING_TTL_HOURS 定义",
+      "PENDING_TTL_HOURS =" not in _dm_src_now,
+      "常量定义应已删除（注释里提到名字是允许的）")
+
+# intake 不应再有"问一次"的通道
+_in_src_now = (SRC / "intake.py").read_text(encoding="utf-8")
+check("intake 已无 needs_ask 字段", "needs_ask:" not in _in_src_now)
+check("intake 已无 pending_text 参数",
+      "pending_text:" not in _in_src_now)
+check("intake 不导入 classify", "import classify" not in _in_src_now)
 
 
 section("v4 用户日志（journal）")
@@ -1386,7 +1428,7 @@ _d = _fresh_journal()
 try:
     _i, _f = _new_intake()
     _o = _i.handle("明天交电费", _B)
-    check("待办：ok 且类型正确", _o.ok and _o.kind == _cls.Kind.TODO)
+    check("待办：ok 且类型正确", _o.ok and _o.kind == _K.Kind.TODO)
     check("待办：只写了一次", len(_f.calls) == 1, f"得到 {_f.calls}")
     check("待办：写的是提醒事项端", _f.calls[0][0] == "todo")
     check("待办：正文剥掉时间词", _f.calls[0][1] == "交电费", _f.calls[0][1])
@@ -1398,15 +1440,15 @@ finally:
 _d = _fresh_journal()
 try:
     _i, _f = _new_intake()
-    _o = _i.handle("周五下午两点项目周会", _B)
-    check("日程：类型正确", _o.kind == _cls.Kind.EVENT)
+    _o = _i.handle("@周五下午两点 项目周会", _B)
+    check("日程：类型正确", _o.kind == _K.Kind.EVENT)
     check("日程：写的是日历端", _f.calls[0][0] == "event")
     check("日程：时间算对", _f.calls[0][2] == _dt2.datetime(2026, 10, 9, 14, 0),
           str(_f.calls[0][2]))
     check("日程：回执含日期", "10月9日" in _o.reply)
 
     _i, _f = _new_intake()
-    _o = _i.handle("每周一交周报", _B)
+    _o = _i.handle("@每周一 交周报", _B)
     check("周期日程：带 RRULE", _f.calls[0][4] == "FREQ=WEEKLY;BYDAY=MO",
           _f.calls[0][4])
     check("周期日程：按全天处理", _f.calls[0][5] is True)
@@ -1418,32 +1460,29 @@ finally:
 _d = _fresh_journal()
 try:
     _i, _f = _new_intake()
-    _o = _i.handle("想起一件事，荷载要按名称命名", _B)
-    check("备忘：类型正确", _o.kind == _cls.Kind.MEMO)
+    _o = _i.handle("# 荷载要按名称命名", _B)
+    check("备忘：类型正确", _o.kind == _K.Kind.MEMO)
     check("备忘：写的是备忘录端", _f.calls[0][0] == "memo")
     check("备忘：回执说明去向", "备忘录" in _o.reply)
 finally:
     _sh2.rmtree(_d, ignore_errors=True)
 
-# ④ 判不出 → **不写入**、要求确认（"判断归用户"的落点）
+# ④ 缺硬信息 → **不写入**、如实报错（不再"问一次"）
+#
+# 这里原本验的是"判不出类型 → 给三个按钮问一次"。那套机制已整体删除
+# （2026-10-03 裁决）：类型现在由符号声明，不存在"判不出"。
+# 现在会触发的只有**载荷缺硬信息**这一类，行为是报错且零写入。
 _d = _fresh_journal()
 try:
-    _i, _f = _new_intake()
-    _o = _i.handle("帮我看下那个表", _B)
-    check("判不出：不写入任何端", len(_f.calls) == 0, f"得到 {_f.calls}")
-    check("判不出：要求确认", _o.needs_ask and not _o.ok)
-    check("判不出：给了三个候选", len(_o.candidates) == 3)
-finally:
-    _sh2.rmtree(_d, ignore_errors=True)
-
-# ⑤ 日程没写时间 → 不瞎猜一个时间，要求补充
-_d = _fresh_journal()
-try:
-    _i, _f = _new_intake()
-    _o = _i.handle("例会", _B)
-    check("日程缺时间：不写入", len(_f.calls) == 0)
-    check("日程缺时间：要求补充", _o.needs_ask)
-    check("日程缺时间：回执提示", "没写时间" in _o.reply)
+    for _bad, _why in [("@例会", "日程没写时间"),
+                       ("@上午九点", "日程只有时间"),
+                       ("#", "只有符号没有内容")]:
+        _i, _f = _new_intake()
+        _o = _i.handle(_bad, _B)
+        check(f"{_why}：不写入任何端", len(_f.calls) == 0, f"得到 {_f.calls}")
+        check(f"{_why}：ok=False", _o.ok is False)
+        check(f"{_why}：回执如实报错", _o.reply.startswith("❌"), _o.reply)
+        check(f"{_why}：回执给出退路", "手动加" in _o.reply)
 finally:
     _sh2.rmtree(_d, ignore_errors=True)
 
@@ -1480,8 +1519,8 @@ _d = _fresh_journal()
 try:
     _i, _f = _new_intake()
     _i.handle("明天交电费", _B)
-    _i.handle("周五下午两点项目周会", _B)
-    _i.handle("想起一件事，备忘内容", _B)
+    _i.handle("@周五下午两点 项目周会", _B)
+    _i.handle("# 备忘内容", _B)
     _evs = [r["event"] for r in _jr.read_day(_jr._today())]
     check("journal 记了 3 条 input", _evs.count("input") == 3, str(_evs))
     check("journal 记了 todo_added", _evs.count("todo_added") == 1)
@@ -1504,14 +1543,20 @@ try:
 finally:
     _sh2.rmtree(_d, ignore_errors=True)
 
-# ⑩ 判不出时也要记 input —— 便于复盘"我提过但没记成"
+# ⑩ 缺硬信息被拒时也要记 input —— 便于复盘"我提过但没记成"
+#
+# ⚠️ 这一段原来叫"判不出时"（类型判不出来 → 问一次）。
+# 类型现在由符号声明，"判不出类型"这个情况**不存在了**。
+# 但"载荷缺硬信息被拒绝"仍会产生"提过、没记成"的记录，所以这一段保留，
+# 只是触发条件换成了 `@例会`（日程没写时间）。
 _d = _fresh_journal()
 try:
     _i, _f = _new_intake()
-    _i.handle("帮我看下那个表", _B)
+    _i.handle("@例会", _B)
     _evs = [r["event"] for r in _jr.read_day(_jr._today())]
-    check("判不出也记 input", "input" in _evs, str(_evs))
-    check("判不出不写入", len(_f.calls) == 0)
+    check("被拒也记 input", "input" in _evs, str(_evs))
+    check("被拒也记 error（便于排查）", "error" in _evs, str(_evs))
+    check("被拒不写入", len(_f.calls) == 0)
 finally:
     _sh2.rmtree(_d, ignore_errors=True)
 
@@ -1555,47 +1600,38 @@ check("判据对同一句仍然给出正确结果",
       "说明判据确实是看整句，不是看命中片段")
 
 
-section("v4 补时间要接到上一条上（不新建）")
+section("v4 「补时间」这一类故障**从根上不存在**")
 
-# 这是上面那次踩坑的**修复断言**。用户被追问"日程没写时间"后回一句
-# 「上午九点」——它必须接到上一条上，而不是拿"上午九点"当标题新建。
+# ⚠️ 这一段取代了原来的三个"合并到上一条"用例。
+#
+# 原来那三个用例是针对一次**真实故障**的修复断言：用户被追问
+# "日程没写时间"后回了句「上午九点」，系统拿它当标题新建了一条日程，
+# 时间落在今天 09:00（已过去），原标题丢失。
+#
+# 修复当时是"引入单一待补充槽位 + 把补时间合并到上一条上"。
+# 但那仍然是**跨消息状态**，后来又因此翻过两次车
+# （槽位被清、按钮绑错消息号）。
+#
+# 2026-10-03 的裁决更彻底：**追问机制整体删除**。
+# 于是「补时间」这个动作不存在了 —— 缺什么就带符号重发一条完整的。
+# 断言也随之从"合并对不对"变成"拒绝得对不对"。
 _d = _fresh_journal()
 try:
     _i, _f = _new_intake()
-    _o = _i.handle("上午九点", _B, msg_id=90,
-                   pending_text="测试Apple- agent稳定性")
-    check("补时间：合并后只写一条", len(_f.calls) == 1, f"得到 {_f.calls}")
-    check("补时间：写的是日历端", _f.calls[0][0] == "event")
-    check("补时间：标题是上一条的原文（不是「上午九点」）",
-          _f.calls[0][1] == "测试Apple- agent稳定性", repr(_f.calls[0][1]))
-    check("补时间：回执如实说明'接在上一条'", "接在你上一条上" in _o.reply)
-finally:
-    _sh2.rmtree(_d, ignore_errors=True)
-
-# 没有上一条时**不能瞎接** —— 单独一句"上午九点"仍按独立日程处理。
-_d = _fresh_journal()
-try:
-    _i, _f = _new_intake()
-    _i.handle("上午九点", _B, msg_id=91, pending_text=None)
-    check("无上一条时不合并（标题仍是原句）",
-          _f.calls[0][1] == "上午九点", repr(_f.calls[0][1]))
-finally:
-    _sh2.rmtree(_d, ignore_errors=True)
-
-# 一句完整的话不该被 pending 影响 —— pending 是个"补时间"的口子，
-# 不能变成"任何话都往上一条上接"。
-_d = _fresh_journal()
-try:
-    _i, _f = _new_intake()
-    _i.handle("明天上午九点测试 Apple agent 稳定性", _B, msg_id=92,
-              pending_text="别的旧条目")
-    check("完整的一句话不受 pending 影响",
-          _f.calls[0][1] == "测试 Apple agent 稳定性", repr(_f.calls[0][1]))
+    _o = _i.handle("上午九点", _B, msg_id=90)
+    # ⚠️ 这条断言的语义值得看清：它**不是**"系统拒绝了"，
+    # 而是"系统不再猜它是给哪条的" —— 按裸输入默认处理成待办。
+    # 这正是用户 2026-10-03 选的默认（裸输入 = 待办）。
+    check("光回一个时间：按裸输入处理（待办），不进日历",
+          len(_f.calls) == 1 and _f.calls[0][0] == "todo", f"得到 {_f.calls}")
+    check("光回一个时间：写入的是提醒事项", "提醒事项" in _o.reply, _o.reply)
+    check("光回一个时间：**没有**凭空建一条日程",
+          all(c[0] != "event" for c in _f.calls), f"得到 {_f.calls}")
 finally:
     _sh2.rmtree(_d, ignore_errors=True)
 
 
-section("v4 只说时刻、而该时刻今天已过 → 顺延明天")
+section("v4 只说时刻、而该时刻今天已过 → 顺延明天（路由层）")
 
 # whens.py 是纯函数，刻意不读时钟（否则没法离线测），并在注释里写明
 # "由调用方决定（它本来就知道'现在'）"。调用方是 intake —— 这一段验它
@@ -1610,7 +1646,7 @@ _past_s = f"{_past.hour}点"
 _d = _fresh_journal()
 try:
     _i, _f = _new_intake()
-    _o = _i.handle(f"{_past_s} 项目周会", _B)
+    _o = _i.handle(f"@{_past_s} 项目周会", _B)
     _got = _f.calls[0][2]
     check("已过的时刻被顺延到次日",
           _got.date() == _past.date() + _dt2.timedelta(days=1),
@@ -1628,7 +1664,7 @@ finally:
 _d = _fresh_journal()
 try:
     _i, _f = _new_intake()
-    _i.handle("明天下午两点 项目周会", _B)
+    _i.handle("@明天下午两点 项目周会", _B)
     check("写了日期就不顺延",
           _f.calls[0][2] == _dt2.datetime(2026, 10, 4, 14, 0),
           str(_f.calls[0][2]))
@@ -1637,10 +1673,10 @@ finally:
 
 
 section("v4 待办的时间信息不能被丢掉")
-# 踩到过：classify 在待办分支写 `when=None`，把已经解析好的时间扔了 ——
+# 踩到过：分类器在待办分支写 `when=None`，把已经解析好的时间扔了 ——
 # "明天交电费"里的"明天"白解析，上层再也拿不到。
-# **解析出来的信息不该在分类这一步被丢弃**，用不用是上层的事。
-_c_todo = _cls.classify("明天交电费", _B)
+# **解析出来的信息不该在路由这一步被丢弃**，用不用是上层的事。
+_c_todo = _rt.route("明天交电费", _B)
 check("待办也保留解析出的时间", _c_todo.when is not None,
       "when 被丢掉了")
 check("待办的 when 日期正确",
@@ -1649,7 +1685,7 @@ check("待办的 when 日期正确",
 check("待办的 when 标了 has_date",
       _c_todo.when is not None and _c_todo.when.has_date is True)
 
-_c_todo2 = _cls.classify("交电费", _B)
+_c_todo2 = _rt.route("交电费", _B)
 check("无时间的待办 when 为 None", _c_todo2.when is None)
 
 # intake 要把这个时间传给提醒事项端（是否设 due 由该端决定）
@@ -1703,58 +1739,15 @@ try:
     _dm.STATE_FILE.write_text("{坏 JSON", encoding="utf-8")
     check("损坏的状态文件返回 None 而非崩", _dm.load_offset() is None)
 
-    # 待补充项落盘 → 按钮不依赖内存（进程重启后照样能用）
-    _dm.save_pending(42, "帮我看下那个表")
-    check("待补充项可读回", _dm.load_pending() == "帮我看下那个表")
-
-    # ⚠️ **只有一个槽位**：这条断言锁住"不需要猜接哪一条"这个设计。
-    # 曾经按消息号各存一份，于是"点按钮 → 系统追问 → 用户补时间"
-    # 会留下两份记录，补时间时只能猜 —— 端到端实测的结果是
-    # `有多条待补充，无法确定接哪条 → 不合并`，修复等于没生效。
-    _dm.save_pending(77, "后来的一条")
-    check("新的一条会顶掉旧的（只有一个槽位）",
-          _dm.load_pending() == "后来的一条", str(_dm.load_pending()))
-
-    # ⚠️ 而且按钮**必须解析当前槽位，不能拿消息号去卡**。
-    # 踩到过：追问是另一条新消息，槽位在那个消息号上，按钮却绑原消息号，
-    # 于是点任何一个都只回"这条已经处理过了（或已过期）"，
-    # 而追问文案还在说"点下面的按钮"—— 用户点下去就是撞墙。
-    # 只有一个槽位，"当前那个"就是唯一答案。
-    check("按钮不靠消息号卡（能解析当前槽位）",
-          _dm.load_pending(12345) == "后来的一条",
-          "用别的消息号也应解析到唯一的当前槽位")
-    _dm.clear_pending(12345)
-    check("清槽位也不靠消息号卡",
-          _dm.load_pending() is None)
-
-    # 过期的待补充不再认（隔一天的"补时间"接上去只会更困惑）
-    _dm.PENDING_DIR.mkdir(parents=True, exist_ok=True)
-    _dm._pending_path().write_text(_json2.dumps(
-        {"text": "过期的那条", "msg_id": 9,
-         "at": (_dt2.datetime.now()
-                - _dt2.timedelta(hours=_dm.PENDING_TTL_HOURS + 1)).isoformat()},
-        ensure_ascii=False), encoding="utf-8")
-    check("过期（超 TTL）的待补充不再认", _dm.load_pending() is None,
-          "过期的补时间接上去只会更让人困惑")
-
-    _dm.clear_pending()
-    check("清除后为 None", _dm.load_pending() is None)
-    _dm.clear_pending()
-    check("重复清除不崩", True)
-
-    # 升级兼容：只存在旧格式（<msg_id>.json）时也要认，并且**清对文件**。
-    # 不认它的话，升级瞬间正好挂着一条待补充，用户补时间就接不上 ——
-    # 又回到"标题变成时间"那个 bug。
-    _legacy = _dm.PENDING_DIR / "84.json"
-    _dm.PENDING_DIR.mkdir(parents=True, exist_ok=True)
-    _legacy.write_text(_json2.dumps(
-        {"text": "旧格式的待补充", "at": _dt2.datetime.now().isoformat()},
-        ensure_ascii=False), encoding="utf-8")
-    check("能读旧格式的待补充项",
-          _dm.load_pending() == "旧格式的待补充", str(_dm.load_pending()))
-    _dm.clear_pending()
-    check("清的是旧格式那个文件（没留垃圾）",
-          not _legacy.exists() and _dm.load_pending() is None)
+    # ⚠️ 这里原有约 50 行"待补充项"断言 —— 随那套机制一起删除（2026-10-03）。
+    #
+    # 它们验的是：单一槽位、TTL 过期、旧格式兼容、按钮不靠消息号卡……
+    # 全都属于"判不准 → 发按钮 → 等你点 → 补时间"那条链路。
+    # **代码删了，验它的断言也该删** —— 留着会变成"测一个不存在的东西"，
+    # 而且会让人以为那套机制还在。
+    #
+    # 反向断言在"v4 删除的判据"那一节：确认 save_pending / load_pending /
+    # clear_pending / PENDING_TTL_HOURS 等都已从 daemon.py 消失。
 finally:
     _sh2.rmtree(_dm_dir, ignore_errors=True)
 
@@ -1769,29 +1762,14 @@ check("日志截断：长文本带省略号",
       _dm._trunc("很长" * 30).endswith("…"))
 check("日志截断：换行被替换", "\n" not in _dm._trunc("a\nb"))
 
-# 按钮指定类型时必须走同一条分派路径（跳过分类但不跳过校验）
-_d = _fresh_journal()
-try:
-    _f2 = _FakeSinks()
-    _it2 = _it.Intake(add_todo=_f2.todo, add_event=_f2.event, add_memo=_f2.memo)
-    _o = _dm._dispatch_forced(_it2, _cls.Kind.TODO, "帮我看下那个表")
-    check("按钮指定待办 → 写到提醒事项端",
-          _f2.calls and _f2.calls[0][0] == "todo", str(_f2.calls))
-
-    _f3 = _FakeSinks()
-    _it3 = _it.Intake(add_todo=_f3.todo, add_event=_f3.event, add_memo=_f3.memo)
-    _o = _dm._dispatch_forced(_it3, _cls.Kind.MEMO, "帮我看下那个表")
-    check("按钮指定备忘 → 写到备忘录端",
-          _f3.calls and _f3.calls[0][0] == "memo", str(_f3.calls))
-
-    # 日程缺时间仍要求补充 —— 没有时间的日程在日历里没有意义
-    _f4 = _FakeSinks()
-    _it4 = _it.Intake(add_todo=_f4.todo, add_event=_f4.event, add_memo=_f4.memo)
-    _o = _dm._dispatch_forced(_it4, _cls.Kind.EVENT, "开会")
-    check("按钮指定日程但缺时间 → 不写入、要求补充",
-          len(_f4.calls) == 0 and _o.needs_ask)
-finally:
-    _sh2.rmtree(_d, ignore_errors=True)
+# ⚠️ 这里原有三处"按钮指定类型"的断言，随按钮机制一起删除（2026-10-03）。
+#
+# 它们验的是"点按钮后强制走某个类型"——而**按钮本身已经不在了**。
+# 反向断言在"v4 删除的判据"那一节里（确认 _dispatch_forced 等已消失），
+# 所以这里只留一处说明，不再重复验。
+#
+# 记住这条被删掉的理由：那套机制要跨消息记住"这条在等什么"，
+# 命中 ARCHITECTURE §十一 判据 1，并贡献了两次真实故障。
 
 # daemon 依赖的 telegram 接口必须存在（改了 telegram 会在这里断掉）
 for _fn in ("send", "send_with_buttons", "answer_callback", "get_updates",
@@ -1799,135 +1777,74 @@ for _fn in ("send", "send_with_buttons", "answer_callback", "get_updates",
     check(f"telegram 提供 {_fn}", hasattr(_tg, _fn))
 
 
-section("v4 整链：发消息 → 按钮 → 补时间（用户实测的那条路）")
+section("v4 整链：发消息 → 符号路由 → 写进对应 App")
 
-# ⚠️ 这个 bug **活着到了用户手上**，原因就是自检只测到 intake 那一层：
-#   intake 层单测全绿（"给 pending_text 就能合并"），
-#   但 daemon 层"点按钮后把待补充项清掉了"，于是补时间时没有上一条可接。
-#   实测链条：发「测试Apple- agent稳定性」→ 判不准 → 点「日程」
-#   → 追问"再说一次带上时间" → 回「上午九点」
-#   → **标题变成「上午九点」、时间落在今天 09:00（已过去）、原标题丢失**。
+# ⚠️ 这一段取代了原来的两段按钮整链测试。
 #
-# 教训：**跨模块的接线本身也要测**。每一层都对，接起来仍可能是错的。
+# 原来那两段存在的理由很正当：**跨模块的接线本身要测** ——
+# 当时 intake 层单测全绿，而 daemon 层把待补充状态清了，
+# 于是"补时间"接不上，bug 一路活到用户手上。
+#
+# 但那两段测的是**按钮流程**，而按钮机制已整体删除。
+# 现在链路短得多：daemon 收到 → routes 认符号 → intake 写入。
+# 这里就把这条新链路端到端走一遍（假写入端 + 屏蔽 journal + 临时目录）。
+#
+# 顺带记住那个教训：**每一层都对，接起来仍可能是错的** ——
+# 所以这一段不测单层，只测"从消息进来、到写出去"。
 _d = _fresh_journal()
 _dm_dir2 = _P2(_tf2.mkdtemp())
-_saved = (_dm.PENDING_DIR, _dm._make_intake, _dm.tg.send,
-          _dm.tg.send_with_buttons, _dm.tg.answer_callback)
-_dm.PENDING_DIR = _dm_dir2 / "pending"
+_saved = (_dm._make_intake, _dm.tg.send)
 try:
     _sent = []
-    _mids = [1000]
-
-    def _swb(_t, _kb):
-        _mids[0] += 1
-        _sent.append(_t)
-        return {"message_id": _mids[0]}
-
     _wrote = []
-    _sinks = _FakeSinks()
 
-    def _make(_sinks=_sinks, _wrote=_wrote):
+    def _make(_wrote=_wrote):
         return _it.Intake(
-            add_todo=lambda t, w=None: (_wrote.append(("todo", t)), "T1")[1],
-            add_event=lambda s, a, b, **k: (_wrote.append(("event", s, a)), "E1")[1],
+            add_todo=lambda t, w=None: (_wrote.append(("todo", t, w)), "T1")[1],
+            add_event=lambda s, a, b, **k: (
+                _wrote.append(("event", s, a, k.get("recurrence"))), "E1")[1],
             add_memo=lambda t: (_wrote.append(("memo", t)), "M1")[1],
             testing=True)
 
     _dm._make_intake = _make
     _dm.tg.send = lambda t: _sent.append(t)
-    _dm.tg.send_with_buttons = _swb
-    _dm.tg.answer_callback = lambda *a, **k: None
 
-    # ① 用户发消息 → 判不准 → 存下待补充 + 发按钮
-    _dm.handle_message("测试Apple- agent稳定性", 84, "chat")
-    check("整链①：判不准时存下待补充项",
-          _dm.load_pending() == "测试Apple- agent稳定性", str(_dm.load_pending()))
-    check("整链①：发出了确认按钮", _dm.load_pending() is not None)
+    # ① 裸输入 → 提醒事项，且回执如实说明去向
+    _dm.handle_message("交电费", 1, "chat")
+    check("整链：裸输入写提醒事项", _wrote[-1][0] == "todo", str(_wrote))
+    check("整链：回执说明去向", "提醒事项" in _sent[-1], _sent[-1])
 
-    # ② 点「日程」按钮 → 缺时间 → 追问，且**待补充项必须还在**
-    _dm._handle_callback("e:84", "cb1", "chat")
-    check("整链②：缺时间时不写入日历", not _wrote, str(_wrote))
-    check("整链②：追问后待补充项仍在（这是曾经漏掉的一环）",
-          _dm.load_pending() == "测试Apple- agent稳定性", str(_dm.load_pending()))
+    # ② # → 备忘录，且**符号不进正文**
+    _dm.handle_message("# 学原理比学语法重要", 2, "chat")
+    check("整链：# 写备忘录", _wrote[-1][0] == "memo", str(_wrote))
+    check("整链：# 已被剥掉（正文不带符号）",
+          _wrote[-1][1] == "学原理比学语法重要", repr(_wrote[-1][1]))
+    check("整链：回执说明去向", "备忘录" in _sent[-1], _sent[-1])
 
-    # ③ 回一句纯时间 → 必须接到上一条上，标题是原文
-    _dm.handle_message("上午九点", 89, "chat")
-    check("整链③：写了一条且只写一条", len(_wrote) == 1, str(_wrote))
-    check("整链③：写的是日历端", _wrote[0][0] == "event", str(_wrote))
-    check("整链③：标题是原来的事由（不是「上午九点」）",
-          _wrote[0][1] == "测试Apple- agent稳定性", repr(_wrote[0][1]))
-    check("整链③：回执说明接在上一条", "接在你上一条上" in _sent[-1])
-    check("整链③：用掉后槽位清空", _dm.load_pending() is None,
-          str(_dm.load_pending()))
+    # ③ @ → 日历，标题剥掉时间词、时间算准
+    _dm.handle_message("@明天上午九点 测试 Apple agent 稳定性", 3, "chat")
+    check("整链：@ 写日历", _wrote[-1][0] == "event", str(_wrote))
+    check("整链：@ 的标题剥掉了时间词",
+          _wrote[-1][1] == "测试 Apple agent 稳定性", repr(_wrote[-1][1]))
+    check("整链：@ 的时间算对", _wrote[-1][2] == _dt2.datetime(2026, 10, 4, 9, 0),
+          str(_wrote[-1][2]))
+    check("整链：回执说明去向", "日历" in _sent[-1], _sent[-1])
+
+    # ④ 缺信息的 @ → **报错且一个字都不写**
+    _n_before = len(_wrote)
+    _dm.handle_message("@上午九点", 4, "chat")
+    check("整链：@ 缺事由时零写入", len(_wrote) == _n_before, str(_wrote[_n_before:]))
+    check("整链：@ 缺事由时如实报错", "❌" in _sent[-1], _sent[-1])
+
+    # ⑤ 老按钮被点一下 → 忽略，且不影响后续消息
+    #    （历史遗留的按钮消息还在聊天记录里，点了不该让这批更新反复重放）
+    _n_before = len(_wrote)
+    _dm.handle_message("交电费", 5, "chat")
+    check("整链：报错后仍能正常收下一条", len(_wrote) == _n_before + 1, str(_wrote))
 finally:
-    (_dm.PENDING_DIR, _dm._make_intake, _dm.tg.send,
-     _dm.tg.send_with_buttons, _dm.tg.answer_callback) = _saved
+    (_dm._make_intake, _dm.tg.send) = _saved
     _sh2.rmtree(_d, ignore_errors=True)
     _sh2.rmtree(_dm_dir2, ignore_errors=True)
-
-
-section("v4 整链：追问之后按钮仍然点得动")
-
-# ⚠️ 这一段是 subagent 审出来的 bug：追问那一步把槽位挪到了**追问消息号**，
-# 按钮却仍绑**原消息号** —— 两组按钮的 callback_data 全对不上槽位，
-# 点任何一个都只回"这条已经处理过了（或已过期）"，
-# 而追问自己的文案还在说"（要改成待办/备忘，点下面的按钮）"。
-#
-# 只有"直接发一句时间"（文本路径）是通的 —— 所以上一条整链测试
-# **测不到**它：那条路径没有点按钮。又一次说明"每一层都对，接起来仍可能错"。
-_d = _fresh_journal()
-_dm_dir3 = _P2(_tf2.mkdtemp())
-_saved3 = (_dm.PENDING_DIR, _dm._make_intake, _dm.tg.send,
-           _dm.tg.send_with_buttons, _dm.tg.answer_callback)
-_dm.PENDING_DIR = _dm_dir3 / "pending"
-try:
-    _sent3 = []
-    _mids3 = [2000]
-    _kb_seen = []
-
-    def _swb3(_t, _kb):
-        _mids3[0] += 1
-        _sent3.append(_t)
-        _kb_seen.append(_kb)
-        return {"message_id": _mids3[0]}
-
-    _wrote3 = []
-    _dm._make_intake = lambda: _it.Intake(
-        add_todo=lambda t, w=None: (_wrote3.append(("todo", t)), "T1")[1],
-        add_event=lambda s, a, b, **k: (_wrote3.append(("event", s, a)), "E1")[1],
-        add_memo=lambda t: (_wrote3.append(("memo", t)), "M1")[1],
-        testing=True)
-    _dm.tg.send = lambda t: _sent3.append(t)
-    _dm.tg.send_with_buttons = _swb3
-    _dm.tg.answer_callback = lambda *a, **k: None
-
-    # ① 判不准 → 按钮
-    _dm.handle_message("测试Apple- agent稳定性", 84, "chat")
-    # ② 点「日程」→ 缺时间 → 追问 + 槽位仍在
-    _dm._handle_callback("e:84", "cb1", "chat")
-    check("追问后：槽位仍在等补充", _dm.load_pending() == "测试Apple- agent稳定性")
-    check("追问后：又发了一组按钮给用户", len(_kb_seen) >= 2,
-          f"共发了 {len(_kb_seen)} 组按钮")
-
-    # ③ **点追问那组按钮** —— callback_data 里的消息号与槽位里的并不相同
-    _slot_mid = _dm._load_pending_record().get("msg_id")
-    _btn_mid = int(_kb_seen[-1][0][0][1].split(":")[1])
-    check("（前提）按钮消息号与槽位消息号确实不同 —— 正是当初撞墙的条件",
-          _btn_mid != _slot_mid,
-          f"按钮={_btn_mid} 槽位={_slot_mid}")
-    _dm._handle_callback(f"t:{_btn_mid}", "cb2", "chat")
-    check("追问后的按钮点得动（不再回'已经处理过了'）",
-          "已经处理过了" not in _sent3[-1], _sent3[-1])
-    check("追问后的按钮真的写入了",
-          _wrote3 and _wrote3[-1][0] == "todo", str(_wrote3))
-    check("追问后的按钮用的是原来那条的原文",
-          _wrote3[-1][1] == "测试Apple- agent稳定性", repr(_wrote3[-1][1]))
-    check("用掉后槽位清空", _dm.load_pending() is None)
-finally:
-    (_dm.PENDING_DIR, _dm._make_intake, _dm.tg.send,
-     _dm.tg.send_with_buttons, _dm.tg.answer_callback) = _saved3
-    _sh2.rmtree(_d, ignore_errors=True)
-    _sh2.rmtree(_dm_dir3, ignore_errors=True)
 
 
 check("真实自检用分钟精度断言（与 applecal.add 一致）",
@@ -2290,15 +2207,16 @@ try:
     check("离线模式：有回执", _oout.ok and "待办" in _oout.reply)
     check("离线模式：记录会写到哪里",
           bool(getattr(_oit, "_offline_calls", [])))
-    _oout2 = _oit.handle("周五下午两点项目周会", _B)
+    _oout2 = _oit.handle("@周五下午两点 项目周会", _B)
     _ocalls = getattr(_oit, "_offline_calls", [])
     check("离线模式：日程指向日历",
           any("日历" in c for c in _ocalls), str(_ocalls))
-    # 判不出的情况照样要问，且不写
+    # 缺硬信息的情况照样要**如实报错**（不再"问一次"），且不写
     _n_before = len(_ocalls)
-    _oout3 = _oit.handle("帮我看下那个表", _B)
-    check("离线模式：判不出仍要求确认", _oout3.needs_ask)
-    check("离线模式：判不出不写入",
+    _oout3 = _oit.handle("@例会", _B)
+    check("离线模式：缺时间时如实报错", _oout3.ok is False
+          and _oout3.reply.startswith("❌"), _oout3.reply)
+    check("离线模式：缺时间时不写入",
           len(getattr(_oit, "_offline_calls", [])) == _n_before)
 finally:
     _dm._OFFLINE = False
@@ -2441,7 +2359,7 @@ section("v4 模块的提示指向真实存在的命令")
 # 踩到过：reminders.py 与 memo.py 的错误提示让用户"先运行 deploy/init.sh"——
 # 那是 v1 的初始化入口。**提示指向不存在的命令会让人走进死路**，
 # 而且只在出错时才看到，最难排查。
-_v4_mods = ("journal", "memo", "applecal", "classify", "whens",
+_v4_mods = ("journal", "memo", "applecal", "whens", "kinds", "routes",
             "intake", "daemon", "report", "reminders")
 _stale = []
 for _m in _v4_mods:

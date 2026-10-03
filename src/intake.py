@@ -1,13 +1,22 @@
 #!/usr/bin/env python3
 """
-收件：把一句自然语言分派到对应的 Apple 应用。
+收件：把一条输入写进对应的 Apple 应用。
 
 ## 这一步做三件事
 
-    ① 分类（classify.py）：待办 / 日程 / 备忘
-    ② 分派到唯一归属：
+    ① 路由（routes.py）：**按行首符号**决定归属 —— 不猜
+    ② 写入唯一归属：
          待办 → 提醒事项   日程 → 日历   备忘 → 备忘录（追加）
     ③ 记 journal（传感器读数）+ 回执文案
+
+**"判断"不在这里，也不在代码里** —— 类型由你写的符号声明
+（见 [`docs/SYMBOL-SCHEME.md`](../docs/SYMBOL-SCHEME.md)）。
+本模块只负责"把已经定型的条目写进去"。
+
+> 2026-10-03 之前，这里调用 `classify.py` 从自然语言**推断**类型
+> （约 700 字词表 + 405 行规则）。那天 4 次真实交互错了 3 次，
+> 于是整条推断链路被删除：**猜错会静默写错 App，
+> 而声明的错误是看得见的**。
 
 ## 三个写入端是**可注入**的
 
@@ -26,7 +35,7 @@
 
   · 只"增"，不删不改任何 Apple 应用里的东西
   · 写完**不读回**做判断（只在 journal 记"我提交过什么"）
-  · 判不出来时问一次（`Confidence.ASK`），**绝不静默丢弃**
+  · 失败**如实报错**，绝不静默丢弃（也不追问 —— 见 routes.py 的说明）
 """
 
 from __future__ import annotations
@@ -36,9 +45,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Protocol
 
-import classify
 import journal
-from classify import Classified, Confidence, Kind
+import routes
+from kinds import Item, Kind
+from routes import RouteError
 
 # ── 写入端协议
 #
@@ -87,10 +97,13 @@ class Outcome:
     text: str = ""
     reply: str = ""
     ref_id: str = ""                  # 提醒事项 id / 日历 uid / 笔记 id
-    needs_ask: bool = False           # 需要用户确认是哪一类
-    candidates: list[Kind] = field(default_factory=list)
     error: str = ""
     when_text: str = ""               # 日程的时间描述
+
+    # 注：这里曾有 `needs_ask` / `candidates` 两个字段 ——
+    # "判不出来就问一次"。追问机制已整体删除（2026-10-03 裁决）：
+    # 它要跨消息记住"在等什么"，命中 ARCHITECTURE §十一 判据 1。
+    # 类型现在由符号声明，判不出来的情况不存在。
 
     @property
     def should_record(self) -> bool:
@@ -116,16 +129,16 @@ _KIND_PLACE = {
 }
 
 
-def _reply_ok(c: Classified, ref_id: str) -> str:
-    label = _KIND_LABEL[c.kind]
-    place = _KIND_PLACE[c.kind]
-    line = f"✅ 已记下（{label}）：{c.text}"
+def _reply_ok(it: Item, ref_id: str) -> str:
+    label = _KIND_LABEL[it.kind]
+    place = _KIND_PLACE[it.kind]
+    line = f"✅ 已记下（{label}）：{it.text}"
     detail = []
-    if c.kind is Kind.EVENT and c.when is not None:
+    if it.kind is Kind.EVENT and it.when is not None:
         import whens
-        detail.append(whens.format_when(c.when))
-    if c.recurrence:
-        detail.append(_recurrence_text(c.recurrence))
+        detail.append(whens.format_when(it.when))
+    if it.recurrence:
+        detail.append(_recurrence_text(it.recurrence))
     if detail:
         line += "\n　　" + " · ".join(detail)
     line += f"\n　　→ 在「{place}」里"
@@ -147,26 +160,6 @@ def _recurrence_text(rrule: str) -> str:
         dom = rrule.split("BYMONTHDAY=", 1)[1].split(";")[0] if "BYMONTHDAY=" in rrule else ""
         return f"每月{dom}日" if dom else "每月"
     return rrule
-
-
-def _reply_ask(c: Classified) -> str:
-    return (f"🤔 「{c.raw}」我不确定该怎么记 —— 它是哪一种？\n"
-            f"　　（选错也没关系，你在对应 App 里改就行）")
-
-
-def _is_time_only(text: str, when) -> bool:
-    """
-    这句是不是**光秃秃一个时间**（"上午九点"、"明天下午两点"）？
-
-    判据委托给 `whens.is_bare_time` —— 时间词汇表在那边，
-    判据也必须在那边，否则就得复制一份正则（这个项目反复踩的坑）。
-
-    为什么需要它：用户被追问"日程没写时间"时，最自然的回答就是
-    "上午九点"。这种句子**没有内容**，若当成独立一条日程建出来，
-    标题会变成「上午九点」，原来的事由丢掉 —— 实测踩到过。
-    """
-    import whens
-    return whens.is_bare_time(text)
 
 
 # ── 主流程
@@ -218,19 +211,15 @@ class Intake:
     # ── 入口
 
     def handle(self, text: str, base: dt.date | None = None,
-               msg_id: int | None = None,
-               pending_text: str | None = None) -> Outcome:
+               msg_id: int | None = None) -> Outcome:
         """
         处理一句输入。**永不抛异常** —— 失败也返回 Outcome，
         因为收件是常驻进程的主路径，崩一次就漏一条消息。
 
-        `pending_text`：**上一条还在等用户补充的内容**（若有）。
-        只在一种情况下用到：本条输入只是光秃秃一个时间（"上午九点"），
-        而那正是用户在回答"日程没写时间"的追问 —— 这时要把它接到
-        上一条上，而不是拿时间当标题新建一条日程。
-
-        不引入新状态：它就是 pending 机制里本来就存着的那份原文，
-        由调用方（daemon）显式传进来。
+        ⚠️ 这里**没有** `pending_text` 参数了。它曾用于"用户回答追问、
+        要接到上一条上"—— 而那套追问机制已整体删除（2026-10-03 裁决）：
+        追问要跨消息记住"在等什么"，命中 `ARCHITECTURE.md` §十一 判据 1。
+        现在缺什么就带符号重发一条完整的。
         """
         raw = (text or "").strip()
         self._journal("input", text=raw, source="telegram", msg_id=msg_id)
@@ -238,139 +227,76 @@ class Intake:
         if not raw:
             return Outcome(ok=False, reply="（空消息，已忽略）", error="empty")
 
+        # ① 路由：按符号决定归属。**不猜** —— 判据是符号，不是语义。
         try:
-            c = classify.classify(raw, base)
+            it = routes.route(raw, base)
+        except RouteError as e:
+            # 载荷有硬问题（日程没时间/只有时间/只有符号）。
+            # 如实报错并**不写入** —— 不退回别的类型、不猜一个时间。
+            return self._fail(raw, str(e))
         except Exception as e:  # noqa: BLE001
-            return self._fail(raw, f"分类出错：{e}")
+            return self._fail(raw, f"路由出错：{e}")
 
-        if c is None:
-            return Outcome(ok=False, reply="（空消息，已忽略）", error="empty")
-
-        if c.needs_ask:
-            return Outcome(ok=False, kind=c.kind, text=c.text,
-                           reply=_reply_ask(c), needs_ask=True,
-                           candidates=list(c.candidates))
-
+        # ② 写入
         try:
-            if c.kind is Kind.TODO:
-                return self._do_todo(c)
-            if c.kind is Kind.EVENT:
-                return self._do_event(c, pending_text)
-            return self._do_memo(c)
+            if it.kind is Kind.TODO:
+                return self._do_todo(it)
+            if it.kind is Kind.EVENT:
+                return self._do_event(it)
+            return self._do_memo(it)
         except Exception as e:  # noqa: BLE001
-            return self._fail(c.text, f"{_KIND_LABEL[c.kind]}写入失败：{e}",
-                              kind=c.kind)
+            return self._fail(it.text, f"{_KIND_LABEL[it.kind]}写入失败：{e}",
+                              kind=it.kind)
 
-    # ── 三条分派路径
+    # ── 三条写入路径
 
-    def _do_todo(self, c: Classified) -> Outcome:
+    def _do_todo(self, it: Item) -> Outcome:
         # 待办可以带时间（"明天交电费"），但**归属仍是提醒事项** ——
         # 时间不改变归属，只是"什么时候做"的提示。
         #
         # 刻意**不设到期日**：给每条待办都设 due 会制造假紧迫感
         # （到期弹通知、变红），而用户要的是"记下来别忘了"，不是催命。
         # 时间由提醒事项的备注携带（见 _real_add_todo）。
-        #
-        # 注：这个 when 是 classify 特意保留的。曾经 classify 在待办分支
-        # 把它丢掉，导致"明天"这类信息白解析 —— 所以那里改过了。
-        due = c.when.start if (c.when and c.when.has_date) else None
-        ref = self.add_todo(c.text, due)
-        self._journal("todo_added", text=c.text, reminder_id=ref, ok=True)
-        return Outcome(ok=True, kind=Kind.TODO, text=c.text,
-                       reply=_reply_ok(c, ref), ref_id=ref)
+        due = it.when.start if (it.when and it.when.has_date) else None
+        ref = self.add_todo(it.text, due)
+        self._journal("todo_added", text=it.text, reminder_id=ref, ok=True)
+        return Outcome(ok=True, kind=Kind.TODO, text=it.text,
+                       reply=_reply_ok(it, ref), ref_id=ref)
 
-    def _do_event(self, c: Classified,
-                  pending_text: str | None = None) -> Outcome:
-        if c.when is None:
-            # 日程必须有时间。分类器说它是日程却没解析出时间
-            # （比如只说了"例会"）→ 落到"问一次"，而不是瞎猜一个时间。
-            #
-            # ⚠️ 追问的措辞必须说清**回什么、怎么回**。
-            # 实测踩到：原来只说"再说一次带上时间？"，用户就回了个
-            # "上午九点" —— 那是一条只有时间、没有内容的消息，
-            # 于是被当成**新的一条日程**建了出来，标题就是「上午九点」，
-            # 原标题丢了。追问没告诉用户"要连标题一起说"，
-            # 而系统当时也确实接不住"只补时间"这种回法。
-            # 现在两种回法都能接住（见下面的合并分支），措辞也写明白了。
-            c2 = Classified(Kind.EVENT, Confidence.ASK, c.text, c.raw,
-                            reason="是日程但没写时间",
-                            candidates=[Kind.TODO, Kind.EVENT, Kind.MEMO])
-            return Outcome(ok=False, kind=Kind.EVENT, text=c.text,
-                           reply=(f"🤔 「{c.raw}」像是日程，但没写时间。\n"
-                                  f"　　回一句时间就行（例：上午九点）——\n"
-                                  f"　　我会把它接到这条上，不会另建一条。\n"
-                                  f"　　（要改成待办/备忘，点下面的按钮）"),
-                           needs_ask=True, candidates=list(c2.candidates))
-
+    def _do_event(self, it: Item) -> Outcome:
+        """
+        写日程。时间与标题都已在 `routes.route()` 里定好 ——
+        这里不再做任何判断（包括"已过时刻顺延"，那条也在路由层）。
+        """
         import whens
 
-        # ── 合并：本条只是光秃秃一个时间 → 它是用户在补上一条的时间
-        #
-        # 判据：把命中的日期/时刻原文剥掉后什么都不剩。
-        # 配合 pending_text（上一条的原文）才能合并 —— 没有上一条时
-        # 不能瞎接，仍按"独立一条日程"处理。
-        title = c.text
-        merged_from = None
-        if pending_text and _is_time_only(c.text, c.when):
-            title = pending_text
-            merged_from = pending_text
+        # `it.when` 不可能是 None：routes 保证日程必有时间，否则抛 RouteError。
+        # 但仍显式拦一道，避免将来有人在 routes 里放松了约束而这里静默写空。
+        if it.when is None:
+            return self._fail(it.text, "日程没有时间（路由层应已拦下）",
+                              kind=Kind.EVENT)
 
-        # ── 只说了时刻、而该时刻今天已经过去 → 顺延到明天
-        #
-        # whens.py 是纯函数，刻意不读时钟（那样没法离线测），
-        # 并在注释里写明"由调用方决定（它本来就知道'现在'）"。
-        # 调用方就是我 —— 这里补上，否则会出现"下午两点开会"在晚上说、
-        # 日程却落在**今天下午两点（已经过去）**这种错。
-        start, end = c.when.start, c.when.end
-        rolled = False
-        if not c.when.has_date and start < dt.datetime.now():
-            shift = dt.timedelta(days=1)
-            start, end = start + shift, end + shift
-            rolled = True
-
-        ref = self.add_event(title, start, end,
-                             recurrence=c.recurrence, allday=c.when.all_day)
-        self._journal("event_added", summary=title,
-                      start=start.isoformat(), end=end.isoformat(),
+        ref = self.add_event(it.text, it.when.start, it.when.end,
+                             recurrence=it.recurrence, allday=it.when.all_day)
+        self._journal("event_added", summary=it.text,
+                      start=it.when.start.isoformat(),
+                      end=it.when.end.isoformat(),
                       calendar="", ok=True,
-                      **({"merged_from": merged_from} if merged_from else {}),
-                      **({"rolled_to_next_day": True} if rolled else {}))
+                      **({"rolled_to_next_day": True} if it.rolled else {}))
 
-        cc = c if title == c.text else Classified(
-            c.kind, c.confidence, title, c.raw, reason=c.reason, when=c.when)
-
-        # ⚠️ 回执必须用**顺延后**的时间来渲染。
-        # 实测踩到：只把 start/end 挪到明天，回执却仍按原 when 渲染，
-        # 于是同一段回执里"10月3日 周六 09:00"和"我放到了明天"并存 ——
-        # 自相矛盾的回执比不说还糟（用户不知道该信哪个）。
-        when_shown = c.when
-        if rolled:
-            when_shown = whens.When(
-                start=start, end=end, all_day=c.when.all_day,
-                has_date=True,          # 顺延之后**是**有明确日期的
-                has_time=c.when.has_time,
-                date_text="", time_text=c.when.time_text)
-        cc.when = when_shown
-
-        reply = _reply_ok(cc, ref)
-        note = []
-        if merged_from:
-            note.append("（接在你上一条上，没有另建）")
-        if rolled:
-            note.append("（这个时间今天已经过了，我放到了明天 —— "
-                        "要改就去日历里改）")
-        if note:
-            reply += "\n　　" + "\n　　".join(note)
-
-        return Outcome(ok=True, kind=Kind.EVENT, text=title,
+        reply = _reply_ok(it, ref)
+        if it.rolled:
+            reply += ("\n　　（这个时间今天已经过了，我放到了明天 —— "
+                      "要改就去日历里改）")
+        return Outcome(ok=True, kind=Kind.EVENT, text=it.text,
                        reply=reply, ref_id=ref,
-                       when_text=whens.format_when(when_shown))
+                       when_text=whens.format_when(it.when))
 
-    def _do_memo(self, c: Classified) -> Outcome:
-        ref = self.add_memo(c.text)
-        self._journal("memo_added", text=c.text, memo_id=ref, ok=True)
-        return Outcome(ok=True, kind=Kind.MEMO, text=c.text,
-                       reply=_reply_ok(c, ref), ref_id=ref)
+    def _do_memo(self, it: Item) -> Outcome:
+        ref = self.add_memo(it.text)
+        self._journal("memo_added", text=it.text, memo_id=ref, ok=True)
+        return Outcome(ok=True, kind=Kind.MEMO, text=it.text,
+                       reply=_reply_ok(it, ref), ref_id=ref)
 
     # ── 辅助
 
@@ -474,8 +400,6 @@ def main() -> int:
         print(f"输入：{t}")
         out = it.handle(t, base)
         print(out.reply)
-        if out.needs_ask:
-            print(f"　　（候选：{' / '.join(k.value for k in out.candidates)}）")
 
     if args.dry:
         print()
