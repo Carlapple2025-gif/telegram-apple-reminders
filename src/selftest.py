@@ -1565,6 +1565,34 @@ check("journal 有 submitted_memos（report 防遗忘要用）",
       hasattr(_jr, "submitted_memos"))
 
 
+section("v4 守护的崩溃循环防护")
+
+# ⚠️ 这是 KeepAlive 会放大的风险：守护是常驻 + 自动重启的，
+# 所以"启动时某一步失败就退出"会变成**无限崩溃循环** ——
+# 每 ThrottleInterval 秒重启一次，日志刷满，而且永远恢复不了
+# （每次都死在同一步）。
+#
+# 实测踩到：启动时若 Telegram 不可用，daemon 直接 return 2 退出。
+_dm_src = (SRC / "daemon.py").read_text(encoding="utf-8")
+
+# 启动路径上不该有"拉取失败就 return"的写法
+_start_block = _dm_src[_dm_src.index("    offset = load_offset()"):
+                       _dm_src.index("    while _running:")]
+check("启动时拉取失败不退出", "return 2" not in _start_block,
+      "启动路径里有 return 2 → KeepAlive 会崩溃循环")
+check("启动失败改为交给主循环重试", "交给主循环重试" in _start_block)
+
+# 主循环必须能吞掉单次拉取失败（而不是让异常冒出去终止进程）
+_run_once = _dm_src[_dm_src.index("def run_once("):_dm_src.index("def _stop(")]
+check("run_once 捕获 Telegram 错误", "except tg.TelegramError" in _run_once)
+check("run_once 失败后返回 offset（不抛）", "return offset" in _run_once)
+
+# 日志行必须单行 —— 长时间断网时多行提示会刷满日志
+check("守护日志做了压平/截断", "_trunc" in _dm_src)
+check("重试日志只取首行",
+      "splitlines()[0]" in _dm_src or "_trunc" in _run_once)
+
+
 section("v4 守护的离线模式")
 
 # 离线模式让"没有授权"时也能看到整条链路怎么工作（回执文案、分类结果、

@@ -252,7 +252,9 @@ def run_once(offset: int | None = None, wait: int = 25) -> int | None:
     try:
         ups = tg.get_updates(offset=offset, limit=20, timeout=wait)
     except tg.TelegramError as e:
-        _log(f"拉取失败：{e}")
+        # 只记第一行 —— TelegramError 的文案带换行提示，长时间断网时
+        # 每次重试都打一遍会刷满日志（实测：断网 12 秒就打了 2 遍完整提示）。
+        _log(f"拉取失败：{str(e).splitlines()[0][:70]}")
         time.sleep(5)
         return offset
 
@@ -363,14 +365,18 @@ def main() -> int:
     offset = load_offset()
     if offset is None:
         _log("首次启动：先消费历史更新，避免把旧消息当成新输入")
+        # ⚠️ 这里**不能退出**。launchd 的 KeepAlive 会每 ThrottleInterval 秒
+        # 重启一次，于是"启动时 Telegram 不可用"会变成**无限崩溃循环** ——
+        # 日志刷满、而且永远恢复不了（每次都死在同一步）。
+        # 正确做法：记一笔、把 offset 留空，让主循环去重试。
         try:
             ups = tg.get_updates(limit=100)
+            offset = (max(u.get("update_id", 0) for u in ups) + 1) if ups else None
+            if offset:
+                save_offset(offset)
         except tg.TelegramError as e:
-            _log(f"拉取失败：{e}")
-            return 2
-        offset = (max(u.get("update_id", 0) for u in ups) + 1) if ups else None
-        if offset:
-            save_offset(offset)
+            _log(f"首次定基准失败（{_trunc(str(e))}）—— 交给主循环重试")
+            offset = None
     _log(f"启动，offset = {offset}")
 
     try:
@@ -379,7 +385,7 @@ def main() -> int:
                 "　　「周五下午两点项目周会」→ 日历\n"
                 "　　「想起一件事，…」→ 备忘录")
     except tg.TelegramError as e:
-        _log(f"启动通知发送失败（不影响运行）：{e}")
+        _log(f"启动通知发送失败（不影响运行）：{_trunc(str(e))}")
 
     while _running:
         # --once 用短轮询：验证时不该干等长轮询的超时
