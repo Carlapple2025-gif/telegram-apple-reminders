@@ -655,7 +655,56 @@ check(f"{len(_as_templates)} 个 AppleScript 模板语法正确",
 
 # ── 18. 系统 Python 3.9 兼容性
 
-print("\n── 16. 系统 Python 兼容性 ──")
+print("\n── 16. AppleScript 的 whose 子句 ──")
+
+# 反复踩到的坑：`whose id "..."` 缺 `is` 会**编译失败**（-2741），
+# 报错只说"期望逗号但找到引号"，完全看不出是缺 is —— 骗了我好几次。
+#
+# 检查方式的选择过程（值得记下）：
+#   ① 先试"正则匹配 whose <属性> 后跟引号" → 拦不住：真实写法是
+#      f-string，`is` 后面跟的是 {_as_literal(...)}，不是引号。
+#   ② 再试"从源码求值出 AppleScript 再编译" → 有大量**假阳性**
+#      （mock 求值产生残缺片段）。有假阳性的检查比没有检查更糟：
+#      会被忽略，或被迫弱化到无效。
+#   ③ 最终用**结构检查**：在真实的 f-string 里，`is` 是明文写着的，
+#      所以只要确认每个 whose 子句附近都有 is/contains 即可，简单且准确。
+import re as _re5  # noqa: E402
+
+_WHOSE_OK = _re5.compile(r"whose\s+\w+\s+(is|contains|is not)\b")
+_hits5: list[str] = []
+_scanned5 = 0
+for _f in list((ROOT / "src").glob("*.py")) + list((ROOT / "deploy").glob("*.sh")):
+    if _f.name == "selftest.py":
+        continue
+    for _ln, _line in enumerate(_f.read_text(encoding="utf-8").splitlines(), 1):
+        _stripped = _line.lstrip()
+        # 跳过注释：注释里会引用反例（"whose id \"...\""），误报过
+        if _stripped.startswith("#"):
+            continue
+        for _m in _re5.finditer(r"whose\s+\w+", _line):
+            _scanned5 += 1
+            _tail = _line[_m.start():_m.start() + 60]
+            if not _WHOSE_OK.search(_tail):
+                _hits5.append(f"{_f.name}:{_ln}  {_tail.strip()[:50]}")
+
+check(f"{_scanned5} 个 whose 子句都带 is/contains",
+      not _hits5 and _scanned5 > 5,
+      "；".join(_hits5[:3]) if _hits5 else f"只扫描到 {_scanned5} 个，可能扫描失败")
+
+# 不能出现重复的 is（批量替换时误伤过，产生 "is is"）
+_dup5: list[str] = []
+for _f in list((ROOT / "src").glob("*.py")) + list((ROOT / "deploy").glob("*.sh")):
+    if _f.name == "selftest.py":
+        continue
+    for _ln, _line in enumerate(_f.read_text(encoding="utf-8").splitlines(), 1):
+        if _line.lstrip().startswith("#"):
+            continue
+        if " is is " in _line:
+            _dup5.append(f"{_f.name}:{_ln}")
+check("代码里没有重复的 is", not _dup5, "；".join(_dup5[:3]))
+
+
+print("\n── 17. 系统 Python 兼容性 ──")
 
 # 为什么单独查这个：launchd 任务用的是 **/usr/bin/python3（3.9）**，
 # 而我平时用自带运行时（3.12）。若代码用了运行时求值的类型标注
@@ -689,7 +738,7 @@ else:
 
 # ── 11. 密钥不进版本库
 
-print("\n── 17. 密钥保护检查 ──")
+print("\n── 18. 密钥保护检查 ──")
 
 # 为什么值得单独查：Telegram token 一旦被提交，等于把 bot 交给别人。
 # 加 telegram.py 时就发现 .gitignore 里**没有 .env** —— 而下一步就要往
@@ -707,7 +756,7 @@ check(".env.example 可被提交（它是模板）", _r.returncode != 0)
 
 # ── 18. shell 脚本静态检查：bash 3.2 的全角字符陷阱
 
-print("\n── 18. shell 脚本检查 ──")
+print("\n── 19. shell 脚本检查 ──")
 
 # macOS 自带 bash 3.2 会把**全角字符的字节**当成变量名的一部分。
 # 于是 `echo "「$TARGET」"` 会去找名为 `TARGET」` 的变量，报

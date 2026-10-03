@@ -53,7 +53,7 @@ fi
 
 # 先确认文件夹有效
 CHECK=$(run "tell application \"Notes\"
-  set hits to (every folder whose id \"$FOLDER_ID\")
+  set hits to (every folder whose id is \"$FOLDER_ID\")
   if (count of hits) is 0 then return \"MISSING\"
   set f to item 1 of hits
   return (name of f) & \"|\" & (count of notes of f)
