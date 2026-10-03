@@ -1262,6 +1262,83 @@ finally:
     _sh2.rmtree(_d, ignore_errors=True)
 
 
+section("v4 收件守护（daemon，状态持久化）")
+
+_dm = _load(SRC / "daemon.py")
+
+# offset 必须持久化：只存内存的话，进程重启会重新拉到旧消息，
+# **同一条被记两遍**（重复建待办）。这与 v1 的按钮 bug 同源 ——
+# 跨调用的读取位置必须持久。
+_dm_dir = _P2(_tf2.mkdtemp())
+_dm.STATE_FILE = _dm_dir / "state.json"
+_dm.PENDING_DIR = _dm_dir / "pending"
+try:
+    check("初始没有 offset", _dm.load_offset() is None)
+
+    _dm.save_offset(12345)
+    check("offset 可读回", _dm.load_offset() == 12345)
+
+    _dm.save_offset(12399)
+    check("offset 可覆盖", _dm.load_offset() == 12399)
+
+    check("原子写不留 .tmp 残留", not (_dm_dir / "state.tmp").exists())
+
+    # 状态文件损坏不该让守护进程起不来
+    _dm.STATE_FILE.write_text("{坏 JSON", encoding="utf-8")
+    check("损坏的状态文件返回 None 而非崩", _dm.load_offset() is None)
+
+    # 待确认项落盘 → 按钮不依赖内存（进程重启后照样能用）
+    _dm.save_pending(42, "帮我看下那个表")
+    check("待确认项可读回", _dm.load_pending(42) == "帮我看下那个表")
+    check("不存在的待确认项返回 None", _dm.load_pending(999) is None)
+    _dm.clear_pending(42)
+    check("清除后为 None", _dm.load_pending(42) is None)
+    _dm.clear_pending(42)
+    check("重复清除不崩", True)
+finally:
+    _sh2.rmtree(_dm_dir, ignore_errors=True)
+
+# callback_data 有 64 字节硬限制（v1 实测 65 字节 → HTTP 400）
+check("按钮 data 不超 64 字节",
+      all(len(f"{c}:123456789012".encode()) <= _tg.CALLBACK_MAX_BYTES
+          for c in ("t", "e", "m")))
+
+# 程序日志里引用用户内容要截断 —— logs/ 可能被贴出来排查问题
+check("日志截断：短文本不变", _dm._trunc("短") == "短")
+check("日志截断：长文本带省略号",
+      _dm._trunc("很长" * 30).endswith("…"))
+check("日志截断：换行被替换", "\n" not in _dm._trunc("a\nb"))
+
+# 按钮指定类型时必须走同一条分派路径（跳过分类但不跳过校验）
+_d = _fresh_journal()
+try:
+    _f2 = _FakeSinks()
+    _it2 = _it.Intake(add_todo=_f2.todo, add_event=_f2.event, add_memo=_f2.memo)
+    _o = _dm._dispatch_forced(_it2, _cls.Kind.TODO, "帮我看下那个表")
+    check("按钮指定待办 → 写到提醒事项端",
+          _f2.calls and _f2.calls[0][0] == "todo", str(_f2.calls))
+
+    _f3 = _FakeSinks()
+    _it3 = _it.Intake(add_todo=_f3.todo, add_event=_f3.event, add_memo=_f3.memo)
+    _o = _dm._dispatch_forced(_it3, _cls.Kind.MEMO, "帮我看下那个表")
+    check("按钮指定备忘 → 写到备忘录端",
+          _f3.calls and _f3.calls[0][0] == "memo", str(_f3.calls))
+
+    # 日程缺时间仍要求补充 —— 没有时间的日程在日历里没有意义
+    _f4 = _FakeSinks()
+    _it4 = _it.Intake(add_todo=_f4.todo, add_event=_f4.event, add_memo=_f4.memo)
+    _o = _dm._dispatch_forced(_it4, _cls.Kind.EVENT, "开会")
+    check("按钮指定日程但缺时间 → 不写入、要求补充",
+          len(_f4.calls) == 0 and _o.needs_ask)
+finally:
+    _sh2.rmtree(_d, ignore_errors=True)
+
+# daemon 依赖的 telegram 接口必须存在（改了 telegram 会在这里断掉）
+for _fn in ("send", "send_with_buttons", "answer_callback", "get_updates",
+            "load_config"):
+    check(f"telegram 提供 {_fn}", hasattr(_tg, _fn))
+
+
 # ── 汇总
 
 print()
