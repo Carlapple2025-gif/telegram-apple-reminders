@@ -100,6 +100,29 @@ def config_calendar() -> str:
     return (cfg.get("calendar_name") or "").strip()
 
 
+def create_calendar(name: str) -> tuple[str, bool]:
+    """
+    新建一个日历，返回 (名字, 是否新建)。
+
+    同名已存在则直接复用（**不新建第二个**）—— 名字可重复，
+    所以必须自己遍历比对，不能靠 AppleScript 的 whose。
+    """
+    existing = dict(list_calendars())
+    if name in existing:
+        return name, False
+
+    run_applescript(
+        f'tell application "{APP}"\n'
+        f'  make new calendar with properties {{name:{_as_literal(name)}}}\n'
+        '  return "ok"\n'
+        'end tell')
+
+    # 读回确认（防静默失败）
+    if name in dict(list_calendars()):
+        return name, True
+    raise CalendarError(f"新建日历失败（读回时找不到 {name!r}）")
+
+
 def save_calendar_to_config(name: str) -> None:
     cfg: dict = {}
     if CONFIG.is_file():
@@ -341,6 +364,10 @@ def main() -> int:
     p_up.add_argument("--days", type=int, default=7)
     p_up.add_argument("--calendar")
 
+    p_new = sub.add_parser("new", help="新建一个日历并设为目标")
+    p_new.add_argument("name")
+    p_new.add_argument("--apply", action="store_true")
+
     p_set = sub.add_parser("use", help="设置目标日历（写入 config.json）")
     p_set.add_argument("name")
     p_set.add_argument("--apply", action="store_true")
@@ -371,6 +398,19 @@ def main() -> int:
             for e in evs:
                 loc = f"  @{e.location}" if e.location else ""
                 print(f"  · {e.display}{loc}")
+            return 0
+
+        if args.cmd == "new":
+            existing = dict(list_calendars())
+            if args.name in existing:
+                print(f"「{args.name}」已存在，将直接复用（不新建）")
+            if not args.apply:
+                print(f"【干跑】将新建日历「{args.name}」并设为写入目标")
+                return 0
+            _, created = create_calendar(args.name)
+            save_calendar_to_config(args.name)
+            print(f"{'✅ 已新建' if created else '✅ 已复用'}日历「{args.name}」")
+            print(f"   已写入 config.json 的 calendar_name")
             return 0
 
         if args.cmd == "use":

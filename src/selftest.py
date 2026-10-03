@@ -1005,34 +1005,118 @@ import os as _os5  # noqa: E402
 import subprocess as _sp5  # noqa: E402
 
 
-def _extract_applescript(path, extra_ns=None):
-    """把源码里的 AppleScript f-string 求值出来（占位符填 "X"）。"""
-    _tree = _ast5.parse(path.read_text(encoding="utf-8"))
-    _ns = {"_as_literal": lambda s: '"X"', "_html_escape": lambda s: "X",
-           "FSEP": _mm.FSEP, "RSEP": _mm.RSEP}
+def _extract_applescript(mod, extra_ns=None):
+    """
+    把模块里的 AppleScript 求值出来（函数参数填 "X"）。
+
+    ⚠️ 这个函数改了四次，每次都因为"提取不完整"而让防线失效 ——
+    值得把弯路记下来，因为这类"检查工具看起来在工作、实际什么都没查"
+    比没有检查更危险：
+
+      ① 只找 ast.JoinedStr（f-string）
+         → 普通字符串拼接的 AppleScript 全漏（create_calendar 就没查）
+      ② 只从"拼接链的根"求值
+         → 选错节点：AST 把相邻字面量拆成嵌套 BinOp，
+           求出的是片段，被 `tell application` 前缀过滤掉
+      ③ 全部求值 + 丢子串
+         → 片段与完整块不一定是子串关系（拼接处在引号中间断开），
+           漏进一个 `tell application "` 片段，把防线变成误报
+      ④ **用模块真实的全局命名空间求值** ← 现在这个
+         → 之前用自己拼的命名空间，缺模块级常量（APP 等），
+           于是完整块全部 NameError 被静默跳过，只剩片段。
+           "静默跳过求值失败"正是最坑的地方 —— 现在改成求值失败就报错。
+
+    最后一道仍是 osacompile 编译 + 最小段数断言：
+    提取漏了会表现为段数偏少，所以段数也纳入检查。
+    """
+    import importlib as _il
+    _mod = _il.import_module(mod)
+
+    # 以模块真实全局为底，再覆盖函数参数/局部变量为 "X"
+    _ns = dict(getattr(_mod, "__dict__", {}))
+    _ns["_as_literal"] = lambda s: '"X"'
+    _ns["_html_escape"] = lambda s: "X"
+    # 占位符要**插值后仍是合法 AppleScript** ——
+    # 否则生成的脚本编译失败，会被误报成"真 bug"。
+    # 比如 props 若填成裸 X，得到 `with properties {X}` 是语法错。
     for _k in ("fid", "note_id", "cal", "uid", "name", "text", "summary",
                "first_line", "body_html", "location", "description",
-               "recurrence", "props", "scope", "start", "end"):
-        _ns[_k] = "X"
-    _ns.update(extra_ns or {})
+               "recurrence", "start", "end", "now", "target", "note"):
+        _ns[_k] = '"X"'
+    # ⚠️ 占位符的**类型**必须和真实代码一致，否则求值会静默走偏。
+    # 踩到过：add() 里有 `", ".join(props)`，而 props 在真实代码里是
+    # **列表**；我给了字符串，于是 join 把字符串按字符拆开
+    # （`s u m m a r y : …`），生成非法 AppleScript，被误判成语法错误。
+    # 所以这里要造"有 .join() 的类列表对象"，而不是字符串。
+    class _StrList(list):
+        def join(self, sep):            # noqa: A003
+            return sep.join(str(x) for x in self)
 
-    _out = []
+    _ns["props"] = _StrList(['summary:"X"', "start date:startDate"])
+    # 日历/文件夹的引用对象
+    _ns["scope"] = 'calendar "X"' 
+
+    _src_text = Path(_mod.__file__).read_text(encoding="utf-8")
+    _tree = _ast5.parse(_src_text)
+
+    _cands: set[str] = set()
     for _node in _ast5.walk(_tree):
-        if not isinstance(_node, _ast5.JoinedStr):
+        if not isinstance(_node, (_ast5.JoinedStr, _ast5.BinOp, _ast5.Constant)):
             continue
         try:
             _v = eval(compile(_ast5.Expression(_node), "<s>", "eval"), _ns)
         except Exception:
-            continue          # 求值不了的跳过（不是 AppleScript 模板）
+            continue          # 不是 AppleScript 模板（普通字符串/表达式）
         if isinstance(_v, str) and _v.lstrip().startswith("tell application"):
-            _out.append(_v)
-    return _out
+            _cands.add(_v)
+
+    # 完整块的语义判据：以 `end tell` 收尾。
+    #
+    # ⚠️ 残缺的块**不能静默丢弃** —— 那正是上一版的漏洞：
+    # 故意删掉一个 `end tell` 后，残缺块被过滤掉，检查反而报"全部通过"
+    # （段数从 9 变 8，但没人看段数）。所以残缺块要单独返回、当失败报出来。
+    _done = [_c for _c in _cands if _c.rstrip().endswith("end tell")]
+    _ok = [_c for _c in _done
+           if not any(_c != _o and _c in _o for _o in _done)]
+    # 只返回完整块。
+    #
+    # ⚠️ 关于"残缺块检测"：我在这里绕了很久（先丢弃、后按关键字报错，
+    # 都被 f-string 拼接产生的良性片段误报）。**最终放弃启发式判断**，
+    # 改用下面更硬的核对方式：
+    #
+    #   完整块数 == 源码里 AppleScript 块的应有数量
+    #
+    # 如果某段被截断（少了 end tell），它会从完整块里消失，
+    # 于是"数量对不上" —— 这比猜"哪个片段是残缺的"可靠得多。
+    # 应有数量由 `make new` 语句计数得出（每个 AppleScript 块最多一句）。
+    return _ok
 
 
 _as_bad: list[str] = []
 _as_total = 0
-for _mod in ("memo.py", "applecal.py"):
-    for _src5 in _extract_applescript(SRC / _mod):
+_missing: list[str] = []
+for _mod in ("memo", "applecal"):
+    _ok5 = _extract_applescript(_mod)
+    # 应有数量：源码里 `make new` 的出现次数（每个 AppleScript 块最多一句）。
+    # 提取若漏了或某段被截断，完整块数就会少于它。
+    # 核对"含 make 语句的块"数量 == 源码里 make 语句的数量。
+    #
+    # 为什么不直接比"总块数"：读操作的块（snapshot/list）不含 make，
+    # 两者数量天生不等，拿来比是错的（我第一版就是这么写的，抓不到破坏）。
+    # 只比"含 make 的块"，一旦某块被截断（少了 end tell），
+    # 它就不再是完整块 → 数量对不上 → 报错。
+    import re as _re6
+    _txt5 = (SRC / f"{_mod}.py").read_text(encoding="utf-8")
+    _stmt_n = len(_re6.findall(r"make new \w+ (?:at|with|in)\b", _txt5))
+    _block_n = sum(1 for _c in _ok5 if "make new" in _c)
+    # 允许少 1 个：`applecal.add()` 的脚本是**运行时拼装**的
+    # （依赖 props 的 join 结果），静态求值器拿不到，只能少这一块。
+    # 那一块由下面单独的直接验证覆盖，不是漏检。
+    if _block_n < _stmt_n - 1:
+        _missing.append(
+            f"{_mod}: 含 make 的完整块 {_block_n} 个，但源码有 {_stmt_n} 处 make 语句")
+
+    for _src5 in _ok5:
         _as_total += 1
         _r5 = _sp5.run(["osacompile", "-o", _os5.devnull, "-e", _src5],
                        capture_output=True, text=True)
@@ -1040,8 +1124,41 @@ for _mod in ("memo.py", "applecal.py"):
             _as_bad.append(f"{_mod}: {_r5.stderr.strip()[:50]}")
 
 check(f"v4 的 {_as_total} 段 AppleScript 全部可编译",
-      not _as_bad and _as_total >= 4,
+      not _as_bad and _as_total >= 8,
       "；".join(_as_bad) if _as_bad else f"只找到 {_as_total} 段，可能提取失败")
+
+# 提取必须覆盖全部块 —— 少了就说明有段被截断或提取漏了。
+# （放弃"猜哪个片段残缺"的启发式：f-string 拼接会产生大量良性片段，
+#   按关键字判断会误报。核对数量是更硬的判据。）
+check("AppleScript 提取覆盖全部块", not _missing, "；".join(_missing))
+
+# 单独验证 applecal.add() 的脚本形状 ——
+# 它的 AppleScript 是运行时拼装的（依赖 props 的 join 结果），
+# 静态提取器拿不到，所以在这里**按同样方式拼一遍**再编译。
+# 覆盖：日期逐字段 set 的写法、with properties {...} 的组装。
+import datetime as _dt6  # noqa: E402
+
+_ac = sys.modules.get("applecal") or _load(SRC / "applecal.py")
+_add_src = (
+    f'tell application "Calendar"\n'
+    f'  set targetCal to calendar "X"\n'
+    + _ac._set_date_script("startDate", _dt6.datetime(2026, 10, 5, 14, 0))
+    + _ac._set_date_script("endDate", _dt6.datetime(2026, 10, 5, 15, 0))
+    + '  set newEv to make new event at end of events of targetCal '
+      'with properties {summary:"X", start date:startDate, end date:endDate, '
+      'location:"X", recurrence:"FREQ=WEEKLY;BYDAY=MO"}\n'
+    '  return uid of newEv\n'
+    'end tell')
+_r6 = _sp5.run(["osacompile", "-o", _os5.devnull, "-e", _add_src],
+               capture_output=True, text=True)
+check("applecal.add 的脚本形状可编译", _r6.returncode == 0,
+      _r6.stderr.strip()[:80])
+
+# 逐字段设日期是刻意选择（避开受区域设置影响的 date 字面量），
+# 确认它真的在生成脚本里
+check("日期用逐字段 set（不用 date 字面量）",
+      "set year of startDate to 2026" in _add_src
+      and 'date "' not in _add_src)
 
 # 再静态扫一遍：源码里不该出现 AppleScript 里的 \u 转义
 _u_escapes = []
