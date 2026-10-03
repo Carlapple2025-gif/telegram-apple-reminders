@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  每天 21:30 日报：汇总当天进度并推送，提醒你补打钩。
+
+  这条推送是整条链路的**数据质量保障**：顺延依赖准确的完成状态，
+  而完成状态只能由你手动打钩产生（程序不推断）。
+
+  注意：21:30 只做「汇总 + 推送」，**不写入你的备忘录**。
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.carl.pdca.report</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/python3</string>
+		<string>/Users/carl-mini/dev/siri-carl/pdca/src/daily_report.py</string>
+		<string>--refresh</string>
+		<!-- 先同步到提醒事项：否则当天页建得晚时，待办还没进提醒事项，
+		     完成状态就查不到，日报会漏报已完成的事 -->
+		<string>--sync</string>
+	</array>
+
+	<key>WorkingDirectory</key>
+	<string>/Users/carl-mini/dev/siri-carl/pdca</string>
+
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>21</integer>
+		<key>Minute</key>
+		<integer>30</integer>
+	</dict>
+
+	<key>StandardOutPath</key>
+	<string>/Users/carl-mini/dev/siri-carl/pdca/logs/report.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/carl-mini/dev/siri-carl/pdca/logs/report.err.log</string>
+
+	<key>ProcessType</key>
+	<string>Background</string>
+</dict>
+</plist>

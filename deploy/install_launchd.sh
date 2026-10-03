@@ -23,6 +23,13 @@ PROJECT="$(cd "$HERE/.." && pwd)"
 AGENTS="$HOME/Library/LaunchAgents"
 LABELS=(com.carl.pdca.daemon com.carl.pdca.report)
 
+# v1 的任务标签。v4 不再需要它们（待办常驻提醒事项，
+# 没有"同步"和"顺延"这两个概念），但**它们可能还装着并在跑** ——
+# 实测踩到：v1 的 report 仍指向 daily_report.py，会在 21:30 发出一份
+# 基于旧留档的日报，与 v4 的数据完全无关、且具误导性。
+# 所以安装/卸载时都顺手清掉，避免"两套系统同时在跑"。
+LEGACY_LABELS=(com.carl.pdca.carryover com.carl.pdca.sync)
+
 # 固定用系统 python3：它只用标准库，不依赖任何虚拟环境。
 # （ltc-spider 那边踩过"解释器链被清掉导致任务全失效"的坑，
 #   这里刻意避开：系统解释器 + 只用标准库 = 没有环境可坏。）
@@ -77,6 +84,7 @@ render() {
 }
 
 do_install() {
+  cleanup_legacy
   preflight
   for label in "${LABELS[@]}"; do
     local src="$PROJECT/deploy/$label.plist"
@@ -96,12 +104,39 @@ do_install() {
 }
 
 do_uninstall() {
-  for label in "${LABELS[@]}"; do
+  for label in "${LABELS[@]}" "${LEGACY_LABELS[@]}"; do
+    local existed=0
+    [ -f "$AGENTS/$label.plist" ] && existed=1
+    launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1 && existed=1
     launchctl bootout "gui/$(id -u)/$label" 2>/dev/null \
       || launchctl unload "$AGENTS/$label.plist" 2>/dev/null || true
     rm -f "$AGENTS/$label.plist"
-    echo "🗑️  已卸载 $label"
+    if [ "$existed" -eq 1 ]; then
+      echo "🗑️  已卸载 $label"
+    fi
   done
+}
+
+cleanup_legacy() {
+  # 清理 v1 遗留任务（它们可能仍装着、且指向已废弃的脚本）
+  local found=0
+  for label in "${LEGACY_LABELS[@]}"; do
+    if [ -f "$AGENTS/$label.plist" ] \
+       || launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
+      if [ "$found" -eq 0 ]; then
+        echo "发现 v1 遗留任务（它们会跑已废弃的脚本）："
+        found=1
+      fi
+      launchctl bootout "gui/$(id -u)/$label" 2>/dev/null \
+        || launchctl unload "$AGENTS/$label.plist" 2>/dev/null || true
+      rm -f "$AGENTS/$label.plist"
+      echo "   🗑️  已清理 $label"
+    fi
+  done
+  if [ "$found" -eq 1 ]; then
+    echo "   （v4 不需要"同步"和"顺延"：待办常驻提醒事项）"
+    echo
+  fi
 }
 
 do_status() {

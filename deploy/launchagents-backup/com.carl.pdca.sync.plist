@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  每天 09:00 把当天页的待办同步到提醒事项。
+
+  这一步是整个系统的**关键一环**，之前漏了 ——
+  没有它，你写的待办永远进不了提醒事项，也就没地方打钩；
+  而完成状态的权威正是提醒事项的 completed。
+
+  时间选 09:00 的理由：
+    · 07:00 顺延已把昨天的未完项带到今天页
+    · 你通常早上八九点写清单
+    · 09:00 跑，能同时覆盖"顺延带过来的"和"你刚写的"
+
+  幂等：去重键 = 笔记 id + 行号 + 正文，重复跑不会产生重复条目。
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.carl.pdca.sync</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/python3</string>
+		<string>/Users/carl-mini/dev/siri-carl/pdca/src/push_tasks.py</string>
+		<string>--refresh</string>
+		<string>--apply</string>
+	</array>
+
+	<key>WorkingDirectory</key>
+	<string>/Users/carl-mini/dev/siri-carl/pdca</string>
+
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>9</integer>
+		<key>Minute</key>
+		<integer>0</integer>
+	</dict>
+
+	<key>StandardOutPath</key>
+	<string>/Users/carl-mini/dev/siri-carl/pdca/logs/sync.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/carl-mini/dev/siri-carl/pdca/logs/sync.err.log</string>
+
+	<key>ProcessType</key>
+	<string>Background</string>
+</dict>
+</plist>
