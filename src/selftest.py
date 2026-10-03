@@ -958,20 +958,21 @@ section("v4 备忘录解析（memo，纯函数部分）")
 
 _mm = _load(SRC / "memo.py")
 
-_raw = ("x-coredata://A/ICNote/p1\u0001荷载要按名称命名\u0002"
-        "x-coredata://A/ICNote/p2\u0001想起要买猫粮\u0002\n")
+_raw = (f"x-coredata://A/ICNote/p1{_mm.FSEP}荷载要按名称命名{_mm.RSEP}"
+        f"x-coredata://A/ICNote/p2{_mm.FSEP}想起要买猫粮{_mm.RSEP}\n")
 _memos = _mm.parse_snapshot(_raw)
 check("快照解析出 2 条", len(_memos) == 2, f"得到 {len(_memos)}")
 check("取到 note_id", _memos[0].note_id == "x-coredata://A/ICNote/p1")
 
 # 标题里含竖线、换行都不能误切（所以用不可见字符做分隔符）
-_m2 = _mm.parse_snapshot("idA\u0001第一行\n第二行|带竖线\u0002")
+_m2 = _mm.parse_snapshot(f"idA{_mm.FSEP}第一行\n第二行|带竖线{_mm.RSEP}")
 check("标题含竖线/换行不误切",
       len(_m2) == 1 and _m2[0].note_id == "idA" and "带竖线" in _m2[0].name)
 
 check("空输入 → 空列表", _mm.parse_snapshot("") == [])
 check("纯空白 → 空列表", _mm.parse_snapshot("\n\n") == [])
-check("残缺块被跳过而非崩", len(_mm.parse_snapshot("垃圾\u0002idB\u0001正常\u0002")) == 1)
+check("残缺块被跳过而非崩",
+      len(_mm.parse_snapshot(f"垃圾{_mm.RSEP}idB{_mm.FSEP}正常{_mm.RSEP}")) == 1)
 
 # AppleScript 转义：反斜杠必须**先**转，否则会吃掉后续引号
 check("转义：反斜杠先于引号",
@@ -984,6 +985,76 @@ check("HTML 转义", _mm._html_escape("a<b&c>d") == "a&lt;b&amp;c&gt;d")
 _mm_src = (SRC / "memo.py").read_text(encoding="utf-8")
 check("memo 模块不含 delete 命令",
       "delete " not in _mm_src.replace("# ", ""))
+
+
+section("v4 的 AppleScript 必须可编译")
+
+# 这类检查拦的是**我连踩三次**的同一类错误：AppleScript 不支持 Python/JS
+# 风格的转义。全都在"能跑"之前就编译失败，但报错信息（Expected """ but
+# found unknown token）完全指不到真正的原因。
+#
+#   ① \u0001 当分隔符        → 编译失败
+#   ② 裸控制字节当分隔符      → 编译失败（源码里出现不可打印字符）
+#   ③ \u0000 当哨兵值         → 编译失败
+#
+# 正解是让 AppleScript 自己用 `character id 1` 构造分隔符。
+# 这里**从源码真实提取** AppleScript 并交给 osacompile 编译 ——
+# 手写模板做检查会漏（我最初就是这么漏掉 whose/is 的）。
+import ast as _ast5  # noqa: E402
+import os as _os5  # noqa: E402
+import subprocess as _sp5  # noqa: E402
+
+
+def _extract_applescript(path, extra_ns=None):
+    """把源码里的 AppleScript f-string 求值出来（占位符填 "X"）。"""
+    _tree = _ast5.parse(path.read_text(encoding="utf-8"))
+    _ns = {"_as_literal": lambda s: '"X"', "_html_escape": lambda s: "X",
+           "FSEP": _mm.FSEP, "RSEP": _mm.RSEP}
+    for _k in ("fid", "note_id", "cal", "uid", "name", "text", "summary",
+               "first_line", "body_html", "location", "description",
+               "recurrence", "props", "scope", "start", "end"):
+        _ns[_k] = "X"
+    _ns.update(extra_ns or {})
+
+    _out = []
+    for _node in _ast5.walk(_tree):
+        if not isinstance(_node, _ast5.JoinedStr):
+            continue
+        try:
+            _v = eval(compile(_ast5.Expression(_node), "<s>", "eval"), _ns)
+        except Exception:
+            continue          # 求值不了的跳过（不是 AppleScript 模板）
+        if isinstance(_v, str) and _v.lstrip().startswith("tell application"):
+            _out.append(_v)
+    return _out
+
+
+_as_bad: list[str] = []
+_as_total = 0
+for _mod in ("memo.py", "applecal.py"):
+    for _src5 in _extract_applescript(SRC / _mod):
+        _as_total += 1
+        _r5 = _sp5.run(["osacompile", "-o", _os5.devnull, "-e", _src5],
+                       capture_output=True, text=True)
+        if _r5.returncode != 0:
+            _as_bad.append(f"{_mod}: {_r5.stderr.strip()[:50]}")
+
+check(f"v4 的 {_as_total} 段 AppleScript 全部可编译",
+      not _as_bad and _as_total >= 4,
+      "；".join(_as_bad) if _as_bad else f"只找到 {_as_total} 段，可能提取失败")
+
+# 再静态扫一遍：源码里不该出现 AppleScript 里的 \u 转义
+_u_escapes = []
+for _mod in ("memo.py", "applecal.py"):
+    for _ln, _line in enumerate((SRC / _mod).read_text(encoding="utf-8").splitlines(), 1):
+        if _line.lstrip().startswith("#"):
+            continue
+        # AppleScript 片段里的 \u 转义（Python 侧的 \u0001 是合法的，
+        # 但本项目统一改用 FSEP/RSEP 常量，所以这里全禁）
+        if "'" in _line and "\\u" in _line:
+            _u_escapes.append(f"{_mod}:{_ln}")
+
+check("AppleScript 片段里没有 \\u 转义", not _u_escapes, "；".join(_u_escapes))
 
 
 # ── 汇总

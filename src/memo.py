@@ -50,6 +50,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG = ROOT / "config.json"
 
+# AppleScript 里各条记录之间的分隔符。
+#
+# 分隔符用 chr(1) / chr(2)：笔记标题里可能出现任何**可打印**字符，
+# 但控制字符不可能出现在用户文本里 —— 拼接结果无歧义。
+#
+# ⚠️ 这里有两个都踩过的坑（写下来免得再犯）：
+#   ① AppleScript **不支持 \u 转义** —— 写 "\u0001" 会直接编译失败
+#      （Expected """ but found unknown token，-2741）
+#   ② 也不能把**裸控制字节**拼进 AppleScript 源码 —— 同样编译失败
+# 正解：在 AppleScript 里用 `character id 1` 构造（见 run_applescript 的
+# 调用处，源码里有 `set FS to character id 1`）。
+# 下面两个常量只用于 **Python 侧解析**。
+FSEP = chr(1)     # 字段分隔
+RSEP = chr(2)     # 记录分隔
+
 
 class MemoError(Exception):
     """备忘录操作失败（带可操作的提示）。"""
@@ -139,8 +154,10 @@ def snapshot() -> list[Memo]:
         'tell application "Notes"\n'
         f'  set targetFolder to folder id {_as_literal(fid)}\n'
         '  set out to ""\n'
+        '  set FS to character id 1\n'
+        '  set RS to character id 2\n'
         '  repeat with n in notes of targetFolder\n'
-        '    set out to out & (id of n) & "\\u0001" & (name of n) & "\\u0002"\n'
+        f'    set out to out & (id of n) & FS & (name of n) & RS\n'
         '  end repeat\n'
         '  return out\n'
         'end tell')
@@ -186,9 +203,9 @@ def text_of(note_id: str) -> str:
         '  repeat with n in notes of targetFolder\n'
         f'    if (id of n) is {_as_literal(note_id)} then return plaintext of n\n'
         '  end repeat\n'
-        '  return "\\u0000NOTFOUND"\n'
+        '  return "__NOT_FOUND__"\n'
         'end tell')
-    if out == "\u0000NOTFOUND":
+    if out == "__NOT_FOUND__":
         raise MemoError(f"备忘不存在（可能已被删除）：{note_id}")
     return out
 
@@ -283,8 +300,10 @@ def list_folders() -> list[tuple[str, str]]:
     out = run_applescript(
         'tell application "Notes"\n'
         '  set out to ""\n'
+        '  set FS to character id 1\n'
+        '  set RS to character id 2\n'
         '  repeat with f in folders\n'
-        '    set out to out & (id of f) & "\\u0001" & (name of f) & "\\u0002"\n'
+        f'    set out to out & (id of f) & FS & (name of f) & RS\n'
         '  end repeat\n'
         '  return out\n'
         'end tell')

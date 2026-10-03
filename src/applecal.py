@@ -40,6 +40,21 @@ CONFIG = ROOT / "config.json"
 
 APP = "Calendar"
 
+# AppleScript 里各条记录之间的分隔符。
+#
+# 分隔符用 chr(1) / chr(2)：笔记标题里可能出现任何**可打印**字符，
+# 但控制字符不可能出现在用户文本里 —— 拼接结果无歧义。
+#
+# ⚠️ 这里有两个都踩过的坑（写下来免得再犯）：
+#   ① AppleScript **不支持 \u 转义** —— 写 "\u0001" 会直接编译失败
+#      （Expected """ but found unknown token，-2741）
+#   ② 也不能把**裸控制字节**拼进 AppleScript 源码 —— 同样编译失败
+# 正解：在 AppleScript 里用 `character id 1` 构造（见 run_applescript 的
+# 调用处，源码里有 `set FS to character id 1`）。
+# 下面两个常量只用于 **Python 侧解析**。
+FSEP = chr(1)     # 字段分隔
+RSEP = chr(2)     # 记录分隔
+
 
 class CalendarError(Exception):
     """日历操作失败（带可操作的提示）。"""
@@ -125,8 +140,10 @@ def list_calendars() -> list[tuple[str, bool]]:
     out = run_applescript(
         f'tell application "{APP}"\n'
         '  set out to ""\n'
+        '  set FS to character id 1\n'
+        '  set RS to character id 2\n'
         '  repeat with c in calendars\n'
-        '    set out to out & (name of c) & "\\u0001" & (writable of c) & "\\u0002"\n'
+        f'    set out to out & (name of c) & FS & (writable of c) & RS\n'
         '  end repeat\n'
         '  return out\n'
         'end tell')
@@ -160,16 +177,17 @@ def events_between(start: dt.date, end: dt.date,
         f'tell application "{APP}"\n'
         f'  set targetCal to {scope}\n'
         '  set out to ""\n'
+        '  set FS to character id 1\n'
+        '  set RS to character id 2\n'
         '  repeat with e in (every event of targetCal)\n'
         '    set sd to start date of e\n'
         '    set ed to end date of e\n'
-        '    set out to out & (summary of e) & "\\u0001" '
+        '    set out to out & (summary of e) & FS '
         '& (year of sd) & "-" & (month of sd as integer) & "-" & (day of sd) '
-        '& " " & (hours of sd) & ":" & (minutes of sd) '
-        '& "\\u0001" '
+        '& " " & (hours of sd) & ":" & (minutes of sd) & FS '
         '& (year of ed) & "-" & (month of ed as integer) & "-" & (day of ed) '
-        '& " " & (hours of ed) & ":" & (minutes of ed) '
-        '& "\\u0001" & (location of e) & "\\u0001" & (uid of e) & "\\u0002"\n'
+        '& " " & (hours of ed) & ":" & (minutes of ed) & FS '
+        '& (location of e) & FS & (uid of e) & RS\n'
         '  end repeat\n'
         '  return out\n'
         'end tell', timeout=120)
