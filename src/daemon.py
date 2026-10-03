@@ -34,6 +34,7 @@ v1 的时段选择器之所以失控（551 行），是因为它把"问一次"�
 from __future__ import annotations
 
 import datetime as dt
+import http.client
 import json
 import os
 import signal
@@ -458,9 +459,25 @@ def main() -> int:
     else:
         _log("（启动通知处于冷却期，跳过 —— 避免反复重启时刷屏）")
 
+    _consecutive_failures = 0
     while _running:
-        # --once 用短轮询：验证时不该干等长轮询的超时
-        offset = run_once(offset, wait=1 if args.once else 25)
+        # 主循环这道兜底是**最后一道**（run_once 内部已各自兜住网络错与单条消息错）：
+        # offset 落盘、snapshot 读取等路径若抛出 OSError，异常会冒到 main 之外，
+        # 进程退出 → KeepAlive 拉起 → 几步后又退出 = 崩溃循环，
+        # 而那期间**你发的消息没人接**。
+        #
+        # 只兜"瞬时类"（网络/socket/落盘）。**编程错误故意不兜**：
+        # 让它退出并留下完整堆栈，比带着坏状态空转更容易查。
+        try:
+            # --once 用短轮询：验证时不该干等长轮询的超时
+            offset = run_once(offset, wait=1 if args.once else 25)
+            _consecutive_failures = 0
+        except (OSError, http.client.HTTPException) as e:
+            _consecutive_failures += 1
+            _log(f"循环异常（第 {_consecutive_failures} 次，继续运行）："
+                 f"{type(e).__name__}: {_trunc(str(e))}")
+            # 连续失败时逐步退避，避免刷日志刷到把真问题淹掉
+            time.sleep(min(5 * _consecutive_failures, 60))
         if args.once:
             break
         time.sleep(1)

@@ -111,6 +111,9 @@ do_install() {
     local dst="$AGENTS/$label.plist"
     [ -f "$src" ] || { echo "❌ 缺少模板 $src" >&2; exit 1; }
     launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+    # ⚠️ 必须等旧进程真的退出再写入与加载（原因见 wait_job_gone 注释）：
+    # 重新安装时若不等待，新任务会被旧进程的退出带走 → SIGTERMed。
+    wait_job_gone "$label"
     if ! render "$src" "$dst"; then
       echo "❌ 无法写入 $dst" >&2
       echo "   如果当前处在受限沙箱，请在你自己的终端里运行同一个命令。" >&2
@@ -201,6 +204,58 @@ do_status() {
   ls -lt "$PROJECT/logs" 2>/dev/null | head -6 || echo "    （还没有日志）"
 }
 
+wait_job_gone() {
+  # 等某个任务**真的从 launchd 域里消失**（print 查不到 = 已清理干净）。
+  #
+  # ⚠️ 为什么必须有这一步（这是"安装脚本报成功、发消息没人接"的真根因）：
+  # 守护在长轮询里（最长 25 秒），收到 SIGTERM 后要等这次长轮询返回
+  # 才会真正退出。bootout 之后只睡固定 1 秒就 bootstrap 的话，
+  # 新任务刚起来、旧进程才退出，launchd 把这次退出算在新任务头上 ——
+  # 新任务立刻变成 state = SIGTERMed，**旧的停了、新的也没了**。
+  # 实测：装完显示 ✅、`launchctl print` 也能查到，几秒后守护就没了。
+  #
+  # 上限 40 秒，足够覆盖一次 25 秒长轮询 + 收尾。
+  local label="$1"
+  local waited=0
+  while launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; do
+    if [ "$waited" -ge 40 ]; then
+      echo "⚠️  $label 旧进程 40 秒仍未退出，仍继续加载（可能撞竞态）" >&2
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  if [ "$waited" -gt 1 ]; then
+    echo "   （等旧进程退出用了 ${waited} 秒）"
+  fi
+}
+
+verify_loaded() {
+  # 加载之后的**存活验证**：区分常驻任务与定时任务。
+  #   · 守护是常驻（KeepAlive），**必须** running —— 否则就是你发消息没人接
+  #   · 日报是定时任务，平时本来就 not running，只要"在册"就是对的
+  #     （对日报断言 running 会得到一条永远失败的假告警）
+  # 返回 0 = 通过，1 = 不通过。
+  local label="$1"
+  local st pid
+  st="$(launchctl print "gui/$(id -u)/$label" 2>/dev/null \
+        | sed -n 's/^[[:space:]]*state = //p' | head -1)"
+  pid="$(launchctl print "gui/$(id -u)/$label" 2>/dev/null \
+        | sed -n 's/^[[:space:]]*pid = //p' | head -1)"
+  if [ "$label" = "com.carl.pdca.daemon" ]; then
+    if [ "$st" = "running" ] && [ -n "$pid" ]; then
+      echo "✅ $label 已加载并确认在跑（pid ${pid}）"
+      return 0
+    fi
+    return 1
+  fi
+  if [ -n "$st" ]; then
+    echo "✅ $label 已加载（定时任务，state = ${st}）"
+    return 0
+  fi
+  return 1
+}
+
 do_restart() {
   # 重新加载任务。用于"装过但没在跑"（例如被 bootout 后 bootstrap 失败）：
   # launchd 只会在 bootstrap 时读取 plist，所以文件在 ≠ 任务在跑。
@@ -213,11 +268,10 @@ do_restart() {
       continue
     fi
     launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
-    # ⚠️ bootout 是**异步**的：立刻 bootstrap 会撞上 launchd 还在清理旧任务，
-    # 报 "Input/output error: 5"，结果是"旧的停了、新的没起"
-    # （实测表现：state = SIGTERMed 但 job state = running，没有活进程）。
-    # 所以等一下再装，并重试几次。
-    sleep 1
+
+    # ⚠️ 必须等旧进程真的退出，不能睡固定几秒就装（见 wait_job_gone 注释）
+    wait_job_gone "$label"
+
     local ok=0
     for attempt in 1 2 3; do
       if launchctl bootstrap "gui/$(id -u)" "$dst" 2>/dev/null; then
@@ -227,7 +281,18 @@ do_restart() {
       sleep 2
     done
     if [ "$ok" -eq 1 ] && launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
-      echo "✅ $label 已加载"
+      # ⚠️ 到这里**还不能报成功**。实测踩到：bootstrap 返回 0、print 也能查到，
+      # 但旧进程的 SIGTERM 处理与 bootout 撞在一起，几秒后任务就没了 ——
+      # 于是脚本打印 ✅ 已加载，而实际上守护不在跑，
+      # 表现又是"发消息没回复"（同一个症状的第三种根因）。
+      # 唯一可靠的判据是：**等几秒，看它是不是还活着**。
+      sleep 3
+      if ! verify_loaded "$label"; then
+        echo "❌ $label 加载后存活检查失败" >&2
+        echo "   这不是配置错误，多半是 bootout/bootstrap 的竞态，重跑一次通常就好：" >&2
+        echo "     $0 restart" >&2
+        echo "   仍不行则看：launchctl print gui/$(id -u)/$label" >&2
+      fi
     else
       echo "❌ $label 仍未加载（已重试 3 次）" >&2
       echo "   查看原因：launchctl print gui/$(id -u)/$label" >&2

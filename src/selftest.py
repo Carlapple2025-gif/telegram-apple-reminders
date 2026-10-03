@@ -1819,8 +1819,29 @@ check("守护 plist 用显式 KeepAlive 条件",
 # 安装脚本：bootout 是异步的，立刻 bootstrap 会撞上清理中 → 报
 # "Input/output error: 5"，结果"旧的停了、新的没起"。必须等一下并重试。
 _inst3 = (ROOT / "deploy" / "install_launchd.sh").read_text(encoding="utf-8")
-check("安装脚本在 bootout 后有延迟", "sleep 1" in _inst3)
+check("安装脚本在 bootout 后有等待（不靠固定 sleep）",
+      "wait_job_gone" in _inst3,
+      "bootout 后必须等旧进程真的退出：守护在长轮询里，收到 SIGTERM 要等"
+      "最长 25 秒才退出；只睡固定几秒就 bootstrap，新任务会被旧进程的退出"
+      "带走 → state = SIGTERMed → 表现是'发消息没人接'")
 check("安装脚本 bootstrap 会重试", "for attempt in 1 2 3" in _inst3)
+check("等待旧进程有上限（不会永久挂住）", 'ge 40' in _inst3)
+
+# ⚠️ "已加载" ≠ "在跑"。实测踩到：restart 打印 ✅ 已加载，而 print 查不到 ——
+# 旧进程的 SIGTERM 处理与 bootout 撞在一起，几秒后任务就没了，
+# 表现又是"发消息没回复"（同一症状的第三种根因）。
+# 所以 restart 必须在加载后**等一下再验存活**。
+check("restart 加载后做存活检查", "加载后存活检查失败" in _inst3)
+check("restart 检查前先等待（避开竞态）", "sleep 3" in _inst3)
+# 判据必须分任务类型：守护常驻要 running，日报平时就是 not running，
+# 对日报断言 running 会产生一条永远失败的假告警。
+check("存活检查区分常驻与定时任务",
+      "verify_loaded" in _inst3
+      and 'if [ "$label" = "com.carl.pdca.daemon" ]; then' in _inst3)
+# 存活判据必须看 state/pid，而不是"print 能查到"就算过 ——
+# SIGTERMed 的任务照样能被 print 查到，那正是当初误报成功的原因。
+check("存活判据不是只看'能查到'",
+      '"running"' in _inst3 and "pid" in _inst3)
 
 
 section("v4 守护的崩溃循环防护")
@@ -1849,6 +1870,21 @@ check("run_once 失败后返回 offset（不抛）", "return offset" in _run_onc
 check("守护日志做了压平/截断", "_trunc" in _dm_src)
 check("重试日志只取首行",
       "splitlines()[0]" in _dm_src or "_trunc" in _run_once)
+
+# run_once 内部各自兜了网络错与单条消息错，但它自己仍可能抛出别的
+# OSError（offset 落盘失败、快照读取失败）。主循环若没有最后一道兜底，
+# 异常会冒出 main → 进程退出 → KeepAlive 拉起 → 几步后又退出 =
+# 崩溃循环，而那期间用户发的消息**没人接**（正是本项目最忌讳的失败形态）。
+_main_loop = _dm_src[_dm_src.index("    _consecutive_failures = 0"):
+                     _dm_src.index("    _log(\"已退出\")")]
+check("主循环兜住瞬时异常（不让进程退出）",
+      "except (OSError, http.client.HTTPException)" in _main_loop)
+check("主循环异常后继续运行", "继续运行" in _main_loop)
+# 连续失败要退避，否则刷日志会把真问题淹掉（v1 踩过：断网 12 秒打 2 遍完整提示）
+check("主循环连续失败有退避", "min(5 * _consecutive_failures, 60)" in _main_loop)
+# 兜底**只兜瞬时类**：编程错误要故意漏出去，留下堆栈才好查
+check("主循环不吞编程错误（不是裸 except）",
+      "except Exception" not in _main_loop and "except:" not in _main_loop)
 
 
 section("日志污染防护")
