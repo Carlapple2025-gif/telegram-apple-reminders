@@ -977,6 +977,31 @@ check("空输入 → None", _cls.classify("", _B) is None)
 check("纯空白 → None", _cls.classify("   ", _B) is None)
 
 
+section("分类判据收紧（真实误判的教训）")
+
+# 实测踩到：用户发了一段 89 字的感慨，被判成**待办**写进了提醒事项。
+# 根因：`交`、`写`、`学` 这类单字动词**命中任意位置**就算数。
+# 现在收紧为：动词要在开头附近 + 正文不太长。
+_VERBOSE = ("这个年代真正要学的是原理和工程思想，例如浏览器如何工作，"
+            "React 背后的实现，JS的单线程本质，如何测试等等，知识面至少是"
+            "个全栈，至于编码那种茴字四种写法的事情，交给 AI 吧")
+_c9 = _cls.classify(_VERBOSE, _B)
+check("长感慨不再判成待办（真实误判）",
+      _c9.kind != _cls.Kind.TODO,
+      f"得到 {_c9.kind.value}")
+
+# 真实待办必须仍然判对（收紧不能误伤）
+for _s in ("交电费", "跟进修缮", "记得给车做保养", "整理上季度所有客户的合同并按地区分类归档"):
+    _c = _cls.classify(_s, _B)
+    check(f"{_s[:12]!r} 仍判待办", _c.kind == _cls.Kind.TODO,
+          f"得到 {_c.kind.value}")
+
+# 判据本身：动词要在开头附近
+check("动词在开头 → 祈使句", _cls._verb_leads("交电费"))
+check("动词在句中 → 非祈使句", not _cls._verb_leads(_VERBOSE))
+check("待办长度上限存在", hasattr(_cls, "TODO_MAX_LEN"))
+
+
 section("v4 用户日志（journal）")
 
 _jr = _load(SRC / "journal.py")
@@ -1081,37 +1106,33 @@ check("转义：反斜杠先于引号",
 check("转义：普通引号", _mm._as_literal('说"hi"') == '"说\\"hi\\""')
 check("HTML 转义", _mm._html_escape("a<b&c>d") == "a&lt;b&amp;c&gt;d")
 
-# 删除能力：v4 最初的约束是"agent 从不删任何东西"。
-# **2026-10-03 显式修订**：用户需要"改分类"（实测："改为备忘录"），
-# 而改分类必然要把原条目从旧 App 移走 —— 所以开了口子。
-# 口子用三条限制控制，这里逐条验证：
-_mm_src = (SRC / "memo.py").read_text(encoding="utf-8")
-_ac_src = (SRC / "applecal.py").read_text(encoding="utf-8")
+# 删除能力：v4 的约束是「**agent 从不删任何东西**」。
+#
+# 曾为「改分类」开过一个受控口子（memo.delete / applecal.delete），
+# 后被用户否决 —— 理由正确：纠正属于锦上添花，而「跑通并积累数据」
+# 才是当前重点；开删除口子反而增加风险。已全部撤销。
+#
+# 这条约束要一直守住，所以逐模块断言。
+_del_srcs = {_n: (SRC / f"{_n}.py").read_text(encoding="utf-8")
+             for _n in ("memo", "applecal")}
+for _nm, _src in _del_srcs.items():
+    check(f"v4 写入端 {_nm} 不含删除能力",
+          _re.search(r"^def delete\(", _src, _re.M) is None,
+          "改分类已撤销，写入端不应有 delete")
 
-check("memo 提供删除（供改分类用）", "def delete(" in _mm_src)
-check("applecal 提供删除（供改分类用）", "def delete(" in _ac_src)
-# ① 只接受明确 id，不接受模糊匹配
-check("memo.delete 要求明确 id",
-      "不接受模糊匹配" in _mm_src)
-check("applecal.delete 要求明确 id",
-      "不接受模糊匹配" in _ac_src)
-# ② 只有 reclassify 调用删除
-_callers: list[str] = []
+# reminders 的 delete 是 v1 遗留（仅 cleanup_reminders.py 这个手动工具用），
+# v4 路径不得调用它
+_v4_del_callers: list[str] = []
 for _f in (SRC).glob("*.py"):
-    if _f.name in ("memo.py", "applecal.py", "reminders.py", "reclassify.py",
-                   "selftest.py", "cleanup_reminders.py"):
+    if _f.name in ("reminders.py", "cleanup_reminders.py", "selftest.py"):
         continue
-    _t = _f.read_text(encoding="utf-8")
-    for _ln, _line in enumerate(_t.splitlines(), 1):
+    for _ln, _line in enumerate(_f.read_text(encoding="utf-8").splitlines(), 1):
         if _line.lstrip().startswith("#"):
             continue
-        if _re.search(r"\b(memo|applecal|rem)\.delete\(", _line):
-            _callers.append(f"{_f.name}:{_ln}")
-check("只有 reclassify 调用删除", not _callers, "；".join(_callers))
-# ③ 删除必须读回验证（防静默失败）
-check("memo.delete 读回验证", "snapshot_ids()" in _mm_src.split("def delete(")[1][:900])
-check("applecal.delete 读回验证",
-      "exists(" in _ac_src.split("def delete(")[1][:900])
+        if _re.search(r"\brem\.delete\(|reminders\.delete\(", _line):
+            _v4_del_callers.append(f"{_f.name}:{_ln}")
+check("v4 路径不调用 reminders.delete", not _v4_del_callers,
+      "；".join(_v4_del_callers))
 
 
 section("v4 的 AppleScript 必须可编译")

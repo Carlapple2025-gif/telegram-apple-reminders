@@ -177,18 +177,36 @@ def classify(text: str, base: dt.date | None = None) -> Classified | None:
         return Classified(Kind.EVENT, conf, body, raw, reason=reason,
                           when=when, recurrence=recur)
 
-    # ④ 动作动词 → 待办
+    # ④ 动作动词 → 待办（**判据从严**）
+    #
+    # 实测踩到：一段 89 字的感慨（"这个年代真正要学的是原理和工程思想…，
+    # 至于编码…交给 AI 吧"）被判成待办写进了提醒事项。
+    # 根因：`交`、`写`、`学` 这类**单字动词命中任意位置**就算数。
+    #
+    # 收紧为两条同时满足：
+    #   ① 动词出现在**开头附近**（祈使句的特征：动词打头）
+    #   ② 正文**不太长**（待办通常是短句）
+    #
+    # 取舍方向：判错的代价**不对称** ——
+    #   待办误判成备忘 → 还能在备忘里看到，不会丢
+    #   感慨误判成待办 → 往"打钩清单"里塞垃圾，越积越乱
+    # 所以宁可偏保守：拿不准就当备忘/询问，不轻易写进提醒事项。
     #
     # 注意保留 `when`：待办也常常带时间（"明天交电费"）。
-    # 曾经这里写 `when=None` 把解析结果丢了 —— 于是"明天"白解析，
-    # 上层再也拿不到。**解析出来的信息不该在分类这一步被丢掉**，
-    # 用不用是上层的事（intake 决定是否设到期日）。
-    if has_todo:
-        reason = "含动作动词，判为待办"
+    # 曾经这里写 `when=None` 把解析结果丢了 —— 于是"明天"白解析。
+    if has_todo and _verb_leads(raw) and len(body) <= TODO_MAX_LEN:
+        reason = "动作动词在开头，判为待办"
         if when is not None:
             reason += "（带时间提示）"
         return Classified(Kind.TODO, Confidence.HIGH, body, raw,
                           reason=reason, when=when)
+
+    # 动词命中但不在开头（或文本偏长）→ 更像"描述/感想"而非"要做的事"
+    if has_todo:
+        return Classified(Kind.MEMO, Confidence.LOW, body, raw,
+                          reason="含动作动词但不在开头或文本偏长，"
+                                 "按记录处理（若是待办请说短一点）",
+                          when=None)
 
     # ⑤ 有时间但没动作 → 日程（"明天下午三点"本身就是个日程）
     if when and when.has_time:
@@ -203,6 +221,26 @@ def classify(text: str, base: dt.date | None = None) -> Classified | None:
 
 
 # ── 重复规则
+
+# 待办的正文长度上限。超过就按"记录"处理 ——
+# 待办通常是短祈使句（"交电费"），长段落更像感想/信息。
+# 阈值取得宽一些（40），避免误伤"整理上季度所有客户的合同并按地区分类归档"这类。
+TODO_MAX_LEN = 40
+
+# 动词要出现在开头多少个字内才算"祈使句"
+TODO_VERB_WINDOW = 8
+
+
+def _verb_leads(text: str) -> bool:
+    """
+    动作动词是否出现在**开头附近**。
+
+    判据是"祈使句特征"：`交电费`、`跟进修缮`、`记得给车做保养`
+    都是动词打头；而`这个年代真正要学的是…`是陈述句，动词在句中。
+    """
+    seg = text[:TODO_VERB_WINDOW]
+    return any(v in seg for v in _TODO_VERBS)
+
 
 def parse_recurrence(text: str) -> str:
     """
