@@ -161,7 +161,35 @@ v1 的 `com.carl.pdca.sync` / `com.carl.pdca.carryover` 会在安装时被自动
 python3 tools/selftest-live.py    # 真的去读三处 App（需要授权）
 python3 tools/smoke.py            # 端到端冒烟
 python3 tools/probe-native-dates.py  # 只读探测：Apple 原生日期能力（见坑 16）
+python3 src/notify.py --status    # 两个通道 + 心跳的配置状态
+python3 src/notify.py --heartbeat ok   # 只测心跳（fail 可测"上报失败"那条路）
 ```
+
+### 投递与监控：怎么知道"日报没跑"
+
+**两个通道（Telegram / Bark）只能证明"送到了"，证明不了"跑了"。**
+机器睡过 21:30、任务被清掉、脚本在推送前崩掉 —— 这三种在本机都看不出来
+（`launchctl print` 的计数会因 reload 归零，实测 `runs = 0 / never exited`）。
+
+所以配一个**机器之外**的心跳（见 `.env.example` 的 `HEALTHCHECK_URL`）：
+
+| 情况 | 心跳 | 你看到 |
+|---|---|---|
+| 日报完整送达 | ping 主 URL | 无消息（正常） |
+| 数据不全 / 全通道失败 | ping `/fail` | 立刻告警 |
+| **根本没跑** | **没有 ping** | 到点后由远端告警 ← 只有这条能发现"没跑" |
+
+配套的两处留痕（都不依赖心跳）：
+
+- 日报正文第一行是 **`🕘 生成于 HH:MM`**，偏离计划时间超过 30 分钟标题会带标记：
+  **晚**了 →「（延迟）」；**早**了 →「（非计划时间）」。两种都源自 launchd 的语义
+  —— `man launchd.plist`：睡过的定时任务会在**唤醒时补跑**且多次合并为一次。
+  所以要防的不止"晚报"：睡过 21:30、凌晨才醒，跑出来的是**次日**那份空日报，
+  而昨天那份永远不会来了 —— 这一句会明说。
+- 每次投递的结果（每通道成败 / 是否延迟 / 心跳结果）**追加进 `data/journal/`**
+  的 `digest_pushed` 记录 —— `logs/` 可以随时清，这里不能。
+  某条通道连续 3 天没成功，日报末尾会自己说出来（否则单通道静默失效
+  能瞒你几个月）。
 
 ---
 

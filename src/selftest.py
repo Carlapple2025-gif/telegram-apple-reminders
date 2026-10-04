@@ -2312,8 +2312,13 @@ _old_root = _rp.ROOT
 _rp.ROOT = _dg
 try:
     _sent: list = []
+    # ⚠️ 心跳也必须注入假实现：不注入就会走真实的 notify.send_heartbeat，
+    # 而它会去读 .env —— 那样"离线自检"就会真的往外部监控发请求
+    # （更糟的是：一旦你配了 HEALTHCHECK_URL，自检会伪造出"今天跑过了"）。
+    _noop_beat = lambda ok, summary="": (False, "自检不真心跳")  # noqa: E731
     _rp.run(date=_RD, push=True, data=_rp.ReportData(date=_RD),
-            sender=lambda t, b, channels=None: (_sent.append((t, b)), [("telegram", True, "ok")])[1])
+            sender=lambda t, b, channels=None: (_sent.append((t, b)), [("telegram", True, "ok")])[1],
+            heartbeat=_noop_beat)
     _digest = _dg / "data" / "digest" / "2026-10-03.md"
     check("日报存档到 data/digest/", _digest.is_file())
     check("存档内容含标题", "复盘" in _digest.read_text(encoding="utf-8"))
@@ -2327,6 +2332,224 @@ check("时间戳解析：完整 ISO",
       _rp._parse_at("2026-10-03T10:20:30+08:00") is not None)
 check("时间戳解析：空字符串返回 None", _rp._parse_at("") is None)
 check("时间戳解析：垃圾返回 None", _rp._parse_at("不是时间") is None)
+
+
+section("v4 投递与监控（心跳 / 投递留痕 / 生成时刻）")
+
+# 这一节解决的是**最难发现的一类失败：根本没跑**。
+# 两个通道只能证明"送没送到"，证明不了"跑没跑" —— 机器睡了、任务被清了、
+# 脚本在推送前崩了，这三种情况在本机全都看不出来（实测 launchctl 里
+# 计数还会因 reload 归零：runs=0 / never exited）。
+# 唯一办法是让**机器之外**的东西盯着，所以这里有心跳。
+
+check("notify 提供心跳发送", hasattr(_notify, "send_heartbeat"))
+check("notify 提供心跳 URL 读取", hasattr(_notify, "load_heartbeat_url"))
+check("心跳目标：成功用原 URL",
+      _notify.heartbeat_target("https://hc-ping.com/abc", True)
+      == "https://hc-ping.com/abc")
+check("心跳目标：失败追加 /fail",
+      _notify.heartbeat_target("https://hc-ping.com/abc", False)
+      == "https://hc-ping.com/abc/fail")
+check("心跳目标：容忍结尾斜杠",
+      _notify.heartbeat_target("https://hc-ping.com/abc/", False)
+      == "https://hc-ping.com/abc/fail")
+
+# 未配置心跳**不是故障**：要如实说"未配置"，但不能抛异常、不能重试
+# （否则没配心跳的人每天定时任务都会失败）。
+import tempfile as _tf9  # noqa: E402
+_sv_root = _notify.ROOT
+_sv_env = {k: os.environ.pop(k, None) for k in _notify.HEARTBEAT_ENV_KEYS}
+_sv_tmp = _P2(_tf9.mkdtemp(prefix="pdca-selftest-notify-"))
+_notify.ROOT = _sv_tmp          # 让 .env 查找落在临时目录（不读用户真实 .env）
+try:
+    _hb_url, _hb_src = _notify.load_heartbeat_url()
+    check("未配置心跳时如实报告", _hb_url is None and "未配置" in _hb_src, _hb_src)
+    _hb_ok, _hb_msg = _notify.send_heartbeat(True, "自检")
+    check("未配置心跳时不抛异常、不算成功",
+          _hb_ok is False and "未配置" in _hb_msg, _hb_msg)
+
+    # 真的发一次 —— 用**本机回环**上的假服务，不碰外网。
+    # 只测字符串拼接是不够的：要证明 /fail 真的被请求到了。
+    import http.server as _hs  # noqa: E402
+    import threading as _th  # noqa: E402
+
+    _seen: list = []
+
+    class _HBHandler(_hs.BaseHTTPRequestHandler):
+        def do_POST(self):                      # noqa: N802（标准库要求的名字）
+            _n = int(self.headers.get("Content-Length") or 0)
+            _seen.append((self.path, self.rfile.read(_n).decode("utf-8", "replace")))
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *a):              # 别把自检输出弄脏
+            pass
+
+    _srv = _hs.HTTPServer(("127.0.0.1", 0), _HBHandler)
+    _th.Thread(target=_srv.serve_forever, daemon=True).start()
+    os.environ["HEALTHCHECK_URL"] = f"http://127.0.0.1:{_srv.server_port}/uuid-x"
+    try:
+        _ok1, _m1 = _notify.send_heartbeat(True, "完成2 未完成3")
+        _ok2, _m2 = _notify.send_heartbeat(False, "读取失败1")
+        check("心跳成功路径可发", _ok1, _m1)
+        check("心跳失败路径可发", _ok2, _m2)
+        check("成功 ping 打在主 URL", _seen and _seen[0][0] == "/uuid-x",
+              str(_seen[:1]))
+        check("失败 ping 打在 /fail",
+              len(_seen) > 1 and _seen[1][0] == "/uuid-x/fail", str(_seen[1:2]))
+        # 隐私约定：心跳只送计数摘要，**不送日报正文**
+        check("心跳请求体只含摘要",
+              len(_seen) > 1 and "完成2" in _seen[0][1] and "未完成3" in _seen[0][1])
+    finally:
+        _srv.shutdown()
+        os.environ.pop("HEALTHCHECK_URL", None)
+finally:
+    _notify.ROOT = _sv_root
+    for _k, _v in _sv_env.items():
+        if _v is not None:
+            os.environ[_k] = _v
+    _sh7.rmtree(_sv_tmp, ignore_errors=True)
+
+# 计划时间必须与 plist 一致 —— 否则"迟到"判断会照着错的时间算，
+# 而这类不一致**不会报错**，只会让你看到一句错的告警。
+_plist_rep = (ROOT / "deploy" / "com.carl.pdca.report.plist").read_text(
+    encoding="utf-8")
+check("report 的计划时间与 plist 一致",
+      f"<key>Hour</key>\n\t\t<integer>{_rp.SCHEDULE_HOUR}</integer>" in _plist_rep
+      and f"<key>Minute</key>\n\t\t<integer>{_rp.SCHEDULE_MINUTE}</integer>" in _plist_rep,
+      f"report.py 写的是 {_rp.SCHEDULE_HOUR:02d}:{_rp.SCHEDULE_MINUTE:02d}")
+
+# 生成时刻 / 迟到告警：launchd 睡过后会在唤醒时补跑（man launchd.plist：
+# coalesced into one event upon wake），所以日报**必须自己说出**它多新。
+_t11, _b11 = _rp.build_report(_rp.ReportData(
+    date=_RD, generated_at=_dt2.datetime(2026, 10, 3, 21, 30)))
+check("日报带生成时刻", "生成于 21:30" in _b11)
+check("准时时不报迟到", "延迟" not in _t11 and "比计划" not in _b11)
+
+_t12, _b12 = _rp.build_report(_rp.ReportData(
+    date=_RD, generated_at=_dt2.datetime(2026, 10, 4, 7, 5), schedule_offset=575))
+check("迟到时标题标注", "延迟" in _t12, _t12)
+check("迟到时正文说明晚了多久", "9 小时35 分" in _b12, _b12)
+
+# 反过来也要管：睡过 21:30、凌晨才醒，于是**次日**跑了一份空日报 ——
+# 不标出来的话，你只会看到一份莫名其妙的空报告，而昨天那份永远不会来了。
+_t12b, _b12b = _rp.build_report(_rp.ReportData(
+    date=_RD, generated_at=_dt2.datetime(2026, 10, 3, 0, 40),
+    schedule_offset=-1250))
+check("早于计划时标题标注", "非计划时间" in _t12b, _t12b)
+check("早于计划时说明上一份没发出",
+      "早 20 小时50 分" in _b12b and "不是" in _b12b, _b12b)
+
+check("偏离分钟数按计划时间算（正=晚）",
+      _rp.schedule_offset_minutes(_dt2.datetime(2026, 10, 3, 21, 30), _RD) == 0
+      and _rp.schedule_offset_minutes(_dt2.datetime(2026, 10, 3, 22, 10), _RD) == 40
+      and _rp.schedule_offset_minutes(_dt2.datetime(2026, 10, 3, 0, 40), _RD) == -1250)
+check("补跑历史日期不判偏离",
+      _rp.schedule_offset_minutes(_dt2.datetime(2026, 10, 4, 10, 0), _RD) is None)
+
+# ── 投递留痕：结果要落进 journal（logs/ 可清，journal 不可再生）
+_jm = _load(SRC / "journal.py")
+_sv_jdir = _P2(_tf9.mkdtemp(prefix="pdca-selftest-digest-"))
+_sv_jold = _jm.JOURNAL_DIR
+_jm.JOURNAL_DIR = _sv_jdir
+_jm.assert_not_real("自检会写 digest_pushed 读数")   # 重定向失败就立刻停下
+try:
+    _jm.log_digest_pushed([("telegram", False, "超时"), ("bark", False, "网络失败")],
+                          digest_date="2026-10-01", heartbeat="失败")
+    _jm.log_digest_pushed([("telegram", False, "超时"), ("bark", True, "ok")],
+                          digest_date="2026-10-02", heartbeat="已 ping")
+    _recs_d = _jm.read_day("2026-10-01")
+    check("投递结果写进 journal",
+          any(r.get("event") == "digest_pushed" for r in _recs_d))
+    check("投递记录含每通道明细",
+          any(r.get("channels") and r["channels"][0]["name"] == "telegram"
+              for r in _recs_d))
+    _ch = _jm.channel_health(days=3, end="2026-10-02")
+    check("通道读数：连续失败天数",
+          _ch["telegram"]["consecutive_fail_days"] == 2,
+          str(_ch.get("telegram")))
+    check("通道读数：成功即中断连续计数",
+          _ch["bark"]["consecutive_fail_days"] == 0, str(_ch.get("bark")))
+    check("通道读数含最近一次说明（用于区分'没配'与'坏了'）",
+          "超时" in _ch["telegram"]["last_detail"])
+
+    # run() 的完整投递路径：注入 sender + heartbeat（**不碰网络**）
+    #
+    # ⚠️ ROOT 必须一起重定向：run() 会把日报**存档**到 ROOT/data/digest/。
+    # 实测踩到：漏了这一步，自检就把 data/digest/2026-10-03.md 覆盖成了
+    # 一份空日报 —— 那是真正的历史产物（当晚推送过的那一份），
+    # 而 data/ 不在 git 里，覆盖了就没法回滚。
+    # 存档路径与 journal 一样，**测试必须指到临时目录**。
+    _sv_rroot = _rp.ROOT
+    _sv_rtmp = _P2(_tf9.mkdtemp(prefix="pdca-selftest-report-root-"))
+    _rp.ROOT = _sv_rtmp
+    if _rp.ROOT == _sv_rroot:
+        raise SystemExit("❌ 自检未能把 report.ROOT 重定向到临时目录，拒绝继续"
+                         "（否则会覆盖真实 data/digest/）")
+    try:
+        _beats: list = []
+        _rp.run(date=_RD, push=True,
+                data=_rp.ReportData(date=_RD, todos=[_rp.Todo("甲", True)]),
+                sender=lambda t, b, channels=None: [("telegram", True, "ok")],
+                heartbeat=lambda ok, summary="": (_beats.append((ok, summary)),
+                                                  (True, "已 ping"))[1])
+        check("推送成功后心跳报平安", _beats and _beats[0][0] is True, str(_beats[:1]))
+        check("心跳摘要只含计数不含内容",
+              _beats and "完成1" in _beats[0][1] and "甲" not in _beats[0][1],
+              str(_beats[:1]))
+        check("run 把投递结果落进 journal",
+              any(r.get("event") == "digest_pushed"
+                  for r in _jm.read_day(_RD.isoformat())))
+        check("日报存档落在临时 ROOT 而不是真实 data/",
+              (_sv_rtmp / "data" / "digest" / "2026-10-03.md").is_file())
+
+        # 数据不完整 → 心跳必须报**失败**（否则"跑了一半"会被当成正常）
+        _beats.clear()
+        _rp.run(date=_RD, push=True,
+                data=_rp.ReportData(date=_RD, errors=["提醒事项：拒绝访问"]),
+                sender=lambda t, b, channels=None: [("telegram", True, "ok")],
+                heartbeat=lambda ok, summary="": (_beats.append((ok, summary)),
+                                                  (True, "已 ping /fail"))[1])
+        check("数据不全时心跳报失败", _beats and _beats[0][0] is False, str(_beats[:1]))
+
+        # --no-push（只看内容）**绝不能**发心跳：否则手工预览会把
+        # "今天跑过了"这个信号伪造出来，真正漏跑时反而不会告警。
+        _beats.clear()
+        _rp.run(date=_RD, push=False, data=_rp.ReportData(date=_RD),
+                heartbeat=lambda ok, summary="": (_beats.append(ok), (True, "x"))[1])
+        check("不推送时不发心跳", not _beats, str(_beats))
+    finally:
+        _rp.ROOT = _sv_rroot
+        _sh7.rmtree(_sv_rtmp, ignore_errors=True)
+
+    # 通道连续失败要在日报里说出来（单通道静默失效只有这里能看见）。
+    #
+    # ⚠️ 两处讲究：
+    #   · 先把临时日志清空 —— 上面那几步刚写过"成功"，同一天"任一次成功
+    #     即算成功"的合并规则会让连续计数断掉，测试就会假装通过不了；
+    #   · 日期必须**相对今天**构造：连续计数是从"今天"往回数的，写死日期
+    #     会在未来的某一天悄悄失效（"过一段时间自己失效"的测试比没有更危险）。
+    _sh7.rmtree(_sv_jdir, ignore_errors=True)
+    _sv_jdir.mkdir(parents=True, exist_ok=True)
+
+    _today_d = _dt2.date.today()
+    for _off in (2, 1, 0):
+        _d_iso = (_today_d - _dt2.timedelta(days=_off)).isoformat()
+        _jm.log_digest_pushed([("telegram", False, "超时")], digest_date=_d_iso)
+        # 同一段日期里，Bark 的失败原因是"没配" —— 它**不该**被念
+        _jm.log_digest_pushed([("bark", False, "没有可用的 Bark key")],
+                              digest_date=_d_iso)
+
+    _w = _rp._channel_warnings(days=5)
+    check("连续失败会算出提示",
+          any("telegram" in x and "连续 3 天" in x for x in _w), str(_w))
+    # 这条是"判据要分得清"：没配 ≠ 坏了。把没配的通道也天天念，
+    # 只会训练你忽略这一行告警。
+    check("没配的通道不进提示（没配≠坏了）",
+          not any("bark" in x for x in _w), str(_w))
+finally:
+    _jm.JOURNAL_DIR = _sv_jold
+    _sh7.rmtree(_sv_jdir, ignore_errors=True)
 
 
 section("v4 安装脚本")

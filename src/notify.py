@@ -16,6 +16,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -159,6 +160,97 @@ def broadcast(title: str, body: str, channels: list[str] | None = None,
     return results
 
 
+# ── 心跳（外部监控）
+#
+# 为什么需要它：上面两个通道解决的是"送没送到"，但**解决不了"根本没跑"**。
+# 而"没跑"恰恰是最危险的一种失败 —— 机器睡了、launchd 任务被清了、
+# 脚本在推送前就崩了，这三种情况在**本机**全都看不出来（launchctl 里
+# 计数还会因 reload 归零，实测 runs=0 / never exited）。
+#
+# 唯一能发现"没跑"的办法，是让**机器之外**的东西盯着：
+# 跑成功就 ping 一下，到点没收到 ping 它就告警。这就是 Healthchecks 一类
+# 服务的工作方式（本机只负责"报平安"，判断在远端）。
+#
+# 隐私约定：**只送计数摘要**，绝不把日报正文（含你的待办内容）传出去。
+
+HEARTBEAT_ENV_KEYS = ("HEALTHCHECK_URL", "HC_PING_URL")
+
+
+def load_heartbeat_url() -> tuple[str | None, str]:
+    """
+    取心跳 URL，返回 (url, 来源说明)。
+
+    顺序：环境变量 HEALTHCHECK_URL / HC_PING_URL → 本仓库 .env。
+    **刻意不设默认值** —— 没配就是不配，不猜、不静默找一个代替品。
+    """
+    for key in HEARTBEAT_ENV_KEYS:
+        if os.environ.get(key):
+            return os.environ[key].strip(), f"环境变量 {key}"
+
+    env = _read_env_file(ROOT / ".env")
+    for key in HEARTBEAT_ENV_KEYS:
+        if env.get(key):
+            return env[key].strip(), f"本仓库 .env 的 {key}"
+
+    return None, "未配置（.env 里没有 HEALTHCHECK_URL）"
+
+
+def heartbeat_target(url: str, ok: bool) -> str:
+    """
+    由心跳 URL 推出本次要 POST 的地址（纯函数，便于离线自检）。
+
+    约定来自 Healthchecks 的 Pinging API：
+        成功 → 原 URL
+        失败 → 原 URL + "/fail"    （主动上报失败，缩短告警延迟）
+    """
+    base = url.rstrip("/")
+    return base if ok else base + "/fail"
+
+
+def send_heartbeat(ok: bool, summary: str = "",
+                   attempts: int = 3) -> tuple[bool, str]:
+    """
+    给外部心跳服务发一次 ping。返回 (是否成功, 说明)。**永不抛异常**。
+
+    · 未配置 → (False, "未配置…")，不重试、不报错（没配心跳不是故障）。
+    · 失败重试 `attempts` 次（默认 3）：心跳丢一次会被远端误判成"任务没跑"，
+      所以它比普通推送更值得重试；重试本身无害（远端只是多记一次 ping）。
+    · `summary` 只放计数，不放正文 —— 见上面的隐私约定。
+    """
+    url, source = load_heartbeat_url()
+    if not url:
+        return False, source
+
+    target = heartbeat_target(url, ok)
+
+    data = summary.encode("utf-8") if summary else b""
+    last = "未尝试"
+    for i in range(max(1, attempts)):
+        req = urllib.request.Request(
+            target, data=data,
+            headers={"Content-Type": "text/plain; charset=utf-8"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                if 200 <= resp.status < 300:
+                    tail = "（已上报失败）" if not ok else ""
+                    return True, f"已 ping{tail}（来源：{source}）"
+                last = f"HTTP {resp.status}"
+        except urllib.error.HTTPError as e:
+            # 4xx 基本是 URL 配错，重试没有意义 —— 但要说清楚，别静默
+            last = f"HTTP {e.code}"
+            if 400 <= int(e.code) < 500:
+                return False, f"心跳被拒（{last}）：{target}"
+        except Exception as e:  # noqa: BLE001
+            last = f"{type(e).__name__}: {e}"
+
+        if i < attempts - 1:
+            time.sleep(2 + 3 * i)          # 2s、5s —— 短退避，别拖住定时任务
+
+    return False, f"心跳失败（试了 {attempts} 次）：{last}"
+
+
 def main() -> int:
     """命令行自测：python3 src/notify.py '标题' '正文' [url]"""
     import argparse
@@ -170,12 +262,29 @@ def main() -> int:
     ap.add_argument("--channels", default="telegram,bark",
                     help="要测的通道，逗号分隔（默认 telegram,bark）")
     ap.add_argument("--status", action="store_true", help="只查看配置状态")
+    ap.add_argument("--heartbeat", choices=["ok", "fail"],
+                    help="只测心跳（ok=报平安，fail=主动上报失败）")
     args = ap.parse_args()
+
+    if args.heartbeat:
+        hb, hb_source = load_heartbeat_url()
+        if not hb:
+            print(f"❌ {hb_source}")
+            return 2
+        summary = "手动自测心跳（不含任何日报内容）"
+        ok, msg = send_heartbeat(args.heartbeat == "ok", summary=summary)
+        print(f"  {'✅' if ok else '❌'} {msg}")
+        return 0 if ok else 2
 
     if args.status or not args.title:
         key, source = load_bark_key()
         print("通道配置状态：")
         print(f"  Bark:     {'✅ 可用' if key else '❌ 不可用'}  （来源：{source}）")
+        hb, hb_source = load_heartbeat_url()
+        print(f"  心跳:     {'✅ 已配置' if hb else '⚠️ 未配置'}  （来源：{hb_source}）")
+        if hb:
+            print(f"            成功→{heartbeat_target(hb, True)}")
+            print(f"            失败→{heartbeat_target(hb, False)}")
         try:
             import telegram as tg
             token, chat = tg.load_config()

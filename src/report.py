@@ -44,6 +44,26 @@ ROOT = Path(__file__).resolve().parent.parent
 # 备忘放多久还没被删掉，就在日报里提醒一次（天）
 MEMO_NAG_DAYS = 3
 
+# 日报的计划时间。**必须与 deploy/com.carl.pdca.report.plist 的
+# StartCalendarInterval 保持一致**（自检里有一条断言盯着这个一致性）。
+#
+# 为什么要在这里也知道计划时间：launchd 的语义是"睡过了就在唤醒时补跑"
+# （man launchd.plist：coalesced into one event upon wake），所以 21:30 的
+# 日报完全可能在第二天早上才发出 —— 而正文里若没有生成时刻，你**看不出来**。
+SCHEDULE_HOUR = 21
+SCHEDULE_MINUTE = 30
+
+# 比计划时间前后差多少分钟算"不在计划时间上"（要在日报里明确说出来）。
+# 两边都要管：
+#   · 晚 —— 机器在 21:30 没醒，唤醒后补跑（22:15、23:50 都算）
+#   · 早 —— 睡过了 21:30，凌晨才醒，于是**次日 00:40** 跑了一份"新一天"的日报：
+#          它数据没错，但内容是空的，而且昨天那份**永远不会来了**。
+#          不标出来的话，你只会看到一份莫名其妙的空日报。
+SCHEDULE_GRACE_MIN = 30
+
+# 某条通道连续多少天没成功，就在日报里提示（否则单通道静默失效能瞒你几个月）
+CHANNEL_WARN_DAYS = 3
+
 
 @dataclass
 class Todo:
@@ -70,12 +90,20 @@ class Memo:
 
 @dataclass
 class ReportData:
-    """日报的全部输入（三处快照）。"""
+    """日报的全部输入（三处快照 + 投递读数）。"""
     date: dt.date
     todos: list[Todo] = field(default_factory=list)
     events: list[Event] = field(default_factory=list)      # 明天的日程
     memos: list[Memo] = field(default_factory=list)        # 需要提醒的备忘
     errors: list[str] = field(default_factory=list)        # 某处读失败时的说明
+    # 生成本份的时刻 —— 也就是**数据截止时刻**。为空时正文不写这一行
+    # （测试里注入假数据时可以不管它）。
+    generated_at: dt.datetime | None = None
+    # 本次运行相对计划时间（21:30）的偏移分钟数：正=晚、负=早、None=不适用
+    # （比如补跑历史日期）。见 SCHEDULE_GRACE_MIN 的说明。
+    schedule_offset: int | None = None
+    # 投递通道的读数提示（如"telegram 已连续 3 天投递失败"）
+    channel_warnings: list[str] = field(default_factory=list)
 
     @property
     def done(self) -> list[Todo]:
@@ -96,9 +124,29 @@ def build_report(data: ReportData) -> tuple[str, str]:
         完成 / 未完成 / 明日日程 / 备忘提醒
     """
     d = data.date
-    title = f"📋 {d.isoformat()} 复盘"
+    off = data.schedule_offset
+    late = off is not None and off > SCHEDULE_GRACE_MIN
+    early = off is not None and off < -SCHEDULE_GRACE_MIN
+    mark = "（延迟）" if late else ("（非计划时间）" if early else "")
+    title = f"📋 {d.isoformat()} 复盘{mark}"
 
     lines: list[str] = []
+
+    # 生成时刻 = 数据截止时刻。写在最前面，因为"这份数据有多新"决定了
+    # 后面每一行该不该信 —— 详见 CONCEPT.md 的 P0
+    #「摘要必须带数据截止时间，陈旧就明确告警」。
+    if data.generated_at:
+        lines.append(f"🕘 生成于 {data.generated_at.strftime('%H:%M')}"
+                     f"（数据截至同一时刻）")
+        _hhmm = f"{SCHEDULE_HOUR:02d}:{SCHEDULE_MINUTE:02d}"
+        if late:
+            lines.append(f"⚠️ 比计划（{_hhmm}）晚 {_fmt_offset(off)}"
+                         f" —— 多半是机器在计划时间没醒，唤醒后才补跑")
+        elif early:
+            lines.append(f"⚠️ 比计划（{_hhmm}）早 {_fmt_offset(off)}"
+                         f" —— 本次**不是** {_hhmm} 那一趟（机器唤醒后补跑，"
+                         f"或手工触发）；也就是说上一份日报没有发出")
+        lines.append("")
 
     if data.done:
         lines.append(f"✅ 今日完成 {len(data.done)} 件")
@@ -146,6 +194,14 @@ def build_report(data: ReportData) -> tuple[str, str]:
             lines.append(f"　{e}")
         lines.append("")
 
+    if data.channel_warnings:
+        # 注意区分：这**不是**"本次投递失败"（那会走心跳告警），
+        # 而是"某条通道已经好几天没成功了" —— 单通道静默失效只有这里能看见。
+        lines.append("⚠️ 投递通道读数：")
+        for w in data.channel_warnings:
+            lines.append(f"　{w}")
+        lines.append("")
+
     lines.append("─" * 30)
     lines.append("做完的在「提醒事项」里打钩 ✓")
     lines.append("（发一句给我也行，比如「明天交电费」）")
@@ -154,6 +210,55 @@ def build_report(data: ReportData) -> tuple[str, str]:
 
 
 # ── 数据采集（真实路径，全部只读）
+
+def _fmt_offset(minutes: int | None) -> str:
+    """把"差了多少分钟"写成人的说法（取绝对值）。"""
+    m = abs(int(minutes or 0))
+    if m < 60:
+        return f"{m} 分钟"
+    h, mm = divmod(m, 60)
+    return f"{h} 小时{mm} 分" if mm else f"{h} 小时"
+
+
+def schedule_offset_minutes(now: dt.datetime,
+                            report_date: dt.date) -> int | None:
+    """
+    本次运行相对计划时间的偏移（分钟）：正=晚、负=早、None=不适用。
+
+    只对"当天"的日报有意义：手工补跑历史日期（`report.py 2026-10-01`）
+    不该被判成迟到或早到，所以日期不是今天就返回 None。
+    """
+    if report_date != now.date():
+        return None
+    planned = dt.datetime.combine(
+        report_date, dt.time(SCHEDULE_HOUR, SCHEDULE_MINUTE))
+    return int((now - planned).total_seconds() // 60)
+
+
+# 通道失败说明里出现这些字样时，属于"没配"而不是"坏了"——
+# 没配的通道不该天天在日报里被念（那是配置问题，不是故障）。
+_NOT_CONFIGURED_HINTS = ("未配置", "没有可用的 Bark key")
+
+
+def _channel_warnings(days: int = 14) -> list[str]:
+    """
+    从 journal 的 `digest_pushed` 读数里算出"哪条通道好久没成功了"。
+
+    ⚠️ 这是**读数的汇总**，不是状态源 —— 与备忘录台账同一性质。
+    """
+    import journal
+
+    out: list[str] = []
+    for name, h in sorted(journal.channel_health(days).items()):
+        n = int(h.get("consecutive_fail_days") or 0)
+        if n < CHANNEL_WARN_DAYS:
+            continue
+        if any(s in str(h.get("last_detail", "")) for s in _NOT_CONFIGURED_HINTS):
+            continue
+        since = (h.get("last_ok") or "")[:16].replace("T", " ") or "从未成功"
+        out.append(f"{name} 已连续 {n} 天投递失败（最近一次成功：{since}）")
+    return out
+
 
 def collect(date: dt.date | None = None,
             memo_nag_days: int = MEMO_NAG_DAYS) -> ReportData:
@@ -183,6 +288,12 @@ def collect(date: dt.date | None = None,
         data.memos = _read_stale_memos(today, memo_nag_days)
     except Exception as e:  # noqa: BLE001
         data.errors.append(f"备忘台账：{e}")
+
+    # ④ 投递通道读数（同样来自 journal，只用于"好久没成功"的提示）
+    try:
+        data.channel_warnings = _channel_warnings()
+    except Exception as e:  # noqa: BLE001
+        data.errors.append(f"通道读数：{e}")
 
     return data
 
@@ -300,18 +411,26 @@ def run(date: dt.date | None = None, push: bool = True,
         channels: list[str] | None = None,
         memo_nag_days: int = MEMO_NAG_DAYS,
         data: ReportData | None = None,
-        sender: Callable[..., list] | None = None) -> tuple[str, str, bool]:
+        sender: Callable[..., list] | None = None,
+        heartbeat: Callable[..., tuple] | None = None,
+        now: dt.datetime | None = None) -> tuple[str, str, bool]:
     """
     生成并（可选）推送日报。返回 (标题, 正文, 推送是否至少一个通道成功)。
 
-    `data` 给定时跳过采集（测试用）；`sender` 给定时跳过真实推送。
+    `data` 给定时跳过采集（测试用）；`sender` / `heartbeat` 给定时跳过真实推送
+    与真实心跳（测试用）。`now` 给定时用它当"生成时刻"（测试"偏离计划"分支用）。
 
     ⚠️ 第三个返回值是给**退出码**用的。原先 run 不返回推送结果，
     main 于是永远返回 0 —— 推送全失败时 launchd 仍显示"成功"，
     你会以为日报发出去了。**静默失败比报错更危险**，所以必须如实上报。
     """
-    today = date or dt.date.today()
+    generated_at = now or dt.datetime.now()
+    today = date or generated_at.date()
     data = data or collect(today, memo_nag_days)
+    data.date = today
+    if data.generated_at is None:
+        data.generated_at = generated_at
+        data.schedule_offset = schedule_offset_minutes(generated_at, today)
     title, body = build_report(data)
 
     print(title)
@@ -330,6 +449,7 @@ def run(date: dt.date | None = None, push: bool = True,
         print(f"⚠️ 存档失败（不影响推送）：{e}", file=sys.stderr)
 
     pushed_ok = True          # 未推送（--no-push）视为成功
+    results: list[tuple[str, bool, str]] = []
     if push:
         import notify
         send = sender or notify.broadcast
@@ -343,7 +463,52 @@ def run(date: dt.date | None = None, push: bool = True,
             print("⚠️ 所有通道都推送失败（日报已存档，但没送到你手上）",
                   file=sys.stderr)
 
+        # 心跳：告诉**机器之外**的监控"这一份算完整并送到了"。
+        # 判据刻意严格 —— 读失败也算失败（数据不完整同样需要你介入）。
+        beat = heartbeat or getattr(notify, "send_heartbeat", None)
+        if beat is not None:
+            intact = not data.errors
+            hb_ok, hb_msg = beat(
+                pushed_ok and intact, summary=_heartbeat_summary(data, results))
+            print(f"  {'✅' if hb_ok else '⚠️'} 心跳: {hb_msg}")
+
+        # 投递结果落进 journal（**不可再生的留痕**，而 logs/ 是可以随时清的）。
+        # 失败不影响主流程，但要明说 —— 静默失败比报错危险。
+        try:
+            import journal
+            journal.log_digest_pushed(
+                results, digest_date=today.isoformat(),
+                generated_at=generated_at.isoformat(timespec="seconds"),
+                schedule_offset=data.schedule_offset, heartbeat=hb_msg)
+        except Exception as e:  # noqa: BLE001
+            print(f"⚠️ 投递结果没能记进 journal（不影响送达）：{e}",
+                  file=sys.stderr)
+
     return title, body, pushed_ok
+
+
+def _heartbeat_summary(data: ReportData,
+                       results: list[tuple[str, bool, str]]) -> str:
+    """
+    心跳请求体：**只放计数，不放内容**。
+
+    心跳服务的日志是第三方存储，而日报正文里有你的待办原文 ——
+    所以这里刻意只报数字（本机 logs/ 里引用你的内容都只留前 30 字符，
+    对外发送更不该带原文）。
+    """
+    ch = " ".join(f"{name}{'✓' if ok else '✗'}" for name, ok, _ in results)
+    parts = [
+        f"完成{len(data.done)}",
+        f"未完成{len(data.open_items)}",
+        f"明日日程{len(data.events)}",
+        f"备忘{len(data.memos)}",
+        f"读取失败{len(data.errors)}",
+    ]
+    if data.schedule_offset is not None:
+        parts.append(f"偏离计划{data.schedule_offset}分")
+    if ch:
+        parts.append(f"通道[{ch}]")
+    return " ".join(parts)
 
 
 def main() -> int:

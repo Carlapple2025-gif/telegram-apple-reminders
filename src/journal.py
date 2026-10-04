@@ -112,6 +112,7 @@ EV_MEMO_ADDED = "memo_added"
 EV_MEMO_CLEARED = "memo_cleared"
 EV_OBSERVED = "observed"      # 一次快照观察的结果
 EV_ERROR = "error"            # 处理失败（供排查）
+EV_DIGEST_PUSHED = "digest_pushed"   # 日报投递结果（含每通道成败与心跳结果）
 
 # 会用到的日期键（某些事件跨天出现，需要单独记）
 DATE_KEY = "for_date"
@@ -220,6 +221,32 @@ def log_error(where: str, detail: str) -> dict:
     return append(EV_ERROR, where=where, detail=detail)
 
 
+def log_digest_pushed(results: list, digest_date: str = "",
+                      generated_at: str = "", schedule_offset: int | None = None,
+                      heartbeat: str = "") -> dict:
+    """
+    记下一次日报投递：**每通道**成败 + 本次是否偏离计划时间 + 心跳结果。
+
+    为什么要记进 journal 而不是只 print 到 logs/：
+    logs/ 是程序日志（README 明说"可随时清"），而"这份日报到底送到没有"
+    属于**读数**，丢了就再也查不出来 —— 所以它该落在不可再生的 journal 里。
+
+    `results` 形如 [("telegram", True, "已发送（message_id=93）"), ...]。
+    `schedule_offset` 是相对 21:30 的分钟数（正=晚、负=早、None=不适用）。
+    """
+    rec = append(
+        EV_DIGEST_PUSHED,
+        digest_date=digest_date,
+        generated_at=generated_at,
+        schedule_offset=schedule_offset,
+        heartbeat=heartbeat,
+        channels=[{"name": str(name), "ok": bool(ok), "detail": str(detail)}
+                  for name, ok, detail in results],
+        **({DATE_KEY: digest_date} if digest_date else {}),
+    )
+    return rec
+
+
 # ── 纠正：把"用户指的是哪一条"解析出来
 #
 # 两条路径（见 docs/ARCHITECTURE.md 的"纠正"一节）：
@@ -318,6 +345,73 @@ def submitted_memos(days: int = 365, end: str | None = None) -> dict[str, dict]:
             cleared.add(mid)
 
     return {k: v for k, v in added.items() if k not in cleared}
+
+
+def channel_health(days: int = 14, end: str | None = None) -> dict[str, dict]:
+    """
+    从 `digest_pushed` 读数里汇总**每通道最近一次成功**与**连续失败天数**。
+
+    ⚠️ 与 submitted_memos 同类：这不是"当前状态"，而是**读数的汇总**。
+    它回答的是"我上一次把日报送出去是什么时候"，用于在日报里提示
+    "某个通道已经好几天没成功了"（否则单通道静默失效可以瞒你几个月）。
+
+    同一天多次投递（手工重跑）按"任一次成功即算当天成功"合并 ——
+    失败重试成功不该被记为失败。
+    """
+    per_day: dict[str, dict[str, bool]] = {}
+    last_ok: dict[str, str] = {}
+    seen: dict[str, str] = {}
+    last_detail: dict[str, str] = {}
+
+    for rec in read_range(days, end):
+        if rec.get("event") != EV_DIGEST_PUSHED:
+            continue
+        day = rec.get("digest_date") or str(rec.get("at", ""))[:10]
+        at = str(rec.get("at", ""))
+        for ch in rec.get("channels") or []:
+            name = str(ch.get("name", ""))
+            if not name:
+                continue
+            ok = bool(ch.get("ok"))
+            seen.setdefault(name, at)
+            seen[name] = at
+            last_detail[name] = str(ch.get("detail", ""))
+            day_map = per_day.setdefault(day, {})
+            day_map[name] = day_map.get(name, False) or ok
+            if ok:
+                last_ok[name] = at
+
+    today = dt.date.fromisoformat(end) if end else dt.date.today()
+    out: dict[str, dict] = {}
+    for name in seen:
+        # 连续失败天数：从最后一天往前数，直到遇到"这天成功"
+        streak = 0
+        for i in range(0, max(days, 1)):
+            d = (today - dt.timedelta(days=i)).isoformat()
+            st = per_day.get(d, {}).get(name)
+            if st is None:
+                continue          # 那天没有读数（还没跑），不计入也不中断
+            if st:
+                break
+            streak += 1
+        out[name] = {
+            "last_ok": last_ok.get(name, ""),
+            "consecutive_fail_days": streak,
+            "days_since_ok": _days_since(last_ok.get(name, ""), today),
+            "last_detail": last_detail.get(name, ""),
+        }
+    return out
+
+
+def _days_since(iso_at: str, today: dt.date) -> int | None:
+    """某个 ISO 时刻距今天几天。解析不了返回 None（**不猜**）。"""
+    if not iso_at:
+        return None
+    try:
+        delta = (today - dt.datetime.fromisoformat(iso_at).date()).days
+    except ValueError:
+        return None
+    return max(delta, 0)      # 时区/补写可能算出负数，负数没有意义
 
 
 def main() -> int:
