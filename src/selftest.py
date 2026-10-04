@@ -1471,6 +1471,27 @@ try:
           _f.calls[0][4])
     check("周期日程：按全天处理", _f.calls[0][5] is True)
     check("周期日程：回执说人话", "每周一" in _o.reply, _o.reply)
+
+    # ⚠️ 周期 + **明说时刻**：时刻必须留下（2026-10-04 修）
+    #
+    # 修之前：`first_occurrence()` 的"09:00 + 全天"默认会把明说的"八点"
+    # **静默丢掉** —— 日历里落一条全天重复事件，而你以为写了时刻。
+    # 写使用说明时才发现，而当时自检没覆盖"周期 + 时刻"这个组合。
+    _i, _f = _new_intake()
+    _i.handle("@每天八点 跑步", _B)
+    check("周期+时刻：时刻没被丢掉",
+          _f.calls[0][2] == _dt2.datetime(2026, 10, 3, 8, 0), str(_f.calls[0][2]))
+    check("周期+时刻：不再按全天写", _f.calls[0][5] is False, str(_f.calls[0][5]))
+    check("周期+时刻：时长 1 小时",
+          _f.calls[0][3] - _f.calls[0][2] == _dt2.timedelta(hours=1),
+          str(_f.calls[0][3] - _f.calls[0][2]))
+    check("周期+时刻：RRULE 还在", _f.calls[0][4] == "FREQ=DAILY", _f.calls[0][4])
+
+    # 日期归重复规则、时刻归载荷 —— 两者各管各的（不能被时刻带跑日期）
+    _i, _f = _new_intake()
+    _i.handle("@每周一 早上九点 站会", _B)
+    check("周期+时刻：日期仍落在周一",
+          _f.calls[0][2] == _dt2.datetime(2026, 10, 5, 9, 0), str(_f.calls[0][2]))
 finally:
     _sh2.rmtree(_d, ignore_errors=True)
 
@@ -1796,7 +1817,7 @@ check("日志截断：换行被替换", "\n" not in _dm._trunc("a\nb"))
 
 # daemon 依赖的 telegram 接口必须存在（改了 telegram 会在这里断掉）
 for _fn in ("send", "send_with_buttons", "answer_callback", "get_updates",
-            "load_config"):
+            "load_config", "send_chat_action"):
     check(f"telegram 提供 {_fn}", hasattr(_tg, _fn))
 
 
@@ -2006,6 +2027,44 @@ check("run_once 对非文本消息真的回了话（不是 continue 了事）",
 check("启动通知静音发送",
       "tg.send(STARTUP_NOTICE, disable_notification=True)" in _dm_src)
 check("回执按成败分档静音", "send_receipt(reply, silent=out.ok)" in _dm_src)
+
+section("发声面：老按钮止转圈（V7）与「正在输入」（V9）")
+
+# V7：老按钮被点一下必须**回应一句** —— 否则客户端上那个按钮一直转圈
+# （老消息还留在聊天记录里）。这里验的是"真的回应了、且没写任何东西"。
+_d = _fresh_journal()
+_saved_ans = _tg.answer_callback
+_saved_get = _tg.get_updates
+_saved_state = _dm.STATE_FILE
+_answered: list = []
+try:
+    _dm.STATE_FILE = _d / "state.json"
+    _tg.answer_callback = (lambda cid, text=None, alert=False:
+                           _answered.append((cid, text)))
+    _tg.get_updates = lambda offset=None, limit=20, timeout=0: [
+        {"update_id": 77, "callback_query": {
+            "id": "CB1", "message": {"message_id": 5, "chat": {"id": "chat"}}}}]
+    _dm.run_once(offset=1, wait=1)
+    check("V7：老按钮点击被回应（不再永远转圈）",
+          bool(_answered) and _answered[0][0] == "CB1", str(_answered))
+    check("V7：回应的是一句陈述（说明已过期）",
+          bool(_answered) and "过期" in (_answered[0][1] or ""), str(_answered))
+    check("V7：仍然一个字都不写（回调不是内容）",
+          _dm.load_offset() == 78, str(_dm.load_offset()))
+finally:
+    _tg.answer_callback = _saved_ans
+    _tg.get_updates = _saved_get
+    _dm.STATE_FILE = _saved_state
+    _sh2.rmtree(_d, ignore_errors=True)
+
+# V9：写 App 要几秒（AppleScript），所以处理前发一个"正在输入"。
+# 它不产生消息，所以不像"先回一条收到"那样刷聊天记录。
+check("telegram 提供 send_chat_action", hasattr(_tg, "send_chat_action"))
+# ⚠️ 自检会真的调 handle_message —— 静音阀必须挡住它，否则每次自检都打真网络
+check("V9：自检期被 PDCA_SUPPRESS_SEND 挡住（不会真发）",
+      _tg.send_chat_action("typing") is False)
+check("V9：handle_message 在处理前发过 typing",
+      'tg.send_chat_action("typing")' in _dm_src)
 
 check("真实自检用分钟精度断言（与 applecal.add 一致）",
       "second=0" in (ROOT / "tools" / "selftest-live.py").read_text(encoding="utf-8"),

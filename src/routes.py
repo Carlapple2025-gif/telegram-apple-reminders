@@ -160,6 +160,26 @@ def _route_event(body: str, raw: str, base: dt.date | None) -> Item:
     recur = whens.parse_recurrence(body)
     if recur:
         when = whens.first_occurrence(recur, ref)
+        # ⚠️ 载荷里若**明说了时刻**，必须用上它。
+        #
+        # `first_occurrence()` 走的是"周期表达通常不带具体时刻"的默认
+        # （09:00 + 全天）。于是 `@每天八点 跑步` 的"八点"会被**静默丢掉** ——
+        # 日历里落的是一条**全天**的重复事件，而你以为写了时刻。
+        # 2026-10-04 实测踩到（写使用说明时才发现，自检当时也没覆盖这条组合）。
+        #
+        # 日期仍由重复规则决定（"每周一"必须落在周一），这里**只取时刻**。
+        _timed = whens.parse_when(body, base)
+        if _timed is not None and _timed.has_time:
+            _start = when.start.replace(hour=_timed.start.hour,
+                                        minute=_timed.start.minute)
+            when = whens.When(
+                start=_start,
+                end=_start + dt.timedelta(hours=1),   # 与"给了时刻"的默认时长一致
+                all_day=False,
+                has_date=True,        # 重复规则已经定死了是哪一天
+                has_time=True,
+                date_text=when.date_text,
+                time_text=_timed.time_text)
     else:
         when = whens.parse_when(body, base)
 

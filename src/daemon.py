@@ -286,6 +286,9 @@ def handle_message(text: str, msg_id: int, chat: str,
     那种断言测的是"今天是几号"，不是代码对不对。
     """
     _log(f"收到：{_trunc(text)!r}")
+    # 让等待看得见（V9）：写 AppleScript 要几秒（冷启动更久），
+    # 而这条消息在聊天里此前是"发完没动静"。不产生消息、失败也不影响任何事。
+    tg.send_chat_action("typing")
     it = _make_intake()
 
     # 类型由符号声明（routes.py），所以这里**没有**任何"上一条在等什么"
@@ -336,10 +339,17 @@ def run_once(offset: int | None = None, wait: int = 25) -> int | None:
         new_offset = max(new_offset or 0, u.get("update_id", 0) + 1)
 
         # 回调（按钮点击）不再处理：按钮机制已整体删除。
-        # 保留这个分支只为**忽略**这类更新并推进 offset ——
-        # 否则历史遗留的老按钮被点一下，会让这一批更新反复重放。
+        # 但**必须回应一句** —— 否则客户端上那个按钮会一直转圈：
+        # 老消息还留在聊天记录里，点一下就是永远转圈（V7）。
+        #
+        # 为什么不用 drain_stale_callbacks（它能回应 + 撤按钮）：它在末尾会把
+        # **Telegram 侧的读取位置**推到最新，而那不是我们保存的 offset ——
+        # 守护停机期间收到的真消息会被一起跳掉。这就是"顺手复用"的陷阱。
         if "callback_query" in u:
-            _log("忽略按钮回调（按钮机制已删除）")
+            cb = u.get("callback_query") or {}
+            tg.answer_callback(cb.get("id", ""),
+                               text="这条已过期（按钮机制已删除）")
+            _log("忽略按钮回调（按钮机制已删除），已回应「这条已过期」")
             continue
 
         msg = u.get("message")

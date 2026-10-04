@@ -138,6 +138,36 @@ def send(text: str, chat_id: str | None = None,
     return _call(token, "sendMessage", params)
 
 
+def send_chat_action(action: str = "typing",
+                     chat_id: str | None = None) -> bool:
+    """
+    发一个"正在输入"状态。返回是否发出。
+
+    **绝不抛异常、也不重试**：它唯一的作用是让等待看得见，
+    失败不该影响任何事 —— 所以调用方可以不看返回值。
+
+    Telegram 只在 **5 秒**内显示这个状态，超时自然消失。对这里够用：
+    要遮住的正是 AppleScript 写 App 的那几秒（冷启动时更久）。
+    它**不产生消息**，所以不像"先回一条收到"那样刷聊天记录
+    （取舍见 docs/TELEGRAM-VOICE.md 的 V9）。
+
+    `PDCA_SUPPRESS_SEND` 一并抑制（与 notify 同一思路）：自检会真的调
+    `handle_message`，不该因此打真网络。
+    """
+    if os.environ.get("PDCA_SUPPRESS_SEND"):
+        return False
+    token, cfg_chat = load_config()
+    chat = chat_id or cfg_chat
+    if not token or not chat:
+        return False
+    try:
+        _call(token, "sendChatAction",
+              {"chat_id": chat, "action": action}, timeout=10)
+        return True
+    except TelegramError:
+        return False
+
+
 # ── 内联按钮（inline keyboard）
 #
 # 为什么用它：让用户在聊天里**逐个打字回复**太慢，条目多了根本受不了。
