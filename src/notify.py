@@ -192,7 +192,7 @@ def load_heartbeat_url() -> tuple[str | None, str]:
         if env.get(key):
             return env[key].strip(), f"本仓库 .env 的 {key}"
 
-    return None, "未配置（.env 里没有 HEALTHCHECK_URL）"
+    return None, "未配置（.env 里没有 HEALTHCHECK_URL；配法见 .env.example）"
 
 
 def heartbeat_target(url: str, ok: bool) -> str:
@@ -269,7 +269,21 @@ def main() -> int:
     if args.heartbeat:
         hb, hb_source = load_heartbeat_url()
         if not hb:
+            # 提示要指向**能走通的路**，否则等于把人丢在原地
+            # （本项目踩过：错误提示指向一个已经删掉的脚本）。
             print(f"❌ {hb_source}")
+            print()
+            print("怎么配（healthchecks.io 免费档够用，20 个任务）：")
+            print("  1. 注册后建一个 check")
+            print("  2. Schedule 选 Cron，填     30 21 * * *")
+            print("     （与 deploy/com.carl.pdca.report.plist 的 21:30 一致）")
+            print("  3. Grace Time 设 1 小时")
+            print("     （机器睡过头、唤醒后补跑时不会误报）")
+            print("  4. 把它的 ping URL 追加到 pdca/.env：")
+            print("     HEALTHCHECK_URL=https://hc-ping.com/xxxxxxxx-xxxx-...")
+            print("  5. 在 check 的 Integrations 里接上 Telegram（@HealthchecksBot）")
+            print()
+            print("配完再跑一次本命令，应回 “已 ping”。")
             return 2
         summary = "手动自测心跳（不含任何日报内容）"
         ok, msg = send_heartbeat(args.heartbeat == "ok", summary=summary)
