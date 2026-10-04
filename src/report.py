@@ -470,7 +470,10 @@ def run(date: dt.date | None = None, push: bool = True,
             intact = not data.errors
             hb_ok, hb_msg = beat(
                 pushed_ok and intact, summary=_heartbeat_summary(data, results))
-            print(f"  {'✅' if hb_ok else '⚠️'} 心跳: {hb_msg}")
+            # "没配"是选择，不是故障：中性标记，不当告警（否则每晚刷一行警告，
+            # 久了就没人看这一行了 —— 那正是"告警疲劳"）。
+            hb_off = "未配置" in hb_msg
+            print(f"  {'✅' if hb_ok else ('·' if hb_off else '⚠️')} 心跳: {hb_msg}")
 
         # 投递结果落进 journal（**不可再生的留痕**，而 logs/ 是可以随时清的）。
         # 失败不影响主流程，但要明说 —— 静默失败比报错危险。
@@ -479,7 +482,8 @@ def run(date: dt.date | None = None, push: bool = True,
             journal.log_digest_pushed(
                 results, digest_date=today.isoformat(),
                 generated_at=generated_at.isoformat(timespec="seconds"),
-                schedule_offset=data.schedule_offset, heartbeat=hb_msg)
+                schedule_offset=data.schedule_offset,
+                heartbeat=("未配置" if hb_off else hb_msg))
         except Exception as e:  # noqa: BLE001
             print(f"⚠️ 投递结果没能记进 journal（不影响送达）：{e}",
                   file=sys.stderr)

@@ -219,7 +219,9 @@ def send_heartbeat(ok: bool, summary: str = "",
     """
     url, source = load_heartbeat_url()
     if not url:
-        return False, source
+        # 没配是**选择**，不是故障 —— 返回一句短的，别天天在日报里报"警告"。
+        # （配法提示留给 --status 与 --heartbeat，那里才是你要看的时候。）
+        return False, "未配置（跳过）"
 
     target = heartbeat_target(url, ok)
 
