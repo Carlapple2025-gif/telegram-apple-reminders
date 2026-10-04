@@ -26,6 +26,15 @@ ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
 
+# ⚠️ 自检的最外层安全阀：**禁止一切真实发送**。
+#
+# 实测踩到过：验证看门狗时忘了给 alert_once 注入假 sender，于是两条**真告警**
+# 直接推到了手机上。通知类代码的测试有个特点 —— 忘一次就是一次真实打扰，
+# 而"到底发出去没有"在断言里看不出来（返回 True 也可能是真的发了）。
+# 所以在入口处声明：这一轮跑的是自检，notify 的发送原语一律抑制。
+# （与 journal 的 PDCA_JOURNAL_DIR 同一思路：测试环境由调用方声明。）
+os.environ["PDCA_SUPPRESS_SEND"] = "1"
+
 failures: list[str] = []
 checks = 0
 
@@ -2550,6 +2559,148 @@ try:
 finally:
     _jm.JOURNAL_DIR = _sv_jold
     _sh7.rmtree(_sv_jdir, ignore_errors=True)
+
+
+section('v4 日报看门狗（守护进程里盯"今天送出没有"）')
+
+# 这一节补的是"日报自己发不出声"的那一类失败：进程崩在推送前、任务被清、
+# 授权失效 —— 共同点是**机器醒着，只是日报没跑成**，所以由常驻的守护来盯。
+#
+# 三条约束逐条验：不加状态文件（读数派生）、绝不抛异常、每天最多一次。
+_wd = _load(SRC / "watchdog.py")
+_jw = _load(SRC / "journal.py")
+_sv_jd2 = _P2(_tf9.mkdtemp(prefix="pdca-selftest-watchdog-"))
+_sv_jo2 = _jw.JOURNAL_DIR
+_jw.JOURNAL_DIR = _sv_jd2
+_jw.assert_not_real("自检会写 digest_missing 读数")
+try:
+    _d4 = _dt2.datetime(2026, 10, 4, 23, 40)
+    _day4 = "2026-10-04"
+
+    # ① 没到点不打扰（只是晚了，不是没跑）
+    _should, _why = _wd.pending(_dt2.datetime(2026, 10, 4, 23, 0))
+    check("未到 23:30 不告警", _should is False and "23:30" in _why, _why)
+
+    # ② 到点且今天没有投递读数 → 该告警
+    _should, _why = _wd.pending(_d4)
+    check("到点没送到 → 该告警", _should is True, _why)
+
+    # ③ 今天送到了 → 不告警
+    _jw.log_digest_pushed([("telegram", True, "ok")], digest_date=_day4)
+    check("今天已送到 → 不告警", _wd.pending(_d4)[0] is False)
+    check("delivered_on 认得出今天送达", _jw.delivered_on(_day4) is True)
+
+    # ④ 送达读数在**别的**日期不算数（判据必须按当天）
+    check("别的日期的送达不算今天",
+          _jw.delivered_on("2026-10-05") is False)
+
+    # ⑤ 换一天，真发一次（注入 sender，不碰网络），并验证"每天最多一次"
+    _day6 = "2026-10-06"
+    _d6 = _dt2.datetime(2026, 10, 6, 23, 45)
+    _sent_wd: list = []
+    _ok, _detail = _wd.alert_once(
+        now=_d6, sender=lambda t, b: (_sent_wd.append((t, b)),
+                                      [("telegram", True, "ok")])[1])
+    check("告警真的发出去了", _ok and len(_sent_wd) == 1, _detail)
+    check("告警标题说明是日报没送到",
+          "日报没送到" in _sent_wd[0][0], _sent_wd[0][0])
+    # 正文要给**能走通的路**（不能只说"出错了"）
+    check("告警正文给出补跑命令", "src/report.py" in _sent_wd[0][1])
+    check("告警把'计划 21:30'说清楚", "21:30" in _sent_wd[0][1])
+
+    _ok2, _why2 = _wd.alert_once(now=_d6,
+                                 sender=lambda t, b: [("telegram", True, "ok")])
+    check("同一天不重复告警（冷却靠读数，不靠状态文件）",
+          _ok2 is False and "已经告警过" in _why2, _why2)
+    check("冷却判据来自 journal 读数", _jw.alerted_on(_day6) is True)
+
+    # ⑥ 绝不抛异常：sender 炸了也要返回说明，不能冒到守护的主循环
+    _day7 = "2026-10-07"
+    _ok3, _why3 = _wd.alert_once(
+        now=_dt2.datetime(2026, 10, 7, 23, 45),
+        sender=lambda t, b: (_ for _ in ()).throw(RuntimeError("通道炸了")))
+    check("通道异常被兜住（不冒到守护）", _ok3 is False and "炸了" in _why3, _why3)
+    # 发失败也要留痕：否则下一轮（1 秒后）会再试，变成刷屏
+    check("发失败也记账（避免刷屏）", _jw.alerted_on(_day7) is True)
+
+    # ⑦ 读数/落盘全都不可用时也不抛，而且**不会刷屏**
+    _sv_jd3 = _jw.JOURNAL_DIR
+    _jw.JOURNAL_DIR = _P2("/System/pdca-selftest-not-writable")  # 读不到也写不进
+    try:
+        _wd._ALERTED_IN_PROCESS.clear()
+        _suppressed: list = []
+        # ⚠️ 这里**必须**注入 sender：漏注入就是真的往手机推（实测踩到过，
+        # 两条真告警直接出去了）。notify 另有 PDCA_SUPPRESS_SEND 兜底。
+        _fake = lambda t, b: (_suppressed.append(t), [("fake", True, "ok")])[1]  # noqa: E731
+        _ok4, _why4 = _wd.alert_once(now=_d4, sender=_fake)
+        check("journal 不可用时仍返回说明而不抛",
+              isinstance(_why4, str) and bool(_why4), _why4)
+        _ok5, _why5 = _wd.alert_once(now=_d4, sender=_fake)
+        check("journal 不可用时也不会每轮重发（内存备忘挡住刷屏）",
+              _ok5 is False and "已经告警过" in _why5, _why5)
+        check("（该情形下确实只尝试发过一次）", len(_suppressed) == 1,
+              str(len(_suppressed)))
+    finally:
+        _wd._ALERTED_IN_PROCESS.clear()
+        _jw.JOURNAL_DIR = _sv_jd3
+
+    # ⑧ 守护里的调用点：必须**只在非离线模式**下跑
+    _dmn_src = (SRC / "daemon.py").read_text(encoding="utf-8")
+    check("守护调用了看门狗", "watchdog.tick()" in _dmn_src)
+    check("离线模式不跑看门狗",
+          "if not _OFFLINE:" in _dmn_src and "import watchdog" in _dmn_src)
+    # 导入必须在**循环之外**且失败降级：否则 watchdog 一旦被改坏
+    # （语法错/被删），ImportError 会穿出主循环 → 崩溃循环 → 收件中断。
+    # 附加组件不该有能力把唯一的收件职责带停。
+    check("看门狗导入在循环之外（不进崩溃循环）",
+          _dmn_src.index("import watchdog") < _dmn_src.index(
+              "    _consecutive_failures = 0"),
+          "import 出现在主循环之后")
+    check("看门狗导入失败会降级并留一行日志",
+          "看门狗不可用（不影响收件）" in _dmn_src)
+    check("循环里不再逐轮 import 看门狗",
+          "if _watchdog is not None:" in _dmn_src)
+finally:
+    _jw.JOURNAL_DIR = _sv_jo2
+    _sh7.rmtree(_sv_jd2, ignore_errors=True)
+
+
+section("v4 日报的 gap 行（漏跑几天后，恢复时说出来）")
+
+# 与看门狗的分工：看门狗管当天（23:30 还没送到就喊），
+# gap 行管事后对账（漏了几天）—— 机器整晚没醒时只有它能说话。
+_sv_jd4 = _P2(_tf9.mkdtemp(prefix="pdca-selftest-gap-"))
+_sv_jo4 = _jm.JOURNAL_DIR
+_jm.JOURNAL_DIR = _sv_jd4
+_jm.assert_not_real("自检会写 digest_pushed 读数")
+try:
+    _today_g = _dt2.date(2026, 10, 10)
+
+    # 没有历史读数 → 不提示（"从没跑过"与"刚装的"分不清，就不猜）
+    check("无历史时不提示", _rp._digest_gap_note(_today_g) == "")
+
+    # 昨天有、今天没有 → 不提示（连续，没有漏）
+    _jm.log_digest_pushed([("telegram", True, "ok")], digest_date="2026-10-09")
+    check("只差一天时不提示", _rp._digest_gap_note(_today_g) == "")
+
+    # 换一个干净的读数目录：最后一份是 10-07（今天 10-10）→ 3 天前、漏 2 次。
+    # ⚠️ 必须换目录：journal 是追加式的，同目录里 10-09 那份会一直在，
+    # `max(dates)` 就会取到它，"漏跑"这个场景根本构造不出来。
+    _sh7.rmtree(_sv_jd4, ignore_errors=True)
+    _sv_jd4.mkdir(parents=True, exist_ok=True)
+    _jm.log_digest_pushed([("telegram", True, "ok")], digest_date="2026-10-07")
+    _note = _rp._digest_gap_note(_today_g)
+    check("漏跑会算出「上一份是几天前」", "3 天前" in _note, _note)
+    check("漏跑会算出漏了几次", "漏了 2 次" in _note, _note)
+    check("gap 行指向读数出处", "data/journal/" in _note, _note)
+
+    # 渲染进日报正文（这是用户唯一能看到的地方）
+    _t13, _b13 = _rp.build_report(_rp.ReportData(
+        date=_today_g, digest_gap_note=_note))
+    check("gap 行出现在日报正文里", "漏了 2 次" in _b13, _b13)
+finally:
+    _jm.JOURNAL_DIR = _sv_jo4
+    _sh7.rmtree(_sv_jd4, ignore_errors=True)
 
 
 section("v4 安装脚本")

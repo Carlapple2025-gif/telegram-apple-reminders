@@ -104,6 +104,8 @@ class ReportData:
     schedule_offset: int | None = None
     # 投递通道的读数提示（如"telegram 已连续 3 天投递失败"）
     channel_warnings: list[str] = field(default_factory=list)
+    # "上一份日报是什么时候"的提示（连续漏跑后在恢复时说出来）
+    digest_gap_note: str = ""
 
     @property
     def done(self) -> list[Todo]:
@@ -202,6 +204,12 @@ def build_report(data: ReportData) -> tuple[str, str]:
             lines.append(f"　{w}")
         lines.append("")
 
+    if data.digest_gap_note:
+        # 与看门狗分工：看门狗管"当天 23:30 还没送到"（实时），
+        # 这一行管"漏了几天，现在补上了"（事后对账）。
+        lines.append(f"⚠️ {data.digest_gap_note}")
+        lines.append("")
+
     lines.append("─" * 30)
     lines.append("做完的在「提醒事项」里打钩 ✓")
     lines.append("（发一句给我也行，比如「明天交电费」）")
@@ -260,6 +268,33 @@ def _channel_warnings(days: int = 14) -> list[str]:
     return out
 
 
+def _digest_gap_note(today: dt.date, days: int = 30) -> str:
+    """
+    "上一份日报是什么时候" —— 连续漏跑后，在**恢复的这一份**里说出来。
+
+    与看门狗的分工：看门狗管"当天 23:30 还没送到"（实时告警），
+    这一行管事后对账（"中间漏了几次"）—— 机器整晚没醒时只有它能说话。
+
+    没有历史读数时**不提示**：那既可能是"从没跑过"，也可能是"刚装的"，
+    分不清就不猜（沿用 `_channel_warnings` 的同一条判据）。
+    """
+    import journal
+
+    dates = [d for d in journal.digest_dates(days=days, end=today.isoformat())
+             if d < today.isoformat()]
+    if not dates:
+        return ""
+    last = max(dates)
+    try:
+        missed = (today - dt.date.fromisoformat(last)).days - 1
+    except ValueError:
+        return ""
+    if missed <= 0:
+        return ""
+    return (f"上一份日报是 {missed + 1} 天前（{last}），"
+            f"中间漏了 {missed} 次 —— 详情见 data/journal/ 的读数")
+
+
 def collect(date: dt.date | None = None,
             memo_nag_days: int = MEMO_NAG_DAYS) -> ReportData:
     """
@@ -289,9 +324,10 @@ def collect(date: dt.date | None = None,
     except Exception as e:  # noqa: BLE001
         data.errors.append(f"备忘台账：{e}")
 
-    # ④ 投递通道读数（同样来自 journal，只用于"好久没成功"的提示）
+    # ④ 投递读数（同样来自 journal：通道健康 + 上次投递是哪天）
     try:
         data.channel_warnings = _channel_warnings()
+        data.digest_gap_note = _digest_gap_note(today)
     except Exception as e:  # noqa: BLE001
         data.errors.append(f"通道读数：{e}")
 

@@ -70,6 +70,9 @@ def send_bark(title: str, body: str, url: str | None = None,
     level="timeSensitive" 可穿透专注模式 —— 验证码那种场景需要，
     日报提醒不需要，所以默认不设。
     """
+    if os.environ.get("PDCA_SUPPRESS_SEND"):
+        # 测试用安全阀：见 broadcast() 上的说明。
+        return False, "已抑制发送（PDCA_SUPPRESS_SEND）"
     key, source = load_bark_key()
     if not key:
         return False, (
@@ -120,6 +123,8 @@ def send_bark(title: str, body: str, url: str | None = None,
 
 def send_telegram(title: str, body: str) -> tuple[bool, str]:
     """发 Telegram 消息。未配置时返回 (False, 说明)，由调用方决定是否在意。"""
+    if os.environ.get("PDCA_SUPPRESS_SEND"):
+        return False, "已抑制发送（PDCA_SUPPRESS_SEND）"
     try:
         import telegram as tg
     except ImportError as e:
@@ -144,7 +149,18 @@ def broadcast(title: str, body: str, channels: list[str] | None = None,
 
     `channels` 默认 ["telegram", "bark"] —— **两个都发**是有意的：
     两个通道互为冗余，任一不可用另一条仍能到达。
+
+    ⚠️ 环境变量 `PDCA_SUPPRESS_SEND` 会让所有发送变成"已抑制"：
+    这是给**测试**的安全阀。实测踩到过一次：自检验证看门狗时忘了注入假
+    sender，结果两条真告警直接推到了手机上 —— 通知类代码的测试，
+    忘一次就是一次真实打扰（而"有没有真的发出去"在断言里看不出来）。
+    与 journal 的 `PDCA_JOURNAL_DIR` 同一思路：测试环境由调用方声明。
     """
+    if os.environ.get("PDCA_SUPPRESS_SEND"):
+        channels = channels or ["telegram", "bark"]
+        return [(ch, False, "已抑制发送（PDCA_SUPPRESS_SEND）")
+                for ch in channels]
+
     channels = channels or ["telegram", "bark"]
     results: list[tuple[str, bool, str]] = []
 

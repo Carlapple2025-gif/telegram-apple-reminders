@@ -387,6 +387,26 @@ def main() -> int:
     else:
         _log("（启动通知处于冷却期，跳过 —— 避免反复重启时刷屏）")
 
+    # 看门狗在**循环之外**只导入一次，且失败就降级为大白话一行日志。
+    #
+    # 为什么不在循环里 `import watchdog`：那条 import 一旦失败
+    # （文件被改坏、语法错、被误删），ImportError/SyntaxError 不会被循环的
+    # `except (OSError, HTTPException)` 兜住 → 进程退出 → KeepAlive 拉起
+    # → 再退出 = **崩溃循环**，而那期间你发的消息没人接。
+    # 收件是守护的唯一职责，一个附加组件不该有能力把它带停。
+    # （也不能静默：失败必须留下一行看得见的原因。）
+    #
+    # 放在 `_consecutive_failures` 之上是有意的：下面那段主循环的静态检查
+    # 断言"兜底只兜瞬时类、不吞编程错误"，这里的宽 except 属于**循环之外**
+    # 的降级路径，不该混进那条断言的作用范围。
+    _watchdog = None
+    if not _OFFLINE:
+        try:
+            import watchdog as _watchdog
+        except Exception as e:  # noqa: BLE001 —— 故意的：降级而不是崩
+            _log(f"看门狗不可用（不影响收件）：{type(e).__name__}: "
+                 f"{_trunc(str(e))}")
+
     _consecutive_failures = 0
     while _running:
         # 主循环这道兜底是**最后一道**（run_once 内部已各自兜住网络错与单条消息错）：
@@ -400,6 +420,12 @@ def main() -> int:
             # --once 用短轮询：验证时不该干等长轮询的超时
             offset = run_once(offset, wait=1 if args.once else 25)
             _consecutive_failures = 0
+            # 日报看门狗：到点检查"今天那份送出没有"（不新增状态、每天最多一次、
+            # 内部吞掉一切异常 —— 见 watchdog.py 顶部说明）。
+            # 放在这里而不是单独一个定时任务：守护本来就在跑，多一个任务就多一处
+            # "装了没生效"的可能（本项目在 launchd 上踩过两次）。
+            if _watchdog is not None:
+                _watchdog.tick()
         except (OSError, http.client.HTTPException) as e:
             _consecutive_failures += 1
             _log(f"循环异常（第 {_consecutive_failures} 次，继续运行）："

@@ -113,6 +113,7 @@ EV_MEMO_CLEARED = "memo_cleared"
 EV_OBSERVED = "observed"      # 一次快照观察的结果
 EV_ERROR = "error"            # 处理失败（供排查）
 EV_DIGEST_PUSHED = "digest_pushed"   # 日报投递结果（含每通道成败与心跳结果）
+EV_DIGEST_MISSING = "digest_missing"  # 到点没送到 → 看门狗发过一次告警
 
 # 会用到的日期键（某些事件跨天出现，需要单独记）
 DATE_KEY = "for_date"
@@ -345,6 +346,45 @@ def submitted_memos(days: int = 365, end: str | None = None) -> dict[str, dict]:
             cleared.add(mid)
 
     return {k: v for k, v in added.items() if k not in cleared}
+
+
+def log_digest_missing(day: str, detail: str = "", channel: str = "") -> dict:
+    """
+    记下"这一天到点没送到，看门狗已经告警过一次"。
+
+    这条记录有两个作用：
+      · 看门狗靠它**每天最多告警一次**（不引入新的状态文件）；
+      · 复盘时能看出"哪几天真的漏了"（digest_pushed 里没有的那些天）。
+    """
+    return append(EV_DIGEST_MISSING, digest_date=day, detail=detail,
+                  channel=channel, **{DATE_KEY: day})
+
+
+def digest_dates(days: int = 30, end: str | None = None) -> list[str]:
+    """
+    最近这些天里，**确实投递过**日报的日期（升序、去重）。
+
+    这是"读数里有哪些天送出去了"，不是状态源 —— 与 submitted_memos 同一性质。
+    """
+    seen = set()
+    for rec in read_range(days, end):
+        if rec.get("event") != EV_DIGEST_PUSHED:
+            continue
+        day = rec.get("digest_date") or str(rec.get("at", ""))[:10]
+        if day:
+            seen.add(str(day))
+    return sorted(seen)
+
+
+def delivered_on(day: str) -> bool:
+    """这一天有没有投递成功的读数（供看门狗判断"今天送到没有"）。"""
+    return day in digest_dates(days=1, end=day)
+
+
+def alerted_on(day: str) -> bool:
+    """这一天是否已经因"没送到"告警过（供看门狗做每日一次的冷却）。"""
+    return any(rec.get("event") == EV_DIGEST_MISSING
+               for rec in read_day(day))
 
 
 def channel_health(days: int = 14, end: str | None = None) -> dict[str, dict]:
