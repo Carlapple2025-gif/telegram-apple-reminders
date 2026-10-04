@@ -224,6 +224,15 @@ def add(text: str, title: str | None = None) -> Memo:
 
     调用方拿到 note_id 后应记进 journal（`journal.log_memo`），
     那是观察阶段判断"这条还在不在"的凭据。
+
+    ## ⚠️ 只给 `body`，**不给 `name`**（2026-10-04 修）
+
+    备忘录里"**第一行就是标题**"是 Notes 自己的语义 —— 我们再把同一段
+    设给 `name`，等于把首行写了两遍，于是用户看到"标题和正文重复"。
+    首行由 Notes 自己升格成标题，我们不要替它做这件事。
+
+    `title` 参数仍然保留，但语义变成"**想指定的标题**"：
+    给了就作为首行（从而成为笔记标题），没给就用正文首行。
     """
     text = (text or "").strip()
     if not text:
@@ -234,19 +243,20 @@ def add(text: str, title: str | None = None) -> Memo:
     # ① 记录写入前的 id 集合
     before = snapshot_ids()
 
-    # ② 建笔记。标题用首行，正文用全文（HTML，每行一个 <div>，
-    #    否则多行会被折叠成一行 —— 实测结论）
-    first_line = text.splitlines()[0][:120]
+    # ② 建笔记。正文每行一个 <div>（多行会被折叠成一行 —— 实测结论），
+    #    首行即标题。**刻意不传 name**（见 docstring）。
+    lines = text.splitlines()
+    first_line = lines[0][:120]
     name = (title or first_line).strip()
-    body_html = "".join(
-        f"<div>{_html_escape(line)}</div>" for line in text.splitlines() or [""]
-    )
+    if title:
+        lines = [title] + lines          # 指定标题 → 它就是首行
+    body_html = "".join(f"<div>{_html_escape(ln)}</div>" for ln in (lines or [""]))
 
     run_applescript(
         'tell application "Notes"\n'
         f'  set targetFolder to folder id {_as_literal(fid)}\n'
         f'  make new note at targetFolder with properties '
-        f'{{name:{_as_literal(name)}, body:{_as_literal(body_html)}}}\n'
+        f'{{body:{_as_literal(body_html)}}}\n'
         '  return "ok"\n'
         'end tell')
 

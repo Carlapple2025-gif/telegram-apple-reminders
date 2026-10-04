@@ -79,6 +79,33 @@ _SYMBOL_KIND = {
 DEFAULT_KIND = Kind.TODO
 
 
+def _clean_memo_body(payload: str) -> str:
+    """
+    备忘正文：**保留换行**，只归一化行内空白、去掉首尾空行。
+
+    ⚠️ 为什么不能直接用 `whens.clean_text()`（那是给待办/日程标题用的）：
+    它把 `\\s+` 折成一个空格，于是**多行备忘会被压成一行**。
+    实测（2026-10-04，journal 里 input 与 memo_added 对照）：
+
+        input:       '# 国庆假期冲刺规划\\n1. PDCA模型跑通\\n2. 文生视频…'
+        memo_added:  '国庆假期冲刺规划 1. PDCA模型跑通 2. 文生视频…'   ← 4 行变 1 行
+
+    而 `memo.add()` 是**按行**建 `<div>` 的（它的注释写着"否则多行会被折叠成一行
+    —— 实测结论"）—— 也就是说**写入端本来就是为多行设计的**，
+    把它压平的是路由这一层。这是"一处按单行假设、另一处按多行实现"的错配。
+
+    行内的多余空格仍然收掉（中英文混排时那通常是输入法的锅），
+    但**行与行之间的分隔是用户的意思**，不许动。
+    """
+    lines = [re.sub(r"[ \t\u3000]+", " ", ln).strip()
+             for ln in (payload or "").splitlines()]
+    while lines and not lines[0]:
+        lines.pop(0)
+    while lines and not lines[-1]:
+        lines.pop()
+    return "\n".join(lines)
+
+
 def route(text: str, base: dt.date | None = None) -> Item:
     """
     把一句输入变成 `Item`。**不写任何东西** —— 纯函数，可离线测。
@@ -94,7 +121,9 @@ def route(text: str, base: dt.date | None = None) -> Item:
 
     payload, kind = _split_symbol(raw)
 
-    body = whens.clean_text(payload)
+    # 备忘保留换行，待办/日程的正文必须是单行标题 —— 两者不能共用 clean_text
+    body = (_clean_memo_body(payload) if kind is Kind.MEMO
+            else whens.clean_text(payload))
     if not body:
         raise RouteError("只有符号、没有内容")
 

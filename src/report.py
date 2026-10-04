@@ -183,7 +183,11 @@ def build_report(data: ReportData) -> tuple[str, str]:
     if data.memos:
         lines.append(f"📝 备忘放了 {MEMO_NAG_DAYS} 天以上，还没处理：")
         for m in data.memos:
-            lines.append(f"　{m.text}")
+            # 备忘正文**可以是多行的**（2026-10-04 起路由层保留换行 ——
+            # 那之前多行会被折成一行）。日报里只放首行：
+            # 否则一条备忘就能把日报撑开好几行，段落结构也会被它带乱。
+            first, *rest = (m.text or "").splitlines() or [""]
+            lines.append(f"　{first}" + ("　…" if rest else ""))
         # 这句话现在**是真的**：上面 _read_stale_memos 做了只读快照差集，
         # 你在备忘录里删掉的条目会被记成 memo_cleared 并从此不再出现在这里。
         # （曾经这里写过同样的话，但差集没接上 —— 见该函数的注释。）

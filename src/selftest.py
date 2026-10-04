@@ -1503,6 +1503,40 @@ try:
     check("备忘：类型正确", _o.kind == _K.Kind.MEMO)
     check("备忘：写的是备忘录端", _f.calls[0][0] == "memo")
     check("备忘：回执说明去向", "备忘录" in _o.reply)
+
+    # ⚠️ 多行备忘必须**保留换行**（2026-10-04 修）
+    #
+    # 修之前 `whens.clean_text()` 把 `\s+` 折成一个空格，于是
+    #   '# 国庆假期冲刺规划\n1. PDCA模型跑通\n2. 文生视频'
+    # 落到备忘录里变成一行 "国庆假期冲刺规划 1. PDCA模型跑通 2. 文生视频"。
+    # 而 memo.add 是按行建 <div> 的（写入端本来就为多行设计）——
+    # 压平它的是路由这一层，属于"一处按单行假设、另一处按多行实现"的错配。
+    _i, _f = _new_intake()
+    _i.handle("# 国庆规划\n1. PDCA\n2. 文生视频", _B)
+    check("备忘：多行保留换行",
+          _f.calls[0][1] == "国庆规划\n1. PDCA\n2. 文生视频",
+          repr(_f.calls[0][1]))
+    check("备忘：首行就是标题那一行", _f.calls[0][1].splitlines()[0] == "国庆规划",
+          repr(_f.calls[0][1]))
+
+    # 行内多余空白仍然要收掉（那是输入法的锅，不是用户的意思）
+    _i, _f = _new_intake()
+    _i.handle("# 标题   有很多空格\n第二行\t也 有", _B)
+    check("备忘：行内空白归一化",
+          _f.calls[0][1] == "标题 有很多空格\n第二行 也 有",
+          repr(_f.calls[0][1]))
+
+    # 首尾空行去掉，但中间的空行保留（那是分段）
+    _i, _f = _new_intake()
+    _i.handle("# \n\n第一段\n\n第二段\n\n", _B)
+    check("备忘：首尾空行去掉、中间空行保留",
+          _f.calls[0][1] == "第一段\n\n第二段", repr(_f.calls[0][1]))
+
+    # 待办/日程仍然是单行标题（它们不能带换行）
+    _i, _f = _new_intake()
+    _i.handle("交电费\n顺便买猫粮", _B)
+    check("待办：正文仍被折成单行（标题不能带换行）",
+          "\n" not in _f.calls[0][1], repr(_f.calls[0][1]))
 finally:
     _sh2.rmtree(_d, ignore_errors=True)
 
@@ -2167,6 +2201,20 @@ check("memo.add(text) 是合法调用", True)
 check("memo.Memo 有 note_id 字段（intake 要取它）",
       "note_id" in {f.name for f in _dc8.fields(_mm8.Memo)})
 
+# ⚠️ 建笔记时**只能给 body，不能同时给 name**（2026-10-04 修）
+#
+# 备忘录里"第一行就是标题"是 Notes 自己的语义；再把同一段设给 `name`，
+# 首行就被写了两遍 —— 用户看到的就是"标题和正文重复"。
+# 这条断言盯的是 AppleScript 属性表本身（行为要靠 Notes 才验得了，
+# 而这里能守住"不许再把 name 传回去"）。
+_mm8_src = (SRC / "memo.py").read_text(encoding="utf-8")
+check("memo.add 不再同时传 name 与 body",
+      "name:{_as_literal(name)}, body:" not in _mm8_src, "属性表里仍有 name")
+check("memo.add 仍然传 body",
+      "{body:{_as_literal(body_html)}}" in _mm8_src)
+check("memo.add 仍按行建 <div>（多行的前提）",
+      "<div>{_html_escape(ln)}</div>" in _mm8_src)
+
 # ④ daemon 用 intake 的三个私有方法（按钮指定类型时走同一条分派路径）
 for _m8 in ("_do_todo", "_do_event", "_do_memo"):
     check(f"Intake 有 {_m8}（daemon 按钮要用）", hasattr(_it.Intake, _m8))
@@ -2472,6 +2520,14 @@ check("日报含备忘提醒", "📝 备忘放了 3 天以上" in _b6 and "荷�
 # 而差集根本没接上，删掉备忘日报照旧天天提醒。断言翻回来的前提是
 # 那两处接线真的存在（见下面的"感知路径"一节）。
 check("日报说明如何消除备忘提醒", "删掉即可" in _b6)
+
+# 多行备忘在日报里**只占一行**（2026-10-04 起备忘正文保留换行）
+_t6b, _b6b = _rp.build_report(_rp.ReportData(
+    date=_RD,
+    memos=[_rp.Memo("国庆规划\n1. PDCA\n2. 文生视频", _dt2.datetime(2026, 10, 4, 9, 0))],
+))
+check("日报：多行备忘只显示首行", "　国庆规划" in _b6b and "1. PDCA" not in _b6b, _b6b)
+check("日报：截断了就给个省略提示", "国庆规划　…" in _b6b, _b6b)
 
 # 全部完成 → 不该出现"未完成"段
 _t7, _b7 = _rp.build_report(_rp.ReportData(date=_RD, todos=[_rp.Todo("甲", True)]))
