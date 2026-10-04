@@ -1647,9 +1647,15 @@ section("v4 只说时刻、而该时刻今天已过 → 顺延明天（路由层
 # 真的做了这件事。不做的话会出现"下午两点开会"在晚上说、
 # 日程却落在**今天下午两点（已经过去）**。
 #
-# 用"今天已过的时刻"构造：取当前时刻往前 2 小时，再取整点。
-_now = _dt2.datetime.now()
-_past = (_now - _dt2.timedelta(hours=2)).replace(minute=0, second=0, microsecond=0)
+# 用"基准日上已经过去的时刻"构造：基准日的 _now() 是 23:59，
+# 所以基准日白天的任何整点都算"已过"。
+#
+# ⚠️ 这里原先取的是 `datetime.now() - 2h`（**真实时钟**），而 intake 用的是
+# 固定基准日 _B —— 两者只在"运行当天正好是 _B"时一致，于是这条断言
+# 从 2026-10-04 起每天都红（实测：换一台机器/换一天跑就失败）。
+# 测试**必须**只用基准日构造输入，否则断言会随运行日期变化 ——
+# 一条永远红的断言比没有断言更糟：它会训练人忽略整份自检。
+_past = _dt2.datetime.combine(_B, _dt2.time(6, 0))
 _past_s = f"{_past.hour}点"
 
 _d = _fresh_journal()
@@ -1658,7 +1664,7 @@ try:
     _o = _i.handle(f"@{_past_s} 项目周会", _B)
     _got = _f.calls[0][2]
     check("已过的时刻被顺延到次日",
-          _got.date() == _past.date() + _dt2.timedelta(days=1),
+          _got.date() == _B + _dt2.timedelta(days=1),
           f"得到 {_got}（原时刻 {_past}）")
     check("顺延后回执如实说明", "放到了明天" in _o.reply)
     # ⚠️ 回执里显示的日期必须是**顺延后**的，不能一边写"10月3日"
