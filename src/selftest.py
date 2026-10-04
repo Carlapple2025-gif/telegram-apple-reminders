@@ -1830,7 +1830,7 @@ try:
             testing=True)
 
     _dm._make_intake = _make
-    _dm.tg.send = lambda t: _sent.append(t)
+    _dm.tg.send = lambda t, **kw: _sent.append(t)
 
     # ① 裸输入 → 提醒事项，且回执如实说明去向
     _dm.handle_message("交电费", 1, "chat")
@@ -1875,6 +1875,137 @@ finally:
     _sh2.rmtree(_d, ignore_errors=True)
     _sh2.rmtree(_dm_dir2, ignore_errors=True)
 
+
+# ── 发声面：文案必须与路由一致、音量必须分档、失败必须重试
+#
+# 对应 docs/TELEGRAM-VOICE.md 的 V1–V4（2026-10-04 实施）。
+# 单独成节的理由与别处一样：**能离线验的，不要等你收错消息才发现。**
+
+section("发声面：启动通知的样例必须真的那样路由（V1）")
+
+# ⚠️ 这条断言是冲着一次真实故障来的：符号方案落地后，启动通知还在教
+# "不打符号也能进日历/备忘录"，而它是聊天里唯一的说明书 —— 一天被教错十次。
+# 断言把每条样例**真的丢进 route()**：以后谁改了符号语义，这里先红。
+_PLACE_OF = {"todo": "提醒事项", "memo": "备忘录", "event": "日历"}
+for _t_ue, _where_ue in _dm.USAGE_EXAMPLES:
+    _o_ue = _rt.route(_t_ue, _B)
+    check(f"启动通知样例「{_t_ue}」真的去{_where_ue}",
+          _PLACE_OF.get(_o_ue.kind.value) == _where_ue,
+          f"实际 {_o_ue.kind.value}")
+
+check("启动通知逐条列出了样例（不是另一份手写文案）",
+      all(t in _dm.STARTUP_NOTICE and w in _dm.STARTUP_NOTICE
+          for t, w in _dm.USAGE_EXAMPLES), _dm.STARTUP_NOTICE)
+
+section("发声面：回执的音量 / 重试 / 截断（V2 / V3 / V6）")
+
+# 音量分档（V2）与重试（V3）都要看"实际传给通道的参数"，
+# 所以这里换成假通道来看参数 —— 而不是断言源码里有没有某句话。
+#
+# ⚠️ 重试要真睡 5 + 15 秒：自检里把等待改成 0，否则每跑一次白等 20 秒。
+# （一条要等 20 秒的自检会被跳过不跑，那还不如不写。）
+_saved_delays = _dm.REPLY_RETRY_DELAYS
+_saved_tg_send = _dm.tg.send
+_d = _fresh_journal()
+try:
+    _dm.REPLY_RETRY_DELAYS = (0, 0)
+
+    class _FlakyTg:
+        """前 fail_times 次失败、之后成功的假通道。"""
+        def __init__(self, fail_times=2):
+            self.calls: list = []
+            self.fail_times = fail_times
+
+        def send(self, text, disable_notification=False):
+            self.calls.append((text, disable_notification))
+            if len(self.calls) <= self.fail_times:
+                raise _tg.TelegramError("模拟网络失败")
+            return {"message_id": 1}
+
+    _fl = _FlakyTg()
+    _dm.tg.send = _fl.send
+    check("回执：失败两次后重试成功", _dm.send_receipt("回执", silent=True) is True)
+    check("回执：一共发了 3 次（1 + 2 次重试）",
+          len(_fl.calls) == 3, str(len(_fl.calls)))
+    check("回执静音：成功那条带 disable_notification",
+          all(s is True for _, s in _fl.calls), str(_fl.calls))
+
+    _fl2 = _FlakyTg(fail_times=99)
+    _dm.tg.send = _fl2.send
+    check("回执：一直失败就放弃，且不抛异常",
+          _dm.send_receipt("回执", silent=False) is False)
+    check("回执：失败那条不静音（要能把你叫醒）",
+          all(s is False for _, s in _fl2.calls), str(_fl2.calls))
+    _j_txt = "".join(p.read_text(encoding="utf-8") for p in _d.glob("*.jsonl"))
+    check("回执最终失败记进 journal（事后可对账）",
+          "回执最终未发出" in _j_txt, _j_txt[-200:])
+
+    class _BuggyTg:
+        """抛非通道类异常 = 编程错误。"""
+        def __init__(self):
+            self.n = 0
+
+        def send(self, text, disable_notification=False):
+            self.n += 1
+            raise ValueError("编程错误")
+
+    _bg = _BuggyTg()
+    _dm.tg.send = _bg.send
+    check("回执：编程错误不重试（不被说成网络抖动）",
+          _dm.send_receipt("回执", silent=False) is False and _bg.n == 1,
+          str(_bg.n))
+finally:
+    _dm.REPLY_RETRY_DELAYS = _saved_delays
+    _dm.tg.send = _saved_tg_send
+    _sh2.rmtree(_d, ignore_errors=True)
+
+# 回执文案（V6）：不再复述全文；待办给了时间要说出来，并说清它不会到期提醒。
+_d = _fresh_journal()
+try:
+    _i_v6, _f_v6 = _new_intake()
+    _o_v6 = _i_v6.handle("明天交电费", _B)
+    check("回执：待办也显示时间", "10月" in _o_v6.reply, _o_v6.reply)
+    check("回执：说清时间只进备注、不会到期提醒",
+          "备注" in _o_v6.reply and "到期" in _o_v6.reply, _o_v6.reply)
+    check("回执：待办的时间不说『全天』（它没有到期日）",
+          "全天" not in _o_v6.reply, _o_v6.reply)
+
+    _i_v6b, _f_v6b = _new_intake()
+    _long_v6 = "# " + "这段感慨很长" * 6
+    _o_v6b = _i_v6b.handle(_long_v6, _B)
+    check("回执：超长正文被截断（不再回声半屏）",
+          "…" in _o_v6b.reply and len(_o_v6b.reply) < 120, _o_v6b.reply)
+    check("回执截断不影响写入（App 里仍是全文）",
+          _f_v6b.calls[-1][1] == "这段感慨很长" * 6,
+          str(_f_v6b.calls[-1])[:80])
+
+    # 改动不能波及日历那一侧：全天日程**仍然**要说"（全天）"
+    _i_v6c, _f_v6c = _new_intake()
+    _o_v6c = _i_v6c.handle("@明天 项目周会", _B)
+    check("回执：全天日程仍然写『（全天）』（没被 V6 波及）",
+          "（全天）" in _o_v6c.reply, _o_v6c.reply)
+finally:
+    _sh2.rmtree(_d, ignore_errors=True)
+
+section("发声面：非文本消息不再静默丢弃（V4）")
+
+check("非文本识别：图片", _dm.non_text_kind({"photo": [{"file_id": "x"}]}) == "图片")
+check("非文本识别：语音", _dm.non_text_kind({"voice": {"file_id": "x"}}) == "语音")
+check("非文本识别：文字消息不算非文本",
+      _dm.non_text_kind({"text": "交电费"}) == "")
+# "不是文字"与"不是内容"要分开：服务类消息仍然安静跳过（回一句是打扰）
+check("非文本识别：服务类消息不算'非文本内容'",
+      _dm.non_text_kind({"new_chat_members": [{"id": 1}]}) == "")
+check("非文本回执是陈述、不是提问（不引入跨消息状态）",
+      "？" not in _dm.NON_TEXT_REPLY and "打字发我" in _dm.NON_TEXT_REPLY,
+      _dm.NON_TEXT_REPLY)
+
+_dm_src = (SRC / "daemon.py").read_text(encoding="utf-8")
+check("run_once 对非文本消息真的回了话（不是 continue 了事）",
+      "send_receipt(NON_TEXT_REPLY" in _dm_src)
+check("启动通知静音发送",
+      "tg.send(STARTUP_NOTICE, disable_notification=True)" in _dm_src)
+check("回执按成败分档静音", "send_receipt(reply, silent=out.ok)" in _dm_src)
 
 check("真实自检用分钟精度断言（与 applecal.add 一致）",
       "second=0" in (ROOT / "tools" / "selftest-live.py").read_text(encoding="utf-8"),
@@ -2309,9 +2440,21 @@ check("读取失败时列出来源", "日历：超时" in _b9 and "备忘台账�
 check("读取失败时说明可能不完整", "可能不完整" in _b9)
 
 # 无地点不该显示多余的 @
+#
+# ⚠️ 这条断言的**范围**在 2026-10-04 收窄了：页脚现在会举例"@周五两点 周会"
+# （V5 要把符号表每天念一遍），于是"整篇不含 @"不再成立。
+# 现在验的是"日程那一行没被加上地点前缀" —— 地点前缀是**全角空格 + @**。
 _t10, _b10 = _rp.build_report(_rp.ReportData(
     date=_RD, events=[_rp.Event("例会", _dt2.datetime(2026, 10, 4, 9, 0))]))
-check("日程无地点时不显示 @", "@" not in _b10)
+check("日程无地点时不显示地点前缀", "　@" not in _b10)
+
+# 页脚第二行曾经是"（发一句给我也行，比如「明天交电费」）"，紧跟"打钩 ✓"，
+# 读起来像"发一句就能打钩" —— 而机器人**没有**打钩能力：发一句只会新建一条。
+# 现在它只说自己真能做的事，并顺带把符号表念一遍（见 TELEGRAM-VOICE 的 V5）。
+check("页脚不再暗示'发一句能打钩'", "发一句给我也行" not in _b10)
+check("页脚说明'直接发'的是'加一条'", "想加一条就直接发" in _b10)
+check("页脚把符号表念了一遍（# 与 @ 都在）",
+      "# 想法" in _b10 and "@周五两点 周会" in _b10)
 
 # run() 要存档到 data/digest/ 且不推送（注入假 sender）
 import tempfile as _tf7  # noqa: E402

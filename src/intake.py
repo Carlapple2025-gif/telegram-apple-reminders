@@ -115,6 +115,12 @@ class Outcome:
 #
 # 文案要能回答"它去哪了" —— 否则用户不知道去哪儿找。
 # 这是 v1 的教训：写入成功但用户不知道写哪了，等于没写成。
+#
+# 两条约束（2026-10-04，见 docs/TELEGRAM-VOICE.md V6）：
+#   · **不复述全文**：一条 100 字的感慨被原样回声，聊天记录会变成半屏回声。
+#     正文一个字不少地写进了 App，回执只需要够你认出"是这条"。
+#   · **待办也要显示时间**：否则你给了"明天"，回执里看不到，
+#     只能打开 App 才知道记没记上（而且必须说明它不会到期提醒）。
 
 _KIND_LABEL = {
     Kind.TODO: "待办",
@@ -128,15 +134,30 @@ _KIND_PLACE = {
     Kind.MEMO: "备忘录",
 }
 
+# 回执里引用正文的上限（字符）。超过截断并加省略号。
+ECHO_MAX = 20
+
+
+def _echo(text: str) -> str:
+    """回执里引用正文：压掉换行（回执要保持单行好认）、超长截断。"""
+    t = " ".join((text or "").split())
+    return t if len(t) <= ECHO_MAX else t[:ECHO_MAX] + "…"
+
 
 def _reply_ok(it: Item, ref_id: str) -> str:
+    import whens
+
     label = _KIND_LABEL[it.kind]
     place = _KIND_PLACE[it.kind]
-    line = f"✅ 已记下（{label}）：{it.text}"
+    line = f"✅ 已记下（{label}）：{_echo(it.text)}"
     detail = []
     if it.kind is Kind.EVENT and it.when is not None:
-        import whens
         detail.append(whens.format_when(it.when))
+    elif it.kind is Kind.TODO and it.when is not None:
+        # 待办**不设到期日**（见 _real_add_todo）：时间只写进备注。
+        # 所以必须把这件事说出来 —— 否则"10月5日 周一"看起来像会到期通知。
+        detail.append(f"{whens.format_when(it.when, all_day_note=False)}"
+                      f"（只写进备注，不会到期提醒）")
     if it.recurrence:
         detail.append(_recurrence_text(it.recurrence))
     if detail:

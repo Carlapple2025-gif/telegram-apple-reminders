@@ -212,7 +212,11 @@ def build_report(data: ReportData) -> tuple[str, str]:
 
     lines.append("─" * 30)
     lines.append("做完的在「提醒事项」里打钩 ✓")
-    lines.append("（发一句给我也行，比如「明天交电费」）")
+    # 页脚第二行**不能**写成"发一句给我也行" —— 它紧跟"打钩"，
+    # 读起来像"发一句就能打钩"，而机器人没有打钩能力：发一句只会**新建**一条。
+    # 所以写成它真正能做的事：加一条。顺带把符号表每天念一遍
+    # （SYMBOL-SCHEME §6 说好的缓解措施之一）。
+    lines.append("想加一条就直接发：交电费 · # 想法 · @周五两点 周会")
 
     return title, "\n".join(lines).strip()
 

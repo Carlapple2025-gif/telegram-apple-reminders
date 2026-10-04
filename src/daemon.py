@@ -59,6 +59,114 @@ STATE_FILE = ROOT / "data" / "daemon-state.json"
 # 程序日志（logs/）可能被贴出来排查问题，不该带太多个人信息。
 TRUNC = 30
 
+
+# ── 启动通知：聊天里唯一的"用法说明"
+#
+# ⚠️ 这几条样例必须与 `routes.py` 的符号表**逐条对得上**。
+# 这里踩过一次真实的坑：符号方案落地后，这条通知还在教"不打符号也能进日历/备忘录"，
+# 而它是你唯一能在聊天里看到的说明书（没有 /help，也没有 setMyCommands）——
+# 于是**一天被教错十次**（实测 17.6 小时内进程启动 13 次）。
+# 详见 docs/TELEGRAM-VOICE.md 的 V1。
+#
+# 所以样例写成**数据**而不是一段手写的字面量：自检里有一条断言把下面每一条
+# 真的丢进 `routes.route()` 验一遍。以后谁改了符号语义，这里会先红 ——
+# 而不是等你收几天错的说明书才发现。
+USAGE_EXAMPLES: list[tuple[str, str]] = [
+    ("交电费", "提醒事项"),                     # 裸输入 = 待办（最高频）
+    ("# 学原理比学语法重要", "备忘录"),           # # = 备忘
+    ("@周五下午两点 项目周会", "日历"),           # @ = 日程
+]
+
+STARTUP_NOTICE = (
+    "👋 收件守护已启动。直接发一句就行"
+    "（行首符号决定去哪，不写符号就是待办）：\n"
+    + "\n".join(f"　　「{t}」→ {where}" for t, where in USAGE_EXAMPLES)
+)
+
+
+# ── 非文本消息：如实回一句，而不是静默丢掉
+#
+# 语音 / 图片 / 文件此前是**完全静默**的：没有回执、日志里也没有一行，
+# 表现等于"它死了"。这是一句**陈述**（我做不到），不是提问 ——
+# 不引入任何跨消息状态，所以不违反 ARCHITECTURE §十一 的判据。
+# 详见 docs/TELEGRAM-VOICE.md 的 V4。
+NON_TEXT_REPLY = (
+    "📎 这条我没法记：我只认文字消息\n"
+    "　　（语音 / 图片 / 文件都读不了 —— 请把内容打字发我）"
+)
+
+# Telegram 消息里表示"内容不是文字"的字段 → 给人看的说法。
+# 用来在日志和回执里说清"收到的是什么"，而不是笼统的"非文本"。
+_NON_TEXT_FIELDS: list[tuple[str, str]] = [
+    ("photo", "图片"), ("voice", "语音"), ("audio", "音频"),
+    ("document", "文件"), ("video", "视频"), ("video_note", "视频留言"),
+    ("sticker", "贴纸"), ("animation", "动图"), ("location", "位置"),
+    ("contact", "联系人"), ("poll", "投票"), ("dice", "骰子"),
+]
+
+
+def non_text_kind(msg: dict) -> str:
+    """
+    这条消息带的是什么非文字内容？没有则返回空串。
+
+    服务类消息（有人入群、消息被置顶…）不带这些字段，于是仍然安静跳过 ——
+    "不是文字"和"不是内容"要分开：前者该回一句，后者不该。
+    """
+    for field, label in _NON_TEXT_FIELDS:
+        if msg.get(field):
+            return label
+    return ""
+
+
+# ── 回执发送：带重试
+#
+# 为什么重试放在**这里**而不是 `telegram.send()`：
+# 通道层那条注释写明了「不做自动重试 —— 静默重试会让'没发出去'变成
+# '以为发出去了'」。那个理由依然成立，所以重试放在**看得见失败的调用方**：
+# 这里能如实记进 journal，也不会把失败咽掉。
+#
+# 为什么需要它：网络抖动是常态（实测 17.6 小时里 176 次拉取失败），
+# 而**回执发不出去时条目已经写进 App 了** —— 你那边看到的是"毫无反应"，
+# 自然反应是重发一遍 → 重复条目。详见 docs/TELEGRAM-VOICE.md 的 V3。
+REPLY_RETRY_DELAYS = (5, 15)     # 秒：第一次失败等 5 秒，再失败等 15 秒
+
+
+def send_receipt(text: str, silent: bool) -> bool:
+    """
+    发一条回执。失败按 `REPLY_RETRY_DELAYS` 重试。返回最终是否发出。
+
+    `silent=True` → `disable_notification`：不响不震（横幅与未读角标仍在）。
+    分档规则见 docs/TELEGRAM-VOICE.md 的 V2：**成功静音、失败有声**。
+
+    **绝不抛异常**：它跑在收件主路径上，发不出去不该把守护带崩
+    （崩了就漏掉后面所有消息）。最终失败会记进 journal 的 error 读数。
+    """
+    last = ""
+    for attempt in range(len(REPLY_RETRY_DELAYS) + 1):
+        if attempt:
+            time.sleep(REPLY_RETRY_DELAYS[attempt - 1])
+        try:
+            tg.send(text, disable_notification=silent)
+            if attempt:
+                _log(f"回执重试第 {attempt} 次成功")
+            return True
+        except tg.TelegramError as e:
+            # 文案带换行提示，只留第一行（与 run_once 的取舍一致）
+            last = str(e).splitlines()[0]
+            _log(f"回执发送失败（第 {attempt + 1} 次）：{_trunc(last)}")
+        except Exception as e:  # noqa: BLE001
+            # 非通道类异常 = 编程错误，重试没有意义：如实记下就放弃。
+            # （刻意不把它归成"网络又坏了"，否则真 bug 会被说成抖动。）
+            last = f"{type(e).__name__}: {e}"
+            _log(f"回执发送异常（不重试）：{_trunc(last)}")
+            break
+
+    try:
+        journal.log_error(where="receipt", detail=f"回执最终未发出：{last}")
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
 _running = True
 
 
@@ -191,7 +299,10 @@ def handle_message(text: str, msg_id: int, chat: str,
             reply += "\n\n【离线模式】实际会写：" + "；".join(calls)
         else:
             reply += "\n\n【离线模式】不写入任何东西"
-    tg.send(reply)
+    # 音量分档：**成功静音、失败有声**（docs/TELEGRAM-VOICE.md V2）。
+    # 成功时你人就在聊天界面里，横幅不提供任何新信息；
+    # 而"没记成"可能是唯一能提醒你的信号，必须能把你叫醒。
+    send_receipt(reply, silent=out.ok)
 
     # `needs_ask` 分支已删除：不再有"判不准就问一次"。
     # 写成功与否都只记一行，用户从回执本身就能看出结果。
@@ -243,24 +354,35 @@ def run_once(offset: int | None = None, wait: int = 25) -> int | None:
 
         text = (msg.get("text") or "").strip()
         if not text:
+            # 非文本消息此前是**静默丢弃**（日志都没有一行），表现等于"它死了"。
+            # 现在如实回一句。服务类消息不带内容字段 → non_text_kind 返回空 → 仍然安静跳过。
+            kind = non_text_kind(msg)
+            if kind:
+                _log(f"收到非文本消息（{kind}），未写入任何 App")
+                send_receipt(NON_TEXT_REPLY, silent=False)
             continue
         try:
             handle_message(text, msg.get("message_id", 0), chat)
         except Exception as e:  # noqa: BLE001
             # 单条失败不能让守护进程崩 —— 崩了就漏掉后面所有消息
             _log(f"处理失败：{type(e).__name__}: {_trunc(str(e))}")
-            try:
-                tg.send(f"❌ 这条没处理成：{type(e).__name__}\n"
-                        f"　　（你可以直接在对应 App 里手动加）")
-            except Exception:  # noqa: BLE001
-                pass
+            # 这条同样走 send_receipt：它自带重试且不抛异常
+            # （原先这里再套一层 try/except 吞掉失败，等于"连报错都发不出去"）。
+            send_receipt(
+                f"❌ 这条没处理成：{type(e).__name__}\n"
+                f"　　（你可以直接在对应 App 里手动加）",
+                silent=False)
 
     save_offset(new_offset)
     return new_offset
 
 
-# 启动通知的冷却时间（秒）。5 分钟内不重复发。
-NOTIFY_COOLDOWN = 300
+# 启动通知的冷却时间（秒）。
+#
+# 原先 300 秒。实测 17.6 小时内进程启动 13 次，这条通知因此重复出现约 10 次
+# （见 docs/TELEGRAM-VOICE.md 附录 D）—— 它的内容是**用法说明**，
+# 说一遍就够，重复说只是刷聊天记录。
+NOTIFY_COOLDOWN = 3600
 
 
 def _should_notify_startup() -> bool:
@@ -377,10 +499,9 @@ def main() -> int:
     # 而那恰恰是你最不想被打扰的时候。
     if _should_notify_startup():
         try:
-            tg.send("👋 pdca 收件守护已启动。直接发一句就行：\n"
-                    "　　「明天交电费」→ 提醒事项\n"
-                    "　　「周五下午两点项目周会」→ 日历\n"
-                    "　　「想起一件事，…」→ 备忘录")
+            # 静音：这条是"一切正常"的播报，不该在你锁屏时响一声。
+            # 音量分档见 docs/TELEGRAM-VOICE.md 的 V2（成功静音、失败有声）。
+            tg.send(STARTUP_NOTICE, disable_notification=True)
             _mark_notified()
         except tg.TelegramError as e:
             _log(f"启动通知发送失败（不影响运行）：{_trunc(str(e))}")

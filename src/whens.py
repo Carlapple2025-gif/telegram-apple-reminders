@@ -359,11 +359,18 @@ def _apply_period(hour: int, src: str) -> int:
     return hour
 
 
-def format_when(w: When) -> str:
-    """给人看的时间描述（回执里用）。"""
+def format_when(w: When, all_day_note: bool = True) -> str:
+    """
+    给人看的时间描述（回执里用）。
+
+    `all_day_note=False` 时不写"（全天）"：**待办**的"时间"只是备注里的一句提示，
+    它本来就没有到期日（见 `intake._real_add_todo`），说"全天"会让人以为会到期提醒。
+    （日历用它出"（全天）"是对的 —— 那里真的是一条全天日程。）
+    """
     wd = "一二三四五六日"[w.start.isoweekday() - 1]
     if w.all_day:
-        return f"{w.start.month}月{w.start.day}日 周{wd}（全天）"
+        return (f"{w.start.month}月{w.start.day}日 周{wd}"
+                + ("（全天）" if all_day_note else ""))
     return (f"{w.start.month}月{w.start.day}日 周{wd} "
             f"{w.start.hour:02d}:{w.start.minute:02d}")
 
