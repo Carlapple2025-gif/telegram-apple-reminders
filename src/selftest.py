@@ -3147,14 +3147,15 @@ check("无待办时无完成段", "✅" not in _b8)
 # 读取失败时**不能**说"没有待办" —— 那是把"读不到"说成"没有"，
 # 会让人以为一切正常（这类"静默误报"比报错更危险）。
 _t8b, _b8b = _rp.build_report(_rp.ReportData(
-    date=_RD, errors=["提醒事项：拒绝访问"]))
+    date=_RD, errors=[_rp.SourceError("提醒事项", "拒绝访问")]))
 check("提醒事项读取失败时不说\"没有待办\"", "还没有条目" not in _b8b)
 check("提醒事项读取失败时有告警", "⚠️" in _b8b)
 
 # 读取失败要如实标注，不能静默变成"今天没有待办"
 _t9, _b9 = _rp.build_report(_rp.ReportData(
     date=_RD, todos=[_rp.Todo("甲", True)],
-    errors=["日历：超时", "备忘台账：文件损坏"]))
+    errors=[_rp.SourceError("日历", "超时"),
+            _rp.SourceError("备忘台账", "文件损坏")]))
 check("读取失败时标注告警", "⚠️" in _b9)
 check("读取失败时列出来源", "日历：超时" in _b9 and "备忘台账：文件损坏" in _b9)
 check("读取失败时说明可能不完整", "可能不完整" in _b9)
@@ -3204,6 +3205,106 @@ check("时间戳解析：完整 ISO",
       _rp._parse_at("2026-10-03T10:20:30+08:00") is not None)
 check("时间戳解析：空字符串返回 None", _rp._parse_at("") is None)
 check("时间戳解析：垃圾返回 None", _rp._parse_at("不是时间") is None)
+
+
+section("日报区块注册表（加一段正文不用改 build_report）")
+
+# 为什么有这一节（2026-10-05）：
+# 原先日报正文是 `build_report()` 里一列顺序 if，于是"加一段"= 改渲染主函数。
+# 现在正文由 `BLOCKS` 声明。**这一节验的就是"声明真的成立"** ——
+# 否则注册表只是换了个写法，加区块照样要动别处。
+
+# ── 注册表本身要自洽
+_ids = [b.id for b in _rp.BLOCKS]
+check("区块 id 不重复", len(_ids) == len(set(_ids)),
+      f"重复：{sorted({i for i in _ids if _ids.count(i) > 1})}")
+check("每个区块都有 id 与 render",
+      all(b.id and callable(b.render) for b in _rp.BLOCKS))
+# 配了 heartbeat（会出现在对外摘要里）就必须有 count，否则摘要会渲染成 "完成None"
+check("配了 heartbeat 的区块必须有 count",
+      all(b.count is not None for b in _rp.BLOCKS if b.heartbeat))
+# 反过来：配了 count 却不进摘要 = 死配置（要么是漏了 heartbeat，要么是忘了删）
+check("配了 count 的区块应该也进心跳摘要（否则是死配置）",
+      all(b.heartbeat for b in _rp.BLOCKS if b.count is not None),
+      "；".join(b.id for b in _rp.BLOCKS if b.count and not b.heartbeat))
+
+# ── 产物选择
+check("blocks_for('daily') 覆盖全部已登记区块",
+      len(_rp.blocks_for("daily")) == len(_rp.BLOCKS))
+# 产物名写错要**抛**，不能悄悄渲染出一份空日报（静默失败比报错危险）
+try:
+    _rp.blocks_for("weekly_typo")
+    _bad_digest = False
+except ValueError:
+    _bad_digest = True
+check("产物名写错时抛异常（不返回空正文）", _bad_digest)
+
+# ── 每个区块：要么给行，要么给空列表；不许返回 None / 非字符串
+_rich = _rp.ReportData(
+    date=_RD,
+    todos=[_rp.Todo("做完的", True), _rp.Todo("没做完的", False)],
+    events=[_rp.Event("周会", _dt2.datetime(2026, 10, 4, 14, 0))],
+    memos=[_rp.Memo("一条备忘", _dt2.datetime(2026, 9, 20, 9, 0))],
+    errors=[_rp.SourceError("日历", "超时")],
+    generated_at=_dt2.datetime(2026, 10, 3, 21, 30),
+    channel_warnings=["telegram 已连续 3 天失败"],
+    digest_gap_note="上一份日报是 2 天前")
+_empty = _rp.ReportData(date=_RD)
+
+_shapes_ok = True
+_dead: list[str] = []
+for _b in _rp.BLOCKS:
+    for _d in (_rich, _empty):
+        _r = _b.render(_d)
+        if not isinstance(_r, list) or not all(isinstance(x, str) for x in _r):
+            _shapes_ok = False
+    # ⚠️ 判据是"**这两份 data 里至少有一份**让它出现"，不能只看 rich：
+    # `reminders_empty` 与"有待办"是**互斥**的（有待办时它必须不出现），
+    # 所以"rich 下为空"对它是**正确行为**，不是死区块。
+    if not _b.render(_rich) and not _b.render(_empty):
+        _dead.append(_b.id)
+check("每个区块渲染出 列表[str]（空列表=省略）", _shapes_ok)
+# "注册了却永远不出现" = 死区块。两份互为补集的数据（什么都有 / 什么都没有）
+# 合起来必须能点亮全部区块 —— 否则说明判据写错了，或那个区块根本是摆设。
+check("没有死区块（两份互补 data 合起来能点亮每个区块）", not _dead,
+      f"这些区块在 rich 与 empty 下都为空：{_dead}")
+
+# ── build_report 真的不再认识任何一段文案
+import inspect as _insp9  # noqa: E402
+_br_src = _insp9.getsource(_rp.build_report)
+_leaked = [w for w in ("今日完成", "未完成", "明日日程", "备忘放了",
+                       "读取失败", "投递通道读数", "上一份日报") if w in _br_src]
+check("build_report 里没有区块文案（正文全在区块里）", not _leaked,
+      f"这些文案还留在主函数里：{_leaked} → 加段落时仍要改它")
+
+# ── 心跳摘要由注册表派生（原先硬编码四品类，加品类要改三处）
+_hb = _rp._heartbeat_summary(_rich, [("telegram", True, "ok")])
+check("心跳摘要含各区块的计数", "完成1" in _hb and "未完成1" in _hb
+      and "明日日程1" in _hb and "备忘1" in _hb, _hb)
+check("心跳摘要仍有读取失败计数", "读取失败1" in _hb, _hb)
+check("心跳摘要仍然只报数字（不带正文）",
+      "一条备忘" not in _hb and "没做完的" not in _hb, _hb)
+check("心跳摘要的顺序跟着 BLOCKS 声明走",
+      [_hb.index(f"{b.heartbeat}") for b in _rp.BLOCKS
+       if b.heartbeat] == sorted(_hb.index(f"{b.heartbeat}")
+                                 for b in _rp.BLOCKS if b.heartbeat), _hb)
+
+# ── 两条"防退化"的判据（都是这次重构顺带修掉的静默失效）
+# ① 来源判断必须是**精确匹配**：以前写的是 `"提醒事项" in e`（子串包含），
+#    换个来源名或改个文案就会静默失效 —— 而它守的是"读不到不能说成没有"。
+_f = _rp.ReportData(date=_RD, errors=[_rp.SourceError("提醒事项（旧权限）", "x")])
+check("failed() 是精确匹配（子串不算）", _f.failed("提醒事项") is False,
+      "子串匹配会让'另一个来源名里恰好含提醒事项'被误判成读取失败")
+check("failed() 命中同来源", _rp.ReportData(
+    date=_RD, errors=[_rp.SourceError("提醒事项", "x")]).failed("提醒事项") is True)
+
+# ② 备忘提醒的天数要用**这次实际用的**，不是模块常量
+#    （实测过的正文撒谎：`--memo-days 7` 筛 7 天，正文写"3 天以上"）
+_b7d = _rp.build_report(_rp.ReportData(date=_RD, memo_nag_days=7, memos=[
+    _rp.Memo("放了很久的事", _dt2.datetime(2026, 9, 20, 9, 0))]))[1]
+check("备忘天数随 --memo-days 变（正文不撒谎）", "放了 7 天以上" in _b7d, _b7d)
+check("默认仍是 3 天", "放了 3 天以上" in _rp.build_report(_rp.ReportData(
+    date=_RD, memos=[_rp.Memo("x", _dt2.datetime(2026, 9, 20, 9, 0))]))[1])
 
 
 section("v4 投递与监控（心跳 / 投递留痕 / 生成时刻）")
@@ -3378,7 +3479,8 @@ try:
         # 数据不完整 → 心跳必须报**失败**（否则"跑了一半"会被当成正常）
         _beats.clear()
         _rp.run(date=_RD, push=True,
-                data=_rp.ReportData(date=_RD, errors=["提醒事项：拒绝访问"]),
+                data=_rp.ReportData(date=_RD, errors=[
+                    _rp.SourceError("提醒事项", "拒绝访问")]),
                 sender=lambda t, b, channels=None: [("telegram", True, "ok")],
                 heartbeat=lambda ok, summary="": (_beats.append((ok, summary)),
                                                   (True, "已 ping /fail"))[1])

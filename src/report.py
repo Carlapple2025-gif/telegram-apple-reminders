@@ -67,6 +67,32 @@ SCHEDULE_GRACE_MIN = 30
 CHANNEL_WARN_DAYS = 3
 
 
+# ── 数据来源的名字（**精确匹配用，不做子串匹配**）
+#
+# ⚠️ 这几个常量存在的理由是一条踩过的坑：判断"提醒事项这次读到了吗"曾经写成
+# `any("提醒事项" in e for e in data.errors)` —— 拿**字符串包含**去反查来源。
+# 那在"来源名恰好是另一个来源名的子串"、或文案一改时会**静默失效**，
+# 而它守的正是"读不到不能说成没有"这条最不能失效的约定。
+#
+# 现在 errors 是结构化的（`SourceError`），判断用 `data.failed(SRC_REMINDERS)`：
+# 来源必须**相等**，不是包含。
+SRC_REMINDERS = "提醒事项"
+SRC_CALENDAR = "日历"
+SRC_MEMOS = "备忘台账"
+SRC_CHANNELS = "通道读数"
+
+
+@dataclass(frozen=True)
+class SourceError:
+    """某一处数据源这次读取失败了（**读不到 ≠ 没有**的载体）。"""
+    source: str          # 见上面四个常量
+    detail: str          # 原始异常文本，如实保留
+
+    def __str__(self) -> str:
+        # 渲染成"来源：原因"，与 errors 还是字符串时的输出**逐字一致**
+        return f"{self.source}：{self.detail}"
+
+
 @dataclass
 class Todo:
     """提自提醒事项的一条待办。"""
@@ -100,7 +126,7 @@ class ReportData:
     todos: list[Todo] = field(default_factory=list)
     events: list[Event] = field(default_factory=list)      # 明天的日程
     memos: list[Memo] = field(default_factory=list)        # 需要提醒的备忘
-    errors: list[str] = field(default_factory=list)        # 某处读失败时的说明
+    errors: list[SourceError] = field(default_factory=list)  # 哪几处读失败了
     # 生成本份的时刻 —— 也就是**数据截止时刻**。为空时正文不写这一行
     # （测试里注入假数据时可以不管它）。
     generated_at: dt.datetime | None = None
@@ -111,6 +137,12 @@ class ReportData:
     channel_warnings: list[str] = field(default_factory=list)
     # "上一份日报是什么时候"的提示（连续漏跑后在恢复时说出来）
     digest_gap_note: str = ""
+    # 这次实际用的"备忘放几天开始提醒"。
+    #
+    # ⚠️ 正文里那句「📝 备忘放了 N 天以上」必须用**这次实际用的** N，
+    # 不能用模块常量：`--memo-days 7` 跑出来的日报若还写"3 天以上"，
+    # 那就是正文在撒谎（本机实测过这个不一致：筛的是 7 天，写的是 3 天）。
+    memo_nag_days: int = MEMO_NAG_DAYS
 
     @property
     def done(self) -> list[Todo]:
@@ -120,117 +152,239 @@ class ReportData:
     def open_items(self) -> list[Todo]:
         return [t for t in self.todos if not t.completed]
 
+    def failed(self, source: str) -> bool:
+        """这一处数据源这次读取失败了吗？**按精确来源判，不做子串匹配。**"""
+        return any(e.source == source for e in self.errors)
 
-# ── 渲染
 
-def build_report(data: ReportData) -> tuple[str, str]:
+# ── 渲染：区块注册表
+#
+# 日报正文由一串**区块**组成，每个区块自己回答"这次要不要出现"。
+#
+# 为什么改成注册表（2026-10-05）：原先正文是 `build_report()` 里一列顺序 if，
+# 于是"加一段"= 改渲染主函数 —— 而主函数是**每份产物都要经过**的公共路径。
+#
+# ⚠️ 这不是为了优雅，是为了**下一个功能**：README §八 的 P1 是周报，
+# 而周报 = 同一份数据、不同的区块选择。没有这张表时，加周报要复制一遍
+# `build_report`（"同一件事两处实现"，本项目反复踩过的坑）。
+#
+# 区块的两条硬约定：
+#   ① `render` 返回若干行；返回**空列表 = 整段省略**。
+#      判断"该不该出现"是区块自己的事，`build_report` 不替任何区块判断。
+#   ② 区块只许读 `ReportData`，不许读模块常量来做判断
+#      —— `memo_nag_days` 就是因为这条从常量搬进了 data（见 ReportData 的注释）。
+
+@dataclass(frozen=True)
+class Block:
+    """日报正文的一个区块。"""
+    id: str                                     # 稳定标识：断言、摘要、文档都用它
+    render: Callable[[ReportData], list[str]]   # 若干行；空列表 = 省略
+    # 心跳摘要里的短名。**非空 = 会出现在对外的计数摘要里**（第三方存储，
+    # 见 _heartbeat_summary）。这是个隐私决定，所以写在区块自己身上。
+    heartbeat: str = ""
+    # 这一块在心跳摘要里报的**数字**（只有配了 heartbeat 才用得上）。
+    # 单列一个函数而不是从 render 数行数：render 的行数 ≠ 条目数
+    # （标题行、页脚行、"删掉即可"那种说明行都会算进去）。
+    count: Callable[[ReportData], int] | None = None
+    # 这一块出现在哪些产物里。"daily" = 21:30 的日报；周报将来用别的名字。
+    digests: tuple[str, ...] = ("daily",)
+    note: str = ""                              # 为什么这样写（给人看）
+
+
+def _schedule_flags(data: ReportData) -> tuple[bool, bool]:
+    """(晚了, 早了)。偏离计划时间超过 SCHEDULE_GRACE_MIN 才算 —— 两个方向都要管。"""
+    off = data.schedule_offset
+    return (off is not None and off > SCHEDULE_GRACE_MIN,
+            off is not None and off < -SCHEDULE_GRACE_MIN)
+
+
+def _title(data: ReportData) -> str:
+    late, early = _schedule_flags(data)
+    mark = "（延迟）" if late else ("（非计划时间）" if early else "")
+    return f"📋 {data.date.isoformat()} 复盘{mark}"
+
+
+def _blk_generated_at(data: ReportData) -> list[str]:
+    """🕘 生成时刻 = 数据截止时刻。
+
+    写在最前面，因为"这份数据有多新"决定了后面每一行该不该信
+    —— 详见 CONCEPT.md 的 P0「摘要必须带数据截止时间，陈旧就明确告警」。
+    """
+    if not data.generated_at:
+        return []
+    late, early = _schedule_flags(data)
+    out = [f"🕘 生成于 {data.generated_at.strftime('%H:%M')}（数据截至同一时刻）"]
+    _hhmm = f"{SCHEDULE_HOUR:02d}:{SCHEDULE_MINUTE:02d}"
+    if late:
+        out.append(f"⚠️ 比计划（{_hhmm}）晚 {_fmt_offset(data.schedule_offset)}"
+                   f" —— 多半是机器在计划时间没醒，唤醒后才补跑")
+    elif early:
+        out.append(f"⚠️ 比计划（{_hhmm}）早 {_fmt_offset(data.schedule_offset)}"
+                   f" —— 本次**不是** {_hhmm} 那一趟（机器唤醒后补跑，"
+                   f"或手工触发）；也就是说上一份日报没有发出")
+    out.append("")
+    return out
+
+
+def _blk_done(data: ReportData) -> list[str]:
+    if not data.done:
+        return []
+    out = [f"✅ 今日完成 {len(data.done)} 件"]
+    out += [f"　{t.name}" for t in data.done]
+    out.append("")
+    return out
+
+
+def _blk_open_items(data: ReportData) -> list[str]:
+    """未完成段。空且**有**待办时改说「全部完成」——那是唯一该庆祝的时刻。"""
+    if data.open_items:
+        out = [f"⏳ 未完成 {len(data.open_items)} 件"]
+        out += [f"　{t.name}" for t in data.open_items]
+        out.append("")
+        return out
+    if data.todos:
+        return ["🎉 今天的待办全部完成了", ""]
+    return []
+
+
+def _blk_reminders_empty(data: ReportData) -> list[str]:
+    """提醒事项里一条都没有时的提示。
+
+    ⚠️ 读取失败时**不能**说"没有待办" —— 那是把"读不到"说成"没有"，
+    会误导（实测见过：权限缺失时日报显示"今天没有待办"，看起来一切正常）。
+    判据是"没有条目 **且** 这一处没读失败"，而且来源用**精确匹配**
+    （`failed()` 而不是字符串包含 —— 见 SRC_* 常量的注释）。
+    """
+    if data.todos or data.failed(SRC_REMINDERS):
+        return []
+    return ["（提醒事项里还没有条目 —— 发一句给我就行）", ""]
+
+
+def _blk_events(data: ReportData) -> list[str]:
+    if not data.events:
+        return []
+    out = [f"📅 明日日程 {len(data.events)} 项"]
+    for e in data.events:
+        loc = f"　@{e.location}" if e.location else ""
+        when = ("全天" if e.all_day
+                else f"{e.start.hour:02d}:{e.start.minute:02d}")
+        # 重复事件的某一次发生要标出来，否则"明天的跑步"看起来像一次性安排
+        rec = f"（{whens.rrule_text(e.recurrence)}）" if e.recurrence else ""
+        out.append(f"　{when} {e.summary}{rec}{loc}")
+    out.append("")
+    return out
+
+
+def _blk_memos(data: ReportData) -> list[str]:
+    if not data.memos:
+        return []
+    out = [f"📝 备忘放了 {data.memo_nag_days} 天以上，还没处理："]
+    for m in data.memos:
+        # 备忘正文**可以是多行的**（2026-10-04 起路由层保留换行）。
+        # 日报里只放首行：否则一条备忘就能把日报撑开好几行，段落结构也会被带乱。
+        first, *rest = (m.text or "").splitlines() or [""]
+        out.append(f"　{first}" + ("　…" if rest else ""))
+    # 这句话是**真的**：_read_stale_memos 做了只读快照差集，
+    # 你在备忘录里删掉的条目会被记成 memo_cleared 并从此不再出现在这里。
+    # （曾经这里写过同样的话，但差集没接上 —— 见该函数的注释。）
+    out.append("　（处理完在备忘录里删掉即可，之后不再提醒）")
+    out.append("")
+    return out
+
+
+def _blk_errors(data: ReportData) -> list[str]:
+    if not data.errors:
+        return []
+    out = ["⚠️ 以下来源读取失败，本份可能不完整："]
+    out += [f"　{e}" for e in data.errors]
+    out.append("")
+    return out
+
+
+def _blk_channel_warnings(data: ReportData) -> list[str]:
+    """某条通道已经连续几天没成功了。
+
+    注意区分：这**不是**"本次投递失败"（那会走心跳告警），
+    而是"某条通道已经好几天没成功了" —— 单通道静默失效只有这里能看见。
+    """
+    if not data.channel_warnings:
+        return []
+    out = ["⚠️ 投递通道读数："]
+    out += [f"　{w}" for w in data.channel_warnings]
+    out.append("")
+    return out
+
+
+def _blk_digest_gap(data: ReportData) -> list[str]:
+    """与看门狗分工：看门狗管"当天 23:30 还没送到"（实时），
+    这一行管"漏了几天，现在补上了"（事后对账）。"""
+    if not data.digest_gap_note:
+        return []
+    return [f"⚠️ {data.digest_gap_note}", ""]
+
+
+# 正文区块：**顺序就是渲染顺序**。
+# 加一段正文 = 写一个 `_blk_*` 函数 + 在这里加一行（不必动 build_report）。
+BLOCKS: tuple[Block, ...] = (
+    Block("generated_at", _blk_generated_at,
+          note="数据截止时刻 + 迟到/早到说明"),
+    Block("done", _blk_done, heartbeat="完成",
+          count=lambda d: len(d.done),
+          note="按 Apple 原生完成时刻筛过"),
+    Block("open_items", _blk_open_items, heartbeat="未完成",
+          count=lambda d: len(d.open_items),
+          note="空且有待办时改说「全部完成」"),
+    Block("reminders_empty", _blk_reminders_empty,
+          note="读失败时**不许**说'没有待办'"),
+    Block("events", _blk_events, heartbeat="明日日程",
+          count=lambda d: len(d.events)),
+    Block("memos", _blk_memos, heartbeat="备忘",
+          count=lambda d: len(d.memos),
+          note="来自 journal 台账的差集；天数用 data.memo_nag_days"),
+    Block("errors", _blk_errors, note="读不到 ≠ 没有"),
+    Block("channel_warnings", _blk_channel_warnings),
+    Block("digest_gap", _blk_digest_gap),
+)
+
+# 页脚：任何一份产物都带着它，所以它不属于任何区块。
+#
+# 第二行**不能**写成"发一句给我也行" —— 它紧跟"打钩 ✓"，
+# 读起来像"发一句就能打钩"，而机器人没有打钩能力：发一句只会**新建**一条。
+# 所以写成它真正能做的事：加一条。顺带把符号表每天念一遍
+# （SYMBOL-SCHEME §6 说好的缓解措施之一）。
+FOOTER: tuple[str, ...] = (
+    "─" * 30,
+    "做完的在「提醒事项」里打钩 ✓",
+    "想加一条就直接发：交电费 · # 想法 · @周五两点 周会",
+)
+
+
+def blocks_for(digest: str = "daily") -> list[Block]:
+    """
+    某份产物要渲染哪些区块（按声明顺序）。
+
+    ⚠️ 一个区块都没有时**抛异常**，不返回空列表：产物名的笔误会走成
+    "一份什么都没有的日报"，而那种失败是**静默**的 ——
+    与"宁可报错，不可静默"同源（与 routes 的拒绝路径同一取舍）。
+    """
+    out = [b for b in BLOCKS if digest in b.digests]
+    if not out:
+        raise ValueError(f"没有为 {digest!r} 登记任何区块（产物会是空的）")
+    return out
+
+
+def build_report(data: ReportData, digest: str = "daily") -> tuple[str, str]:
     """
     生成 (标题, 正文)。
 
-    正文结构固定四段，**每段都可能为空**（空则整段省略）：
-        完成 / 未完成 / 明日日程 / 备忘提醒
+    正文 = 该产物选中的区块依次渲染（空区块自己省略）+ 页脚。
+    **加一段正文不用改这个函数** —— 改 `BLOCKS`（见上面那段说明）。
     """
-    d = data.date
-    off = data.schedule_offset
-    late = off is not None and off > SCHEDULE_GRACE_MIN
-    early = off is not None and off < -SCHEDULE_GRACE_MIN
-    mark = "（延迟）" if late else ("（非计划时间）" if early else "")
-    title = f"📋 {d.isoformat()} 复盘{mark}"
-
     lines: list[str] = []
-
-    # 生成时刻 = 数据截止时刻。写在最前面，因为"这份数据有多新"决定了
-    # 后面每一行该不该信 —— 详见 CONCEPT.md 的 P0
-    #「摘要必须带数据截止时间，陈旧就明确告警」。
-    if data.generated_at:
-        lines.append(f"🕘 生成于 {data.generated_at.strftime('%H:%M')}"
-                     f"（数据截至同一时刻）")
-        _hhmm = f"{SCHEDULE_HOUR:02d}:{SCHEDULE_MINUTE:02d}"
-        if late:
-            lines.append(f"⚠️ 比计划（{_hhmm}）晚 {_fmt_offset(off)}"
-                         f" —— 多半是机器在计划时间没醒，唤醒后才补跑")
-        elif early:
-            lines.append(f"⚠️ 比计划（{_hhmm}）早 {_fmt_offset(off)}"
-                         f" —— 本次**不是** {_hhmm} 那一趟（机器唤醒后补跑，"
-                         f"或手工触发）；也就是说上一份日报没有发出")
-        lines.append("")
-
-    if data.done:
-        lines.append(f"✅ 今日完成 {len(data.done)} 件")
-        for t in data.done:
-            lines.append(f"　{t.name}")
-        lines.append("")
-
-    if data.open_items:
-        lines.append(f"⏳ 未完成 {len(data.open_items)} 件")
-        for t in data.open_items:
-            lines.append(f"　{t.name}")
-        lines.append("")
-    elif data.todos:
-        lines.append("🎉 今天的待办全部完成了")
-        lines.append("")
-
-    # 注意：读取失败时**不能**说"没有待办" —— 那是把"读不到"说成"没有"，
-    # 会误导（实测见过：权限缺失时日报显示"今天没有待办"，看起来一切正常）。
-    _rem_failed = any("提醒事项" in e for e in data.errors)
-    if not data.todos and not _rem_failed:
-        lines.append("（提醒事项里还没有条目 —— 发一句给我就行）")
-        lines.append("")
-
-    if data.events:
-        lines.append(f"📅 明日日程 {len(data.events)} 项")
-        for e in data.events:
-            loc = f"　@{e.location}" if e.location else ""
-            when = ("全天" if e.all_day
-                    else f"{e.start.hour:02d}:{e.start.minute:02d}")
-            # 重复事件的某一次发生要标出来，否则"明天的跑步"看起来像一次性安排
-            rec = f"（{whens.rrule_text(e.recurrence)}）" if e.recurrence else ""
-            lines.append(f"　{when} {e.summary}{rec}{loc}")
-        lines.append("")
-
-    if data.memos:
-        lines.append(f"📝 备忘放了 {MEMO_NAG_DAYS} 天以上，还没处理：")
-        for m in data.memos:
-            # 备忘正文**可以是多行的**（2026-10-04 起路由层保留换行 ——
-            # 那之前多行会被折成一行）。日报里只放首行：
-            # 否则一条备忘就能把日报撑开好几行，段落结构也会被它带乱。
-            first, *rest = (m.text or "").splitlines() or [""]
-            lines.append(f"　{first}" + ("　…" if rest else ""))
-        # 这句话现在**是真的**：上面 _read_stale_memos 做了只读快照差集，
-        # 你在备忘录里删掉的条目会被记成 memo_cleared 并从此不再出现在这里。
-        # （曾经这里写过同样的话，但差集没接上 —— 见该函数的注释。）
-        lines.append("　（处理完在备忘录里删掉即可，之后不再提醒）")
-        lines.append("")
-
-    if data.errors:
-        lines.append("⚠️ 以下来源读取失败，本份可能不完整：")
-        for e in data.errors:
-            lines.append(f"　{e}")
-        lines.append("")
-
-    if data.channel_warnings:
-        # 注意区分：这**不是**"本次投递失败"（那会走心跳告警），
-        # 而是"某条通道已经好几天没成功了" —— 单通道静默失效只有这里能看见。
-        lines.append("⚠️ 投递通道读数：")
-        for w in data.channel_warnings:
-            lines.append(f"　{w}")
-        lines.append("")
-
-    if data.digest_gap_note:
-        # 与看门狗分工：看门狗管"当天 23:30 还没送到"（实时），
-        # 这一行管"漏了几天，现在补上了"（事后对账）。
-        lines.append(f"⚠️ {data.digest_gap_note}")
-        lines.append("")
-
-    lines.append("─" * 30)
-    lines.append("做完的在「提醒事项」里打钩 ✓")
-    # 页脚第二行**不能**写成"发一句给我也行" —— 它紧跟"打钩"，
-    # 读起来像"发一句就能打钩"，而机器人没有打钩能力：发一句只会**新建**一条。
-    # 所以写成它真正能做的事：加一条。顺带把符号表每天念一遍
-    # （SYMBOL-SCHEME §6 说好的缓解措施之一）。
-    lines.append("想加一条就直接发：交电费 · # 想法 · @周五两点 周会")
-
-    return title, "\n".join(lines).strip()
+    for b in blocks_for(digest):
+        lines.extend(b.render(data))
+    lines.extend(FOOTER)
+    return _title(data), "\n".join(lines).strip()
 
 
 # ── 数据采集（真实路径，全部只读）
@@ -320,32 +474,32 @@ def collect(date: dt.date | None = None,
     宁可少一段也不要整份失败（v1 的教训：一个来源不可用就整个日报发不出）。
     """
     today = date or dt.date.today()
-    data = ReportData(date=today)
+    data = ReportData(date=today, memo_nag_days=memo_nag_days)
 
     # ① 提醒事项（"今日完成"按原生 completion date 筛）
     try:
         data.todos = _read_todos(today)
     except Exception as e:  # noqa: BLE001
-        data.errors.append(f"提醒事项：{e}")
+        data.errors.append(SourceError(SRC_REMINDERS, str(e)))
 
     # ② 日历（明天的日程）
     try:
         data.events = _read_events(today + dt.timedelta(days=1))
     except Exception as e:  # noqa: BLE001
-        data.errors.append(f"日历：{e}")
+        data.errors.append(SourceError(SRC_CALENDAR, str(e)))
 
     # ③ 备忘（从 journal 台账算，不读备忘录正文）
     try:
         data.memos = _read_stale_memos(today, memo_nag_days)
     except Exception as e:  # noqa: BLE001
-        data.errors.append(f"备忘台账：{e}")
+        data.errors.append(SourceError(SRC_MEMOS, str(e)))
 
     # ④ 投递读数（同样来自 journal：通道健康 + 上次投递是哪天）
     try:
         data.channel_warnings = _channel_warnings()
         data.digest_gap_note = _digest_gap_note(today)
     except Exception as e:  # noqa: BLE001
-        data.errors.append(f"通道读数：{e}")
+        data.errors.append(SourceError(SRC_CHANNELS, str(e)))
 
     return data
 
@@ -597,15 +751,19 @@ def _heartbeat_summary(data: ReportData,
     心跳服务的日志是第三方存储，而日报正文里有你的待办原文 ——
     所以这里刻意只报数字（本机 logs/ 里引用你的内容都只留前 30 字符，
     对外发送更不该带原文）。
+
+    ⚠️ 计数**从区块注册表取**（`Block.heartbeat` 非空者），不在这里另写一张表：
+    原先这里硬编码了"完成/未完成/明日日程/备忘"四个计数，
+    于是加一个品类要改**三处**（`ReportData`、`build_report`、这里），
+    漏掉这里就表现为"日报上看得见、心跳摘要里没有"这种偏心的静默不一致。
     """
     ch = " ".join(f"{name}{'✓' if ok else '✗'}" for name, ok, _ in results)
-    parts = [
-        f"完成{len(data.done)}",
-        f"未完成{len(data.open_items)}",
-        f"明日日程{len(data.events)}",
-        f"备忘{len(data.memos)}",
-        f"读取失败{len(data.errors)}",
-    ]
+    parts: list[str] = []
+    for b in BLOCKS:
+        if b.heartbeat and b.count is not None:
+            parts.append(f"{b.heartbeat}{b.count(data)}")
+    # "读取失败"不是区块（它没有正文段可省略），单独算
+    parts.append(f"读取失败{len(data.errors)}")
     if data.schedule_offset is not None:
         parts.append(f"偏离计划{data.schedule_offset}分")
     if ch:
