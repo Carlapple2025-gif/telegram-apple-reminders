@@ -382,6 +382,25 @@ def add(summary: str, start: dt.datetime, end: dt.datetime | None = None,
     if end <= start:
         raise CalendarError(f"结束时间不晚于开始时间：{start} → {end}")
 
+    if allday:
+        # ⚠️ **全天事件的时刻必须归零**（2026-10-05 修，用户实报）。
+        #
+        # `whens` 给全天事件的其实是"当天 09:00 + 24 小时"（它的默认时刻是 9 点，
+        # `all_day` 只负责把时长凑成一天，没有把时刻归零）。而 Calendar 收到
+        # `allday event:true` 后会把 **start 归零、end 却按原样留下** ——
+        # 于是 `@明天去龙井村` 实际写成 10-05 00:00 → 10-06 09:00 的 **33 小时**
+        # 事件，在日历上同时压在 5 日和 6 日两天。
+        #
+        # 为什么一直没被发现：两条读路径都按 `start` 的**日期**筛，
+        # 所以它在我方看起来始终是"10-05 那一天"的一件事；
+        # 而回执里写的是 `（全天）`（`whens.format_when` 看的是 all_day 标志）——
+        # **只有打开日历用眼睛看才会发现**。
+        start = start.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = end.replace(hour=0, minute=0, second=0, microsecond=0)
+        if end <= start:
+            # 兜底：一天的全天事件 = 次日 00:00 结束（iCalendar 的排他写法）
+            end = start + dt.timedelta(days=1)
+
     cal = calendar or config_calendar() or (writable_calendars() or [""])[0]
     if not cal:
         raise CalendarError("找不到可写的日历（config.json 里也没有 calendar_name）")

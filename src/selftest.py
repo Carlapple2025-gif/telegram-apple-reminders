@@ -949,6 +949,26 @@ for _s in ["交电费", "想起一件事", "", "   "]:
 check("只给日期 → 全天", _whens.parse_when("明天", _B).all_day is True)
 check("给了时刻 → 非全天", _whens.parse_when("明天下午两点", _B).all_day is False)
 
+# ⚠️ 全天必须从 **00:00** 起（2026-10-05 修，用户实报"去龙井村排到 5 日和 6 日"）
+#
+# 原先一律用默认时刻 9 点，只把 all_day 标志与时长改掉 ——
+# 于是"全天"事件实际是"当天 09:00 + 24 小时"，落到日历里跨两天。
+# 归零不丢信息：all_day 为真时 hour 一定是默认值（你说了时刻或时段，它就不为真）。
+_w_ad = _whens.parse_when("明天", _B)
+check("全天：从 00:00 起（不是默认的 9 点）",
+      _w_ad.start == _dt2.datetime(2026, 10, 4, 0, 0), str(_w_ad.start))
+check("全天：仍是一整天", _w_ad.end - _w_ad.start == _dt2.timedelta(days=1),
+      str(_w_ad.end - _w_ad.start))
+# 只说了**时段**（如"明天下午"）→ 不算全天，那个 14:00 是有意义的，不能归零
+_w_slot = _whens.parse_when("明天下午", _B)
+check("只给时段：不算全天", _w_slot.all_day is False)
+check("只给时段：时刻照旧（14:00 不被归零）",
+      _w_slot.start == _dt2.datetime(2026, 10, 4, 14, 0), str(_w_slot.start))
+# 周期事件的全天起点同理
+_w_fo = _whens.first_occurrence("FREQ=WEEKLY;BYDAY=MO", _B)
+check("周期全天：也从 00:00 起",
+      _w_fo.start.time() == _dt2.time(0, 0), str(_w_fo.start))
+
 
 section("v4 符号路由（routes）—— 类型由声明决定，不猜")
 
@@ -1453,6 +1473,35 @@ try:
     check("待办：回执说明去向", "提醒事项" in _o.reply)
 finally:
     _sh2.rmtree(_d, ignore_errors=True)
+
+# 待办的**备注文本**：只有日期时不写 "00:00"（那看起来像半夜有安排）
+#
+# 这一条是全天归零的连带：归零之后，只给日期的待办 start 变成 00:00，
+# 若备注照旧格式化成 "10-05 00:00"，就从一个假时刻换成另一个假时刻。
+_rm_mod = sys.modules.get("reminders") or _load(SRC / "reminders.py")
+_saved_rem_cls, _saved_mkkey = _rm_mod.Reminders, _rm_mod.make_key
+try:
+    _notes: list = []
+
+    class _FakeReminders:
+        def verify_list(self):
+            pass
+
+        def create(self, name, body=""):
+            _notes.append(body)
+            return type("_R", (), {"id": "RID"})()
+
+    _rm_mod.Reminders = _FakeReminders
+    _rm_mod.make_key = lambda t: "pdca:test"
+
+    _it._real_add_todo("交电费", _dt2.datetime(2026, 10, 5, 0, 0))
+    check("待办备注：只有日期时不写 00:00",
+          _notes[-1] == "pdca:test · 10-05", repr(_notes[-1]))
+    _it._real_add_todo("交电费", _dt2.datetime(2026, 10, 5, 14, 0))
+    check("待办备注：真给了时刻就照写",
+          _notes[-1] == "pdca:test · 10-05 14:00", repr(_notes[-1]))
+finally:
+    _rm_mod.Reminders, _rm_mod.make_key = _saved_rem_cls, _saved_mkkey
 
 # ② 日程 → 只写日历（含时间与重复规则）
 _d = _fresh_journal()
@@ -2446,6 +2495,47 @@ check("日程读取：拉起用的是 open -g + osascript launch 两条路，且
       '"/usr/bin/open", "-g", "-a", APP' in
       (SRC / "applecal.py").read_text(encoding="utf-8")
       and "to launch" in (SRC / "applecal.py").read_text(encoding="utf-8"))
+
+# ── 全天事件的时刻必须归零（2026-10-05，用户实报）
+#
+# "去龙井村被排到 5 日和 6 日两天"：`whens` 给全天事件的是"当天 09:00 + 24 小时"，
+# 而 Calendar 收到 allday 后把 start 归零、**end 按原样留着** ——
+# 实际成了 10-05 00:00 → 10-06 09:00 的 33 小时事件，日历上必然压两天。
+#
+# 为什么两条读路径都没发现：它们都按 start 的**日期**筛，
+# 在我方看起来永远是"10-05 那一天"的一件事；回执写的是 `（全天）`
+# （看的是 all_day 标志）。**只有打开日历用眼睛看才会发现。**
+#
+# 这里直接看**生成的 AppleScript**：全天时两端 hours 必须都是 0。
+_saved_arun = _ac8.run_applescript
+try:
+    _scripts: list = []
+    _ac8.run_applescript = lambda src, timeout=60: (
+        _scripts.append(src), "UID-ALLDAY")[1]
+
+    _ev_ad = _ac8.add("去龙井村", _dt2.datetime(2026, 10, 5, 9, 0),
+                      _dt2.datetime(2026, 10, 6, 9, 0),
+                      calendar="测试日历", allday=True)
+    _sc_ad = _scripts[-1]
+    check("全天日程：start 的时刻被归零",
+          "set hours of startDate to 0" in _sc_ad, _sc_ad[:160])
+    check("全天日程：end 的时刻也被归零（否则跨两天）",
+          "set hours of endDate to 0" in _sc_ad, _sc_ad[:160])
+    check("全天日程：返回的对象也是归零后的时间",
+          _ev_ad.start == _dt2.datetime(2026, 10, 5, 0, 0)
+          and _ev_ad.end == _dt2.datetime(2026, 10, 6, 0, 0),
+          f"{_ev_ad.start} → {_ev_ad.end}")
+    check("全天日程：allday 标记没丢", "allday event:true" in _sc_ad)
+
+    # 定时日程**不能**被一起归零
+    _ac8.add("项目周会", _dt2.datetime(2026, 10, 5, 14, 0),
+             _dt2.datetime(2026, 10, 5, 15, 0), calendar="测试日历")
+    _sc_ad2 = _scripts[-1]
+    check("定时日程：时刻原样保留（没被全天那套波及）",
+          "set hours of startDate to 14" in _sc_ad2, _sc_ad2[:160])
+    check("定时日程：不带 allday 标记", "allday event:true" not in _sc_ad2)
+finally:
+    _ac8.run_applescript = _saved_arun
 
 # ③ 备忘端：memo.add(text) → Memo.note_id
 _sig_memo = _insp8.signature(_mm8.add)

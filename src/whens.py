@@ -225,13 +225,23 @@ def parse_when(text: str, base: dt.date | None = None,
     # 只说了时段（如"上午"）→ 算全天还是定时？
     # 这里按"定时"处理更符合直觉（"明天上午交电费"→ 9:00），
     # 但标记 has_time=False，让调用方知道时刻是推断的。
-    start = dt.datetime.combine(d, dt.time(hour, minute))
+    #
+    # ⚠️ 而**全天**（连时段都没说，如"明天"）必须从 **00:00** 起：
+    # 原先这里一律用 `default_hour`（9 点），只把 all_day 标志和时长改掉 ——
+    # 于是"全天"事件实际是"当天 09:00 + 24 小时"，落到日历里跨了**两天**
+    # （用户 2026-10-05 实报："去龙井村"被排到 5 日和 6 日）。
+    # 这里归零不会丢任何信息：`all_day` 为真时 `hour` 一定是默认值，
+    # 从不是你说的时间（你说了时刻或时段，all_day 就不会为真）。
+    all_day = (date_part is not None) and (time_part is None)
+    if all_day:
+        start = dt.datetime.combine(d, dt.time(0, 0))
+    else:
+        start = dt.datetime.combine(d, dt.time(hour, minute))
 
     # 注：只给了时刻、且该时刻已过时"顺延到明天"的处理**不在这里做** ——
     # 那需要读当前时钟，会破坏本模块的可测试性（纯函数）。
     # 由调用方决定（它本来就知道"现在"）。
 
-    all_day = (date_part is not None) and (time_part is None)
     end = start + (dt.timedelta(days=1) if all_day else dt.timedelta(hours=1))
 
     return When(
@@ -494,7 +504,10 @@ def first_occurrence(rrule: str, base: dt.date) -> "When":
                 break
     # FREQ=DAILY 无需调整：就是今天
 
-    start = dt.datetime.combine(d, dt.time(9, 0))
+    # ⚠️ 从 **00:00** 起，不是 9 点 —— 同 parse_when 的处理：
+    # 全天事件带非零时刻会跨两天（2026-10-05 实报）。
+    # 载荷里若明说了时刻，由 routes 覆盖（它会把时刻取过来）。
+    start = dt.datetime.combine(d, dt.time(0, 0))
     return When(start=start, end=start + dt.timedelta(days=1),
                 all_day=True, has_date=True, has_time=False,
                 date_text="", time_text="")

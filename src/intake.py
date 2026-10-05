@@ -361,7 +361,11 @@ def _real_add_todo(text: str, when: dt.datetime | None = None) -> str:
     rem.verify_list()
     body = reminders.make_key(text)
     if when is not None:
-        body = f"{body} · {when.strftime('%m-%d %H:%M')}"
+        # 只有日期时（时刻被归零）**不要**在备注里写 "00:00" ——
+        # 那看起来像"半夜有安排"。全天/只给日期 → 只写日期。
+        stamp = (when.strftime("%m-%d") if when.time() == dt.time(0, 0)
+                 else when.strftime("%m-%d %H:%M"))
+        body = f"{body} · {stamp}"
     r = rem.create(name=text, body=body)
     return getattr(r, "id", "") or ""
 
