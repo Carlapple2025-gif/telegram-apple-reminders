@@ -1265,6 +1265,116 @@ check("v4 路径不调用 reminders.delete", not _v4_del_callers,
       "；".join(_v4_del_callers))
 
 
+section("内核契约（平台边界与版本）")
+
+# 为什么需要这一节（2026-10-05，见 docs/KERNEL-CONTRACT.md）：
+#
+# 在此之前，"哪些模块是内核、哪些是功能"只存在于文档和人的记忆里。
+# 而加功能时越界是**无声的** —— 能跑、能过自检，
+# 几个月后才发现内核里长出了对某个功能的依赖（现在就已经有 4 条）。
+# 把边界写成断言，它才从"一段话"变成"红绿灯"。
+#
+# 这一节做两件事：
+#   ① 版本：单一来源（VERSION 文件）且与 CHANGELOG 一致
+#   ② 边界：每个模块恰好属于一类；越界只许出现在白名单里，且白名单**只许缩小**
+
+# ── ① 版本号
+#
+# 写在两个地方的版本号，一定有一处是错的 —— 所以必须机器核对。
+_VER_PATH = ROOT / "VERSION"
+_ver = _VER_PATH.read_text(encoding="utf-8").strip() if _VER_PATH.is_file() else ""
+check("VERSION 文件存在", bool(_ver), f"缺或为空：{_VER_PATH}")
+# SemVer 规则 2：X.Y.Z 非负整数，且**不许前导零**
+check("VERSION 是三名整数（无前导零）",
+      _re.fullmatch(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", _ver) is not None,
+      f"读到 {_ver!r} —— 必须是 X.Y.Z，且不许前导零（1.02.3 非法）")
+
+_cl_src = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+_cl_ver = _re.search(r"当前契约版本：`([^`]+)`", _cl_src)
+check("CHANGELOG 标了「当前契约版本」", _cl_ver is not None,
+      "CHANGELOG 顶部要有 当前契约版本：`X.Y.Z` 一行")
+check("CHANGELOG 的契约版本与 VERSION 一致",
+      _cl_ver is not None and _cl_ver.group(1) == _ver,
+      f"CHANGELOG 写 {_cl_ver.group(1) if _cl_ver else '（无）'}，VERSION 写 {_ver}")
+
+# 契约文档本身也要在 —— 断言留着而文档被删，是最难查的一种不一致
+check("docs/KERNEL-CONTRACT.md 存在",
+      (ROOT / "docs" / "KERNEL-CONTRACT.md").is_file())
+
+# ── ② 模块分类（全量、不重不漏）
+#
+# 与以前那几张"手工名单"（:674 / :3145 / :1195）的关键差别：
+# 这里是**对 src/ 的全量划分** —— 新模块不登记就红。
+# 名单式检查漏登记是没有后果的，划分式检查不会。
+_KERNEL = {"telegram", "journal", "whens", "kinds", "parse", "routes", "intake",
+           "notify", "reminders", "applecal", "memo", "daemon"}
+_FEATURE = {"report", "commands", "watchdog"}
+_LEGACY = {"carry_over", "cleanup", "cleanup_reminders", "completion", "daily_report",
+           "notes", "probe_reminders", "push_tasks", "read_day", "reconcile", "sync"}
+_TOOLING = {"selftest"}
+
+_all_mods = {p.stem for p in SRC.glob("*.py")}
+_classified = _KERNEL | _FEATURE | _LEGACY | _TOOLING
+check("每个 src 模块恰好被登记一类（新模块必须登记）",
+      _all_mods == _classified,
+      f"漏登记：{sorted(_all_mods - _classified)}；"
+      f"登记了但文件不在：{sorted(_classified - _all_mods)}")
+_dup = ((_KERNEL & _FEATURE) | (_KERNEL & _LEGACY) | (_FEATURE & _LEGACY)
+        | ((_KERNEL | _FEATURE | _LEGACY) & _TOOLING))
+check("四类互不重叠", not _dup, f"重复登记：{sorted(_dup)}")
+
+
+def _imports_of(_stem: str) -> set:
+    """一个模块 import 了哪些**本项目**的模块（含函数内 import）。
+
+    用 ast 而不是正则：docstring 里写着 `import report` 是很常见的
+    （本项目到处是代码示例），正则会把示例当成真依赖。
+    """
+    _tree = ast.parse((SRC / f"{_stem}.py").read_text(encoding="utf-8"))
+    _out: set = set()
+    for _node in ast.walk(_tree):
+        if isinstance(_node, ast.Import):
+            _out |= {_a.name.split(".")[0] for _a in _node.names}
+        elif isinstance(_node, ast.ImportFrom):
+            if _node.module and not _node.level:      # 相对 import 不算
+                _out.add(_node.module.split(".")[0])
+    return _out & _all_mods
+
+
+# 越界白名单：现状的**登记**，不是许可。
+# 新增一条越界 → 红；把某条修好了 → **也红**（提醒删掉这一行）。
+# 后半条是刻意的：一份不删的名单很快会变成谎话
+# （同源教训：README「归档不等于可以忘掉」—— 挪走就当没这回事，检查就失效了）。
+_WHITELIST = {
+    ("commands", "report"):    "读函数暂住日报；区块注册表那一步归位到内核读层",
+    ("daemon", "commands"):    "通道层字面分流；命令注册表那一步消除",
+    ("daemon", "watchdog"):    "降级加载（形态是好的）；等插件自注册",
+    ("telegram", "commands"):  "CLI 推 / 菜单时去取命令表；应改成参数传入",
+}
+
+_edges: set = set()
+for _m in sorted(_KERNEL | _FEATURE):
+    _here = "内核" if _m in _KERNEL else "功能"
+    for _dep in sorted(_imports_of(_m)):
+        _there = ("内核" if _dep in _KERNEL else
+                  "功能" if _dep in _FEATURE else
+                  "遗留" if _dep in _LEGACY else None)
+        if _there is None:                      # 工具模块不该被任何人 import
+            _edges.add((_m, _dep))
+        elif (_here == "内核" and _there == "功能") or \
+             (_here == "功能" and _there == "功能"):
+            _edges.add((_m, _dep))
+
+_new_edges = sorted(_edges - set(_WHITELIST))
+_stale_edges = sorted(set(_WHITELIST) - _edges)
+check("没有新的越界边（内核↛功能、功能↛功能）", not _new_edges,
+      "；".join(f"{_a}.py → {_b}.py" for _a, _b in _new_edges)
+      + "　（要么改依赖，要么登记进白名单并写明消除时机）")
+check("白名单里已被消除的越界边要删掉（名单不许变成谎话）", not _stale_edges,
+      "；".join(f"{_a}.py → {_b}.py" for _a, _b in _stale_edges)
+      + "　（修好了就把这一行删掉）")
+
+
 section("v4 的 AppleScript 必须可编译")
 
 # 这类检查拦的是**我连踩三次**的同一类错误：AppleScript 不支持 Python/JS
