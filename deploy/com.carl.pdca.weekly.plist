@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  每周日 20:00 周报（v4）。
+
+  看的是**这一周**，不是今天：
+    完成   → 提醒事项里完成时刻落在本周的条目（Apple 原生属性）
+    提交   → journal 台账里本周记下的待办 / 日程 / 备忘
+    连续   → 连续多少天完成过至少一件
+
+  **只读**：与日报同源，不改任何东西。
+
+  ⚠️ 两条与日报必须分开的地方（2026-10-05 落地时定的）：
+    1. 留痕用 digest_kind=weekly —— 否则周日 20:00 这一趟会把当天的
+       **日报**标记成"已送达"，而看门狗要靠这条读数发现日报没跑。
+    2. 心跳用 WEEKLY_HEALTHCHECK_URL（不是日报那个）—— 同理：
+       远端监控靠"到点没收到 ping"发现没跑，混用就等于骗它。
+
+  Weekday 的取值：0 = 周日（launchd 的约定，7 也表示周日）。
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.carl.pdca.weekly</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>__PYTHON__</string>
+		<string>__PROJECT__/src/report.py</string>
+		<string>--weekly</string>
+	</array>
+
+	<key>WorkingDirectory</key>
+	<string>__PROJECT__</string>
+
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Weekday</key>
+		<integer>0</integer>
+		<key>Hour</key>
+		<integer>20</integer>
+		<key>Minute</key>
+		<integer>0</integer>
+	</dict>
+
+	<key>StandardOutPath</key>
+	<string>__PROJECT__/logs/weekly.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>__PROJECT__/logs/weekly.err.log</string>
+
+	<key>ProcessType</key>
+	<string>Background</string>
+</dict>
+</plist>

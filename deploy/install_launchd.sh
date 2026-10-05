@@ -2,7 +2,7 @@
 # 安装 / 卸载 pdca v4 的 launchd 任务。
 #
 # 用法：
-#   ./deploy/install_launchd.sh install     安装（常驻收件守护 + 21:30 日报）
+#   ./deploy/install_launchd.sh install     安装（常驻收件守护 + 21:30 日报 + 周日 20:00 周报）
 #   ./deploy/install_launchd.sh install --allow-unconfigured
 #                                            未初始化也安装（稍后初始化即自动生效）
 #   ./deploy/install_launchd.sh uninstall   卸载
@@ -10,11 +10,12 @@
 #   ./deploy/install_launchd.sh reload      重新加载（改完 plist 后用）
 #   ./deploy/install_launchd.sh restart     重新加载任务（装过但没在跑时用）
 #   ./deploy/install_launchd.sh doctor      体检：配置 + 三处授权 + 通道（只读）
-#   ./deploy/install_launchd.sh test        跑一遍两个任务（不推送、不写入）
+#   ./deploy/install_launchd.sh test        跑一遍三个任务（不推送、不写入）
 #
-# 两个任务的分工：
+# 三个任务的分工：
 #   com.carl.pdca.daemon   常驻，KeepAlive —— 你发一句就有人接
 #   com.carl.pdca.report   21:30 日报，**只读**三处快照
+#   com.carl.pdca.weekly   周日 20:00 周报，只读（完成 / 提交 / 连续天数）
 #
 # 为什么守护要常驻而不是定时：v4 的唯一输入入口是 Telegram，
 # "随时发一句都有人接"是它的核心体验，定时轮询做不到这一点。
@@ -24,7 +25,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT="$(cd "$HERE/.." && pwd)"
 AGENTS="$HOME/Library/LaunchAgents"
-LABELS=(com.carl.pdca.daemon com.carl.pdca.report)
+LABELS=(com.carl.pdca.daemon com.carl.pdca.report com.carl.pdca.weekly)
 
 # 允许在"尚未初始化"时就安装。用途：先把任务装好，等用户完成授权与
 # 初始化后系统自动开始工作，不需要再手动装一次。
@@ -355,8 +356,8 @@ PYEOF
 }
 
 do_test() {
-  # 跑一遍两个任务的**脚本本体**（不经 launchd），验证解释器与配置可用。
-  # 日报用 --no-push：避免"验证安装"顺手发一条重复日报给你。
+  # 跑一遍三个任务的**脚本本体**（不经 launchd），验证解释器与配置可用。
+  # 两份报表都用 --no-push：避免"验证安装"顺手发一条重复产物给你。
   echo "验证 pdca v4 任务（不推送、不写入）"
   echo "════════════════════════════════════════"
   echo
@@ -365,6 +366,13 @@ do_test() {
     echo "  → 日报脚本 OK"
   else
     echo "  → ⚠️ 日报退出码非 0，看上面输出"
+  fi
+  echo
+  echo "── 周报（--weekly --no-push）──"
+  if "$PYTHON" "$PROJECT/src/report.py" --weekly --no-push 2>&1 | sed 's/^/  /'; then
+    echo "  → 周报脚本 OK"
+  else
+    echo "  → ⚠️ 周报退出码非 0，看上面输出"
   fi
   echo
   echo "── 守护（--once，跑一轮就退出）──"
@@ -383,8 +391,8 @@ do_test() {
   done
   echo
   echo "── 结论 ──"
-  echo "   日报能读到三处并打印、守护能跑一轮，说明链路可用。"
-  echo "   守护已常驻，随时可发消息；日报在今晚 21:30 自动跑。"
+  echo "   日报与周报都能读到并打印、守护能跑一轮，说明链路可用。"
+  echo "   守护已常驻，随时可发消息；日报今晚 21:30、周报周日 20:00 自动跑。"
 }
 
 case "${1:-}" in

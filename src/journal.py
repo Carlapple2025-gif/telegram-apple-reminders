@@ -234,20 +234,27 @@ def log_error(where: str, detail: str) -> dict:
 
 def log_digest_pushed(results: list, digest_date: str = "",
                       generated_at: str = "", schedule_offset: int | None = None,
-                      heartbeat: str = "") -> dict:
+                      heartbeat: str = "", digest_kind: str = "daily") -> dict:
     """
-    记下一次日报投递：**每通道**成败 + 本次是否偏离计划时间 + 心跳结果。
+    记下一次产物投递：**每通道**成败 + 本次是否偏离计划时间 + 心跳结果。
 
     为什么要记进 journal 而不是只 print 到 logs/：
     logs/ 是程序日志（README 明说"可随时清"），而"这份日报到底送到没有"
     属于**读数**，丢了就再也查不出来 —— 所以它该落在不可再生的 journal 里。
 
     `results` 形如 [("telegram", True, "已发送（message_id=93）"), ...]。
-    `schedule_offset` 是相对 21:30 的分钟数（正=晚、负=早、None=不适用）。
+    `schedule_offset` 是相对计划时间的分钟数（正=晚、负=早、None=不适用）。
+
+    ⚠️ `digest_kind` 是 2026-10-05 加的（周报落地时）：**必须区分是哪份产物**。
+    在它之前，"这一天送到没有"只看有没有 `digest_pushed` —— 于是周日 20:00 的
+    周报会把当天的**日报**标记成"已送达"，看门狗 23:30 检查时就不会告警，
+    而那天 21:30 的日报根本没跑。那会让看门狗唯一的职责静默失效。
+    老记录没有这个字段 → 一律当 `daily`（向后兼容，见 digest_kind_of）。
     """
     rec = append(
         EV_DIGEST_PUSHED,
         digest_date=digest_date,
+        digest_kind=digest_kind,
         generated_at=generated_at,
         schedule_offset=schedule_offset,
         heartbeat=heartbeat,
@@ -256,6 +263,16 @@ def log_digest_pushed(results: list, digest_date: str = "",
         **({DATE_KEY: digest_date} if digest_date else {}),
     )
     return rec
+
+
+def digest_kind_of(rec: dict) -> str:
+    """
+    这条投递读数是哪份产物。**缺字段 = "daily"**。
+
+    这个默认值是刻意的：`digest_kind` 是后来加的字段，
+    之前写下的记录全是日报 —— 把它们当成"未知"会让历史读数凭空消失。
+    """
+    return str(rec.get("digest_kind") or "daily")
 
 
 # ── 纠正：把"用户指的是哪一条"解析出来
@@ -370,15 +387,22 @@ def log_digest_missing(day: str, detail: str = "", channel: str = "") -> dict:
                   channel=channel, **{DATE_KEY: day})
 
 
-def digest_dates(days: int = 30, end: str | None = None) -> list[str]:
+def digest_dates(days: int = 30, end: str | None = None,
+                 kind: str = "daily") -> list[str]:
     """
-    最近这些天里，**确实投递过**日报的日期（升序、去重）。
+    最近这些天里，**确实投递过**这份产物的日期（升序、去重）。
 
     这是"读数里有哪些天送出去了"，不是状态源 —— 与 submitted_memos 同一性质。
+
+    ⚠️ `kind` 默认 `daily`：看门狗问的是"**日报**送到没有"，
+    而周日的周报投递**不能**算作当天的日报（否则看门狗会静默失效 ——
+    见 log_digest_pushed 的说明）。
     """
     seen = set()
     for rec in read_range(days, end):
         if rec.get("event") != EV_DIGEST_PUSHED:
+            continue
+        if digest_kind_of(rec) != kind:
             continue
         day = rec.get("digest_date") or str(rec.get("at", ""))[:10]
         if day:
@@ -386,9 +410,9 @@ def digest_dates(days: int = 30, end: str | None = None) -> list[str]:
     return sorted(seen)
 
 
-def delivered_on(day: str) -> bool:
-    """这一天有没有投递成功的读数（供看门狗判断"今天送到没有"）。"""
-    return day in digest_dates(days=1, end=day)
+def delivered_on(day: str, kind: str = "daily") -> bool:
+    """这一天有没有该产物投递成功的读数（供看门狗判断"今天日报送到没有"）。"""
+    return day in digest_dates(days=1, end=day, kind=kind)
 
 
 def alerted_on(day: str) -> bool:
@@ -397,16 +421,21 @@ def alerted_on(day: str) -> bool:
                for rec in read_day(day))
 
 
-def channel_health(days: int = 14, end: str | None = None) -> dict[str, dict]:
+def channel_health(days: int = 14, end: str | None = None,
+                   kind: str = "daily") -> dict[str, dict]:
     """
     从 `digest_pushed` 读数里汇总**每通道最近一次成功**与**连续失败天数**。
 
     ⚠️ 与 submitted_memos 同类：这不是"当前状态"，而是**读数的汇总**。
-    它回答的是"我上一次把日报送出去是什么时候"，用于在日报里提示
+    它回答的是"我上一次把**日报**送出去是什么时候"，用于在日报里提示
     "某个通道已经好几天没成功了"（否则单通道静默失效可以瞒你几个月）。
 
     同一天多次投递（手工重跑）按"任一次成功即算当天成功"合并 ——
     失败重试成功不该被记为失败。
+
+    ⚠️ `kind` 默认 `daily`（2026-10-05 加）：这份读数问的是**日报通道**的健康。
+    把周报（每周只有一条）混进来会让"连续失败天数"被一次周报成功清零，
+    从而掩盖日报的连续失败 —— 那是这条读数唯一要发现的东西。
     """
     per_day: dict[str, dict[str, bool]] = {}
     last_ok: dict[str, str] = {}
@@ -415,6 +444,8 @@ def channel_health(days: int = 14, end: str | None = None) -> dict[str, dict]:
 
     for rec in read_range(days, end):
         if rec.get("event") != EV_DIGEST_PUSHED:
+            continue
+        if digest_kind_of(rec) != kind:
             continue
         day = rec.get("digest_date") or str(rec.get("at", ""))[:10]
         at = str(rec.get("at", ""))

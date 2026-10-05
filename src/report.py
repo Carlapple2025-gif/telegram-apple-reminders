@@ -46,14 +46,19 @@ ROOT = Path(__file__).resolve().parent.parent
 # 备忘放多久还没被删掉，就在日报里提醒一次（天）
 MEMO_NAG_DAYS = 3
 
-# 日报的计划时间。**必须与 deploy/com.carl.pdca.report.plist 的
-# StartCalendarInterval 保持一致**（自检里有一条断言盯着这个一致性）。
+# 各产物的计划时间（时, 分）。**必须与 deploy/*.plist 的 StartCalendarInterval
+# 保持一致**（自检里有断言盯着这个一致性）。
 #
 # 为什么要在这里也知道计划时间：launchd 的语义是"睡过了就在唤醒时补跑"
 # （man launchd.plist：coalesced into one event upon wake），所以 21:30 的
 # 日报完全可能在第二天早上才发出 —— 而正文里若没有生成时刻，你**看不出来**。
-SCHEDULE_HOUR = 21
-SCHEDULE_MINUTE = 30
+SCHEDULES: dict[str, tuple[int, int]] = {
+    "daily": (21, 30),      # com.carl.pdca.report.plist（每天）
+    "weekly": (20, 0),      # com.carl.pdca.weekly.plist（**周日**）
+}
+
+# 兼容旧引用（日报是主产物，SCHEDULE_HOUR/MINUTE 这两个名字到处都在用）
+SCHEDULE_HOUR, SCHEDULE_MINUTE = SCHEDULES["daily"]
 
 # 比计划时间前后差多少分钟算"不在计划时间上"（要在日报里明确说出来）。
 # 两边都要管：
@@ -80,6 +85,7 @@ SRC_REMINDERS = "提醒事项"
 SRC_CALENDAR = "日历"
 SRC_MEMOS = "备忘台账"
 SRC_CHANNELS = "通道读数"
+SRC_LEDGER = "台账"          # journal 的读数（周报要数"本周记下了什么"）
 
 
 @dataclass(frozen=True)
@@ -120,6 +126,27 @@ class Memo:
 
 
 @dataclass
+class WeekData:
+    """
+    周报的输入：一周的**读数汇总**（不是新的状态源）。
+
+    两个来源，都只读：
+      · journal  —— 本周"我提交过什么"（append-only 的台账）
+      · 提醒事项 —— 本周"完成过什么"（按 Apple **原生的完成时刻**）
+
+    ⚠️ 口径（正文里也会说一遍，不许含糊）：完成数只统计**此刻还在提醒事项里**
+    的条目。你在 App 里删掉的，agent 看不到 —— 它没有副本，这是架构约束
+    （ARCHITECTURE「唯一约束」）。所以完成数是**下限**，不是精确值。
+    """
+    start: dt.date                       # 本周一
+    end: dt.date                         # 本周日（含）
+    submitted: list[tuple[str, int]]     # journal 里本周各品类的条数（有序）
+    completed: int                       # 本周完成条数
+    per_day: list[tuple[dt.date, int]]   # 本周每天的完成数（含 0 的那几天）
+    streak: int                          # 连续有完成的天数（今天没完成不算断）
+
+
+@dataclass
 class ReportData:
     """日报的全部输入（三处快照 + 投递读数）。"""
     date: dt.date
@@ -143,6 +170,12 @@ class ReportData:
     # 不能用模块常量：`--memo-days 7` 跑出来的日报若还写"3 天以上"，
     # 那就是正文在撒谎（本机实测过这个不一致：筛的是 7 天，写的是 3 天）。
     memo_nag_days: int = MEMO_NAG_DAYS
+    # 这份数据是给哪个产物用的（"daily" / "weekly"）。
+    # 区块与页脚据此选择；「迟到/早到」也据此找计划时间 ——
+    # 日报的计划是 21:30，周报是周日 20:00。
+    digest: str = "daily"
+    # 周报的 payload（日报为 None）。周报的区块读它；日报的区块不看它。
+    week: WeekData | None = None
 
     @property
     def done(self) -> list[Todo]:
@@ -191,8 +224,25 @@ class Block:
     note: str = ""                              # 为什么这样写（给人看）
 
 
+def _planned_hhmm(digest: str) -> str:
+    """这份产物的计划时刻（"21:30" / "20:00"）。不在表里 → 抛。"""
+    if digest not in SCHEDULES:
+        raise ValueError(f"没有为 {digest!r} 登记计划时间")
+    h, m = SCHEDULES[digest]
+    return f"{h:02d}:{m:02d}"
+
+
+def _digest_noun(digest: str) -> str:
+    """这份产物在人话里叫什么（"日报" / "周报"）。"""
+    return "日报" if digest == "daily" else ("周报" if digest == "weekly" else digest)
+
+
 def _schedule_flags(data: ReportData) -> tuple[bool, bool]:
-    """(晚了, 早了)。偏离计划时间超过 SCHEDULE_GRACE_MIN 才算 —— 两个方向都要管。"""
+    """(晚了, 早了)。偏离**这份产物自己的**计划时间超过 SCHEDULE_GRACE_MIN 才算。
+
+    两个方向都要管：晚报是"数据旧了"；早报（睡过计划时间、凌晨才醒）
+    会跑出一份"新一天"的空产物，而昨天那份永远不会来了。
+    """
     off = data.schedule_offset
     return (off is not None and off > SCHEDULE_GRACE_MIN,
             off is not None and off < -SCHEDULE_GRACE_MIN)
@@ -201,6 +251,8 @@ def _schedule_flags(data: ReportData) -> tuple[bool, bool]:
 def _title(data: ReportData) -> str:
     late, early = _schedule_flags(data)
     mark = "（延迟）" if late else ("（非计划时间）" if early else "")
+    if data.digest == "weekly" and data.week is not None:
+        return (f"📋 周报 {data.week.start:%m-%d} ~ {data.week.end:%m-%d}{mark}")
     return f"📋 {data.date.isoformat()} 复盘{mark}"
 
 
@@ -214,14 +266,14 @@ def _blk_generated_at(data: ReportData) -> list[str]:
         return []
     late, early = _schedule_flags(data)
     out = [f"🕘 生成于 {data.generated_at.strftime('%H:%M')}（数据截至同一时刻）"]
-    _hhmm = f"{SCHEDULE_HOUR:02d}:{SCHEDULE_MINUTE:02d}"
+    _hhmm = _planned_hhmm(data.digest)
     if late:
         out.append(f"⚠️ 比计划（{_hhmm}）晚 {_fmt_offset(data.schedule_offset)}"
                    f" —— 多半是机器在计划时间没醒，唤醒后才补跑")
     elif early:
         out.append(f"⚠️ 比计划（{_hhmm}）早 {_fmt_offset(data.schedule_offset)}"
                    f" —— 本次**不是** {_hhmm} 那一趟（机器唤醒后补跑，"
-                   f"或手工触发）；也就是说上一份日报没有发出")
+                   f"或手工触发）；也就是说上一份{_digest_noun(data.digest)}没有发出")
     out.append("")
     return out
 
@@ -323,11 +375,85 @@ def _blk_digest_gap(data: ReportData) -> list[str]:
     return [f"⚠️ {data.digest_gap_note}", ""]
 
 
+# ── 周报的区块（2026-10-05）
+#
+# 周报是**同一份渲染管线、另一套区块**：这正是区块注册表存在的理由
+# （见本文件顶部那段说明）。它读 `data.week`，日报的区块不看那个字段。
+
+def _blk_week_header(data: ReportData) -> list[str]:
+    w = data.week
+    if w is None:
+        return []
+    return [f"🗓 本周 {w.start:%m-%d} ~ {w.end:%m-%d}", ""]
+
+
+def _blk_week_completed(data: ReportData) -> list[str]:
+    w = data.week
+    if w is None:
+        return []
+    # ⚠️ 读不到 ≠ 没有。提醒事项读失败时**绝不能**写"完成 0 件" ——
+    # 那读起来就是"你这周什么都没干"，而事实是没读到。
+    # （与日报的 reminders_empty 同一条原则。这条是**真实跑出来的**：
+    #   沙箱里 -10004 越权时，第一版周报照样打了一行"✅ 完成 0 件"。）
+    if data.failed(SRC_REMINDERS):
+        return ["✅ 完成：读不到（见下方告警）", ""]
+    out = [f"✅ 完成 {w.completed} 件"]
+    # 每天一格，但**只画到今天**：未来的日子显示 0 只会让人以为漏了
+    days = [(d, n) for d, n in w.per_day if d <= data.date]
+    if days:
+        wd = "一二三四五六日"
+        out.append("　" + " · ".join(f"周{wd[d.isoweekday() - 1]} {n}"
+                                     for d, n in days))
+    out.append("")
+    return out
+
+
+def _blk_week_submitted(data: ReportData) -> list[str]:
+    w = data.week
+    if w is None:
+        return []
+    parts = [f"{label} {n}" for label, n in w.submitted if n]
+    if not parts:
+        return []
+    return ["📥 本周记下：" + " · ".join(parts), ""]
+
+
+def _blk_week_streak(data: ReportData) -> list[str]:
+    w = data.week
+    if w is None or w.streak <= 0:
+        return []
+    return [f"🔥 连续 {w.streak} 天有完成", ""]
+
+
+def _blk_week_empty(data: ReportData) -> list[str]:
+    """一周什么都没有时别只给一份空的 —— 但**不能**把"读不到"说成"没有"。"""
+    w = data.week
+    if w is None:
+        return []
+    if w.completed or any(n for _, n in w.submitted) or data.errors:
+        return []
+    return ["（这周什么都没有 —— 发一句给我就行）", ""]
+
+
+def _blk_week_caveat(data: ReportData) -> list[str]:
+    """
+    口径说明。**这不是客套**：不写清"完成数只是下限"，这份周报就在骗人 ——
+    你在提醒事项里删掉一条已完成的，它就从统计里消失了，而数字看起来仍然精确。
+    """
+    if data.week is None:
+        return []
+    return ["　（口径：只数得到**还在**提醒事项里的条目；你删掉的看不见）", ""]
+
+
 # 正文区块：**顺序就是渲染顺序**。
 # 加一段正文 = 写一个 `_blk_*` 函数 + 在这里加一行（不必动 build_report）。
+#
+# ⚠️ 顺序是**全局**的，而渲染按 `digests` 过滤 —— 所以"日报的区块"与
+# "周报的区块"混在一张表里，但各自看到的相对顺序由这里决定。
+# 周报那几块刻意排在 `errors` **之前**：错误汇总必须落在最后。
 BLOCKS: tuple[Block, ...] = (
-    Block("generated_at", _blk_generated_at,
-          note="数据截止时刻 + 迟到/早到说明"),
+    Block("generated_at", _blk_generated_at, digests=("daily", "weekly"),
+          note="数据截止时刻 + 迟到/早到说明（按各自的计划时间）"),
     Block("done", _blk_done, heartbeat="完成",
           count=lambda d: len(d.done),
           note="按 Apple 原生完成时刻筛过"),
@@ -341,22 +467,46 @@ BLOCKS: tuple[Block, ...] = (
     Block("memos", _blk_memos, heartbeat="备忘",
           count=lambda d: len(d.memos),
           note="来自 journal 台账的差集；天数用 data.memo_nag_days"),
-    Block("errors", _blk_errors, note="读不到 ≠ 没有"),
+    # ── 以下是周报（digests=("weekly",)）
+    Block("week_header", _blk_week_header, digests=("weekly",)),
+    Block("week_completed", _blk_week_completed, digests=("weekly",),
+          heartbeat="本周完成",
+          count=lambda d: d.week.completed if d.week else 0),
+    Block("week_submitted", _blk_week_submitted, digests=("weekly",),
+          heartbeat="本周记下",
+          count=lambda d: sum(n for _, n in d.week.submitted) if d.week else 0),
+    Block("week_empty", _blk_week_empty, digests=("weekly",)),
+    Block("week_streak", _blk_week_streak, digests=("weekly",),
+          heartbeat="连续天数",
+          count=lambda d: d.week.streak if d.week else 0),
+    Block("week_caveat", _blk_week_caveat, digests=("weekly",),
+          note="口径：完成数只是下限，必须说出来"),
+    # ── 两份产物共用
+    Block("errors", _blk_errors, digests=("daily", "weekly"),
+          note="读不到 ≠ 没有"),
     Block("channel_warnings", _blk_channel_warnings),
     Block("digest_gap", _blk_digest_gap),
 )
 
-# 页脚：任何一份产物都带着它，所以它不属于任何区块。
+# 页脚：按产物分开。
 #
-# 第二行**不能**写成"发一句给我也行" —— 它紧跟"打钩 ✓"，
+# 日报第二行**不能**写成"发一句给我也行" —— 它紧跟"打钩 ✓"，
 # 读起来像"发一句就能打钩"，而机器人没有打钩能力：发一句只会**新建**一条。
 # 所以写成它真正能做的事：加一条。顺带把符号表每天念一遍
 # （SYMBOL-SCHEME §6 说好的缓解措施之一）。
-FOOTER: tuple[str, ...] = (
-    "─" * 30,
-    "做完的在「提醒事项」里打钩 ✓",
-    "想加一条就直接发：交电费 · # 想法 · @周五两点 周会",
-)
+#
+# 周报不带"打钩"那一行：它是回看一周，不是催今天的事。
+FOOTERS: dict[str, tuple[str, ...]] = {
+    "daily": (
+        "─" * 30,
+        "做完的在「提醒事项」里打钩 ✓",
+        "想加一条就直接发：交电费 · # 想法 · @周五两点 周会",
+    ),
+    "weekly": (
+        "─" * 30,
+        "想加一条就直接发：交电费 · # 想法 · @周五两点 周会",
+    ),
+}
 
 
 def blocks_for(digest: str = "daily") -> list[Block]:
@@ -373,17 +523,28 @@ def blocks_for(digest: str = "daily") -> list[Block]:
     return out
 
 
-def build_report(data: ReportData, digest: str = "daily") -> tuple[str, str]:
+def _footer_for(digest: str) -> tuple[str, ...]:
+    """这份产物的页脚。没登记 → 抛（笔误会走成"没有收尾的正文"）。"""
+    if digest not in FOOTERS:
+        raise ValueError(f"没有为 {digest!r} 登记页脚")
+    return FOOTERS[digest]
+
+
+def build_report(data: ReportData, digest: str | None = None) -> tuple[str, str]:
     """
     生成 (标题, 正文)。
 
     正文 = 该产物选中的区块依次渲染（空区块自己省略）+ 页脚。
     **加一段正文不用改这个函数** —— 改 `BLOCKS`（见上面那段说明）。
+
+    `digest` 不传时用 `data.digest`（两者不一致会让人查半天，
+    所以只留一个真来源：数据自己说它是给谁的）。
     """
+    digest = digest or data.digest
     lines: list[str] = []
     for b in blocks_for(digest):
         lines.extend(b.render(data))
-    lines.extend(FOOTER)
+    lines.extend(_footer_for(digest))
     return _title(data), "\n".join(lines).strip()
 
 
@@ -399,17 +560,18 @@ def _fmt_offset(minutes: int | None) -> str:
 
 
 def schedule_offset_minutes(now: dt.datetime,
-                            report_date: dt.date) -> int | None:
+                            report_date: dt.date,
+                            digest: str = "daily") -> int | None:
     """
-    本次运行相对计划时间的偏移（分钟）：正=晚、负=早、None=不适用。
+    本次运行相对**这份产物自己的**计划时间的偏移（分钟）：正=晚、负=早、None=不适用。
 
-    只对"当天"的日报有意义：手工补跑历史日期（`report.py 2026-10-01`）
+    只对"当天"的有意义：手工补跑历史日期（`report.py 2026-10-01`）
     不该被判成迟到或早到，所以日期不是今天就返回 None。
     """
     if report_date != now.date():
         return None
-    planned = dt.datetime.combine(
-        report_date, dt.time(SCHEDULE_HOUR, SCHEDULE_MINUTE))
+    h, m = SCHEDULES[digest]
+    planned = dt.datetime.combine(report_date, dt.time(h, m))
     return int((now - planned).total_seconds() // 60)
 
 
@@ -501,6 +663,114 @@ def collect(date: dt.date | None = None,
     except Exception as e:  # noqa: BLE001
         data.errors.append(SourceError(SRC_CHANNELS, str(e)))
 
+    return data
+
+
+# ── 周报的采集（2026-10-05）
+#
+# 周报**不引入任何新的存储**：只有两个来源，都是只读的 ——
+#   · journal 的台账（"我提交过什么"）
+#   · 提醒事项的原生完成时刻（"完成过什么"）
+# 这与日报同源：**读数来自不可再生的台账，事实来自 Apple 应用**，
+# agent 依然没有"我的副本"（ARCHITECTURE「唯一约束」）。
+
+# 连续天数往回看多少天。60 天够用，而且**不会因为算它多读一次** ——
+# 完成时刻是"一次读取全表"拿到的（原生属性），不按天查。
+STREAK_LOOKBACK_DAYS = 60
+
+# journal 里"我提交过什么"的三个事件 → 给人看的品类名。
+# 这三个名字与 intake 的 `_LOG_FUNCS` 同源；改动要一起改（自检有断言盯着）。
+_SUBMIT_EVENTS: tuple[tuple[str, str], ...] = (
+    ("todo_added", "待办"),
+    ("event_added", "日程"),
+    ("memo_added", "备忘"),
+)
+
+
+def _week_bounds(day: dt.date) -> tuple[dt.date, dt.date]:
+    """`day` 所在的那一周：周一为起点、周日为终点（都含）。"""
+    start = day - dt.timedelta(days=day.isoweekday() - 1)
+    return start, start + dt.timedelta(days=6)
+
+
+def _read_completions(today: dt.date, lookback: int) -> dict[dt.date, int]:
+    """
+    按**完成时刻**把提醒事项的条目分到每一天。
+
+    一次 `all_reminders()` 就够（完成时刻是原生属性，见 tools/probe-native-dates.py），
+    比"每天查一次"便宜得多 —— 而且不会因为某一天读取失败而在曲线上留个假空洞。
+    """
+    import reminders
+    rem = reminders.Reminders()
+    rem.verify_list()
+    since = today - dt.timedelta(days=lookback)
+    out: dict[dt.date, int] = {}
+    for r in rem.all_reminders():
+        if not r.completed or r.completed_at is None:
+            continue
+        d = r.completed_at.date()
+        if d < since or d > today:
+            continue
+        out[d] = out.get(d, 0) + 1
+    return out
+
+
+def _streak_from(per_day: dict[dt.date, int], today: dt.date) -> int:
+    """
+    从今天往前数：连续多少天完成过 ≥1 件。
+
+    ⚠️ **今天还没有完成不算断**：否则每天早上打开都显示"连续 0 天"，
+    而你昨天明明做了事 —— 一条每天都会骗你一次的读数，比没有更糟。
+    """
+    d = today if per_day.get(today, 0) else today - dt.timedelta(days=1)
+    n = 0
+    while n < STREAK_LOOKBACK_DAYS and per_day.get(d, 0) > 0:
+        n += 1
+        d -= dt.timedelta(days=1)
+    return n
+
+
+def collect_week(today: dt.date | None = None) -> ReportData:
+    """
+    采一周的读数（全部只读）。
+
+    两处各自独立失败、互不影响 —— 与日报 `collect()` 同一条取舍：
+    **宁可少一段，也不要整份发不出**。
+    """
+    import journal
+
+    today = today or dt.date.today()
+    start, end = _week_bounds(today)
+    data = ReportData(date=today, digest="weekly")
+    week = WeekData(start=start, end=end, submitted=[], completed=0,
+                    per_day=[], streak=0)
+
+    # ① 完成（提醒事项，按原生完成时刻）
+    try:
+        per_day = _read_completions(today, STREAK_LOOKBACK_DAYS)
+        week.completed = sum(n for d, n in per_day.items() if start <= d <= end)
+        week.per_day = [(start + dt.timedelta(days=i),
+                         per_day.get(start + dt.timedelta(days=i), 0))
+                        for i in range(7)]
+        week.streak = _streak_from(per_day, today)
+    except Exception as e:  # noqa: BLE001
+        data.errors.append(SourceError(SRC_REMINDERS, str(e)))
+
+    # ② 提交（journal 台账：本周记下了几条、都是什么）
+    try:
+        counts = {ev: 0 for ev, _ in _SUBMIT_EVENTS}
+        for rec in journal.read_range(days=8):
+            ev = rec.get("event")
+            if ev not in counts:
+                continue
+            at = _parse_at(str(rec.get("at", "")))
+            if at is not None and start <= at.date() <= end:
+                counts[ev] += 1
+        week.submitted = [(label, counts[ev]) for ev, label in _SUBMIT_EVENTS]
+    except Exception as e:  # noqa: BLE001
+        data.errors.append(SourceError(SRC_LEDGER, str(e)))
+
+    data.week = week
     return data
 
 
@@ -667,23 +937,64 @@ def run(date: dt.date | None = None, push: bool = True,
         heartbeat: Callable[..., tuple] | None = None,
         now: dt.datetime | None = None) -> tuple[str, str, bool]:
     """
-    生成并（可选）推送日报。返回 (标题, 正文, 推送是否至少一个通道成功)。
+    生成并（可选）推送**日报**（每天 21:30）。返回 (标题, 正文, 是否送到)。
 
     `data` 给定时跳过采集（测试用）；`sender` / `heartbeat` 给定时跳过真实推送
     与真实心跳（测试用）。`now` 给定时用它当"生成时刻"（测试"偏离计划"分支用）。
-
-    ⚠️ 第三个返回值是给**退出码**用的。原先 run 不返回推送结果，
-    main 于是永远返回 0 —— 推送全失败时 launchd 仍显示"成功"，
-    你会以为日报发出去了。**静默失败比报错更危险**，所以必须如实上报。
     """
     generated_at = now or dt.datetime.now()
     today = date or generated_at.date()
     data = data or collect(today, memo_nag_days)
     data.date = today
+    return _deliver(data, "daily", push=push, channels=channels, sender=sender,
+                    heartbeat=heartbeat, generated_at=generated_at,
+                    archive_name=f"{today.isoformat()}.md")
+
+
+def run_weekly(today: dt.date | None = None, push: bool = True,
+               channels: list[str] | None = None,
+               data: ReportData | None = None,
+               sender: Callable[..., list] | None = None,
+               heartbeat: Callable[..., tuple] | None = None,
+               now: dt.datetime | None = None) -> tuple[str, str, bool]:
+    """
+    生成并（可选）推送**周报**（每周日 20:00）。返回 (标题, 正文, 是否送到)。
+
+    与 `run()` 共用同一条投递链（`_deliver`）—— 存档 / 推送 / 心跳 / 留痕
+    的规矩只有一份，不会两份产物慢慢长出不同的行为。
+    """
+    generated_at = now or dt.datetime.now()
+    day = today or generated_at.date()
+    data = data or collect_week(day)
+    data.date = day
+    start, _ = _week_bounds(day)
+    return _deliver(data, "weekly", push=push, channels=channels, sender=sender,
+                    heartbeat=heartbeat, generated_at=generated_at,
+                    archive_name=f"week-{start.isoformat()}.md")
+
+
+def _deliver(data: ReportData, digest: str, *,
+             push: bool,
+             channels: list[str] | None,
+             sender: Callable[..., list] | None,
+             heartbeat: Callable[..., tuple] | None,
+             generated_at: dt.datetime,
+             archive_name: str) -> tuple[str, str, bool]:
+    """
+    渲染 → 存档 → 推送 → 心跳 → 留痕。**日报与周报共用这一条链**。
+
+    为什么抽出来：这五步里每一步都有踩过坑的取舍 ——
+    退出码要如实反映推送结果（否则 launchd 显示成功而你没收到）、
+    心跳只送计数不送正文（第三方存储）、投递结果进 journal 而不是 logs/
+    （前者不可再生）。复制一份就等于让两份产物慢慢长出不同的规矩，
+    正是本项目反复踩过的"同一件事两处实现"。
+    """
+    data.digest = digest
     if data.generated_at is None:
         data.generated_at = generated_at
-        data.schedule_offset = schedule_offset_minutes(generated_at, today)
-    title, body = build_report(data)
+        data.schedule_offset = schedule_offset_minutes(
+            generated_at, data.date, digest)
+    title, body = build_report(data, digest)
 
     print(title)
     print("═" * 46)
@@ -694,9 +1005,9 @@ def run(date: dt.date | None = None, push: bool = True,
     try:
         digest_dir = ROOT / "data" / "digest"
         digest_dir.mkdir(parents=True, exist_ok=True)
-        (digest_dir / f"{today.isoformat()}.md").write_text(
+        (digest_dir / archive_name).write_text(
             f"# {title}\n\n{body}\n", encoding="utf-8")
-        print(f"已存档：data/digest/{today.isoformat()}.md")
+        print(f"已存档：data/digest/{archive_name}")
     except OSError as e:
         print(f"⚠️ 存档失败（不影响推送）：{e}", file=sys.stderr)
 
@@ -712,16 +1023,24 @@ def run(date: dt.date | None = None, push: bool = True,
         # 所有通道都失败才算失败 —— 两个通道互为冗余，一个成功就够了
         pushed_ok = any(ok for _, ok, _ in results)
         if not pushed_ok:
-            print("⚠️ 所有通道都推送失败（日报已存档，但没送到你手上）",
-                  file=sys.stderr)
+            print(f"⚠️ 所有通道都推送失败（{_digest_noun(digest)}已存档，"
+                  f"但没送到你手上）", file=sys.stderr)
 
         # 心跳：告诉**机器之外**的监控"这一份算完整并送到了"。
         # 判据刻意严格 —— 读失败也算失败（数据不完整同样需要你介入）。
-        beat = heartbeat or getattr(notify, "send_heartbeat", None)
+        #
+        # ⚠️ 两份产物**各用各的 URL**（见 notify.HEARTBEAT_ENV_KEYS_BY_KIND）：
+        # 周报去 ping 日报那个 URL 的话，远端会把周报当成"日报跑过了"。
+        beat = heartbeat
+        if beat is None:
+            _hb = getattr(notify, "send_heartbeat", None)
+            if _hb is not None:
+                beat = lambda ok, summary="": _hb(ok, summary, kind=digest)  # noqa: E731
         if beat is not None:
             intact = not data.errors
             hb_ok, hb_msg = beat(
-                pushed_ok and intact, summary=_heartbeat_summary(data, results))
+                pushed_ok and intact,
+                summary=_heartbeat_summary(data, results, digest))
             # "没配"是选择，不是故障：中性标记，不当告警（否则每晚刷一行警告，
             # 久了就没人看这一行了 —— 那正是"告警疲劳"）。
             hb_off = "未配置" in hb_msg
@@ -732,10 +1051,11 @@ def run(date: dt.date | None = None, push: bool = True,
         try:
             import journal
             journal.log_digest_pushed(
-                results, digest_date=today.isoformat(),
+                results, digest_date=data.date.isoformat(),
                 generated_at=generated_at.isoformat(timespec="seconds"),
                 schedule_offset=data.schedule_offset,
-                heartbeat=("未配置" if hb_off else hb_msg))
+                heartbeat=("未配置" if hb_off else hb_msg),
+                digest_kind=digest)
         except Exception as e:  # noqa: BLE001
             print(f"⚠️ 投递结果没能记进 journal（不影响送达）：{e}",
                   file=sys.stderr)
@@ -744,11 +1064,12 @@ def run(date: dt.date | None = None, push: bool = True,
 
 
 def _heartbeat_summary(data: ReportData,
-                       results: list[tuple[str, bool, str]]) -> str:
+                       results: list[tuple[str, bool, str]],
+                       digest: str | None = None) -> str:
     """
     心跳请求体：**只放计数，不放内容**。
 
-    心跳服务的日志是第三方存储，而日报正文里有你的待办原文 ——
+    心跳服务的日志是第三方存储，而正文里有你的待办原文 ——
     所以这里刻意只报数字（本机 logs/ 里引用你的内容都只留前 30 字符，
     对外发送更不该带原文）。
 
@@ -756,10 +1077,13 @@ def _heartbeat_summary(data: ReportData,
     原先这里硬编码了"完成/未完成/明日日程/备忘"四个计数，
     于是加一个品类要改**三处**（`ReportData`、`build_report`、这里），
     漏掉这里就表现为"日报上看得见、心跳摘要里没有"这种偏心的静默不一致。
+
+    ⚠️ 只数**这一份产物**的区块：周报的心跳不该报"明日日程 0"（那是日报的字段）。
     """
+    digest = digest or data.digest
     ch = " ".join(f"{name}{'✓' if ok else '✗'}" for name, ok, _ in results)
     parts: list[str] = []
-    for b in BLOCKS:
+    for b in blocks_for(digest):
         if b.heartbeat and b.count is not None:
             parts.append(f"{b.heartbeat}{b.count(data)}")
     # "读取失败"不是区块（它没有正文段可省略），单独算
@@ -774,13 +1098,15 @@ def _heartbeat_summary(data: ReportData,
 def main() -> int:
     import argparse
 
-    ap = argparse.ArgumentParser(description="日报：汇总三处状态并推送")
+    ap = argparse.ArgumentParser(description="日报 / 周报：汇总并推送")
     ap.add_argument("date", nargs="?", help="日期 YYYY-MM-DD，默认今天")
+    ap.add_argument("--weekly", action="store_true",
+                    help="生成**周报**（周日 20:00 那一趟），而不是日报")
     ap.add_argument("--no-push", action="store_true", help="只打印，不推送")
     ap.add_argument("--channels", default="telegram,bark",
                     help="推送通道，逗号分隔（默认 telegram,bark）")
     ap.add_argument("--memo-days", type=int, default=MEMO_NAG_DAYS,
-                    help=f"备忘放多少天开始提醒（默认 {MEMO_NAG_DAYS}）")
+                    help=f"备忘放多少天开始提醒（默认 {MEMO_NAG_DAYS}，仅日报）")
     args = ap.parse_args()
 
     try:
@@ -789,10 +1115,12 @@ def main() -> int:
         print(f"❌ 日期格式不对（应为 YYYY-MM-DD）：{e}", file=sys.stderr)
         return 1
 
-    _, _, pushed = run(
-        d, push=not args.no_push,
-        channels=[c.strip() for c in args.channels.split(",") if c.strip()],
-        memo_nag_days=args.memo_days)
+    chans = [c.strip() for c in args.channels.split(",") if c.strip()]
+    if args.weekly:
+        _, _, pushed = run_weekly(d, push=not args.no_push, channels=chans)
+    else:
+        _, _, pushed = run(d, push=not args.no_push, channels=chans,
+                           memo_nag_days=args.memo_days)
     # 退出码要如实反映结果：launchd 靠它标记成功/失败。
     # 全通道推送失败 → 非 0，这样 `launchctl print` 里能看到失败，
     # 而不是显示"成功"让你以为报表发出去了。

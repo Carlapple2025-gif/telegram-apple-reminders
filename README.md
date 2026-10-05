@@ -133,6 +133,9 @@ bash deploy/install_launchd.sh test
 # 日报（只看内容，不推送）
 python3 src/report.py --no-push
 
+# 周报（周日 20:00 那一趟；只看内容，不推送）
+python3 src/report.py --weekly --no-push
+
 # Telegram 通道（独立 bot）
 python3 src/telegram.py status             # token / chat_id / bot 名
 python3 src/telegram.py menu               # 查看「/」菜单（打 / 时的自动补全）
@@ -155,12 +158,13 @@ python3 src/telegram.py menu --set         # 把 commands.MENU 推上去
 > 想安全试解析逻辑，用 `python3 src/selftest.py`（完全离线，不碰网络与数据）；
 > 真要观察离线回执，先 `install_launchd.sh uninstall` 停掉守护再跑。
 
-**两个任务的分工**（刻意分开：写入路径只有一个入口，出问题排查面小得多）：
+**三个任务的分工**（刻意分开：写入路径只有一个入口，出问题排查面小得多）：
 
 | 任务 | 时间 | 是否写数据 |
 |---|---|---|
 | `com.carl.pdca.daemon` | 常驻（KeepAlive） | ✅ 唯一写入者 |
 | `com.carl.pdca.report` | 每天 21:30 | ❌ **只读** |
+| `com.carl.pdca.weekly` | 周日 20:00 | ❌ **只读**（周报：完成 / 提交 / 连续天数） |
 
 v1 的 `com.carl.pdca.sync` / `com.carl.pdca.carryover` 会在安装时被自动清理 ——
 它们指向已废弃的脚本，留着会"两套系统同时在跑"。
@@ -223,6 +227,7 @@ pdca/
 ├── data/                      ← 业务数据（要备份；丢了不可再生）
 │   ├── journal/2026-10-03.jsonl   传感器读数（动作 + 观察）
 │   ├── digest/2026-10-03.md       日报历史
+│   ├── digest/week-2026-10-05.md  周报历史（按**周一**命名）
 │
 ├── logs/                      ← 程序日志（debug 用，可随时清）
 │
@@ -257,6 +262,7 @@ pdca/
 │   ├── install_launchd.sh     任务管理（install/status/test/restart/doctor）
 │   ├── com.carl.pdca.daemon.plist    常驻收件守护
 │   ├── com.carl.pdca.report.plist    21:30 日报
+│   ├── com.carl.pdca.weekly.plist    周日 20:00 周报
 │   └── legacy/                v1 的两个定时任务定义（安装时会自动清理，
 │                              留着是为了看清 v1 曾经装了什么）
 │
@@ -483,7 +489,7 @@ journal 每天独立留痕，出问题时你能看见丢了什么。
 
 | 优先级 | 功能 | 说明 |
 |---|---|---|
-| P1 | 周报 | 完成率、连续天数（等一两周真实数据后再做） |
+| ~~P1~~ | ~~周报~~ | **✅ 已实施**（2026-10-05，周日 20:00）：完成 / 提交 / 连续天数 |
 | P2 | 守护的可观测性 | 现在只能看日志；想要"守护是否健康"的一句话结论 |
 | P3 | 智能体诊断 | 任务失败时交给 headless 智能体先定位，搞不定才推给你 |
 | — | 清理 v1 遗留代码 | 见下 |

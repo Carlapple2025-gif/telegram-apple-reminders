@@ -816,18 +816,21 @@ if _home_plists:
 
 section("v4 的定时任务路线")
 
-# v4 的关键路线只有两个任务：
+# v4 的关键路线只有三个任务：
 #   ① 常驻收件守护（KeepAlive）—— 你发一句就有人接
 #   ② 21:30 日报（只读三处快照）
+#   ③ 周日 20:00 周报（只读；完成 / 提交 / 连续天数）—— 2026-10-05 加
 #
 # v1 的三个任务（09:00 同步 / 21:30 日报 / 07:00 顺延）在 v4 都不需要：
 # 待办常驻提醒事项，没有"同步"和"顺延"这两个概念。
 _plists = {p.name for p in (ROOT / "deploy").glob("com.carl.pdca.*.plist")}
-for _need in ("com.carl.pdca.daemon.plist", "com.carl.pdca.report.plist"):
+for _need in ("com.carl.pdca.daemon.plist", "com.carl.pdca.report.plist",
+              "com.carl.pdca.weekly.plist"):
     check(f"存在 {_need}", _need in _plists)
 
 _install = (ROOT / "deploy" / "install_launchd.sh").read_text(encoding="utf-8")
-for _lbl in ("com.carl.pdca.daemon", "com.carl.pdca.report"):
+for _lbl in ("com.carl.pdca.daemon", "com.carl.pdca.report",
+             "com.carl.pdca.weekly"):
     check(f"安装列表含 {_lbl}", _lbl in _install)
 
 # 守护必须 KeepAlive（否则退出后没人接消息）
@@ -3282,17 +3285,34 @@ check("配了 count 的区块应该也进心跳摘要（否则是死配置）",
       "；".join(b.id for b in _rp.BLOCKS if b.count and not b.heartbeat))
 
 # ── 产物选择
-check("blocks_for('daily') 覆盖全部已登记区块",
-      len(_rp.blocks_for("daily")) == len(_rp.BLOCKS))
-# 产物名写错要**抛**，不能悄悄渲染出一份空日报（静默失败比报错危险）
+# 每份产物都得有区块；区块、页脚、计划时间三者必须成套 ——
+# 缺任何一个都会在**投递那一刻**才炸（而投递是每天只跑一次的那条路）。
+for _dig in _rp.SCHEDULES:
+    check(f"{_dig}：登记了计划时间就有区块", bool(_rp.blocks_for(_dig)))
+    check(f"{_dig}：有页脚", _dig in _rp.FOOTERS)
+check("区块声明里出现的产物名都已登记（页脚 + 计划时间）",
+      all(d in _rp.FOOTERS and d in _rp.SCHEDULES
+          for d in {d for b in _rp.BLOCKS for d in b.digests}),
+      str(sorted({d for b in _rp.BLOCKS for d in b.digests})))
+# 产物名写错要**抛**，不能悄悄渲染出一份空产物（静默失败比报错危险）
 try:
     _rp.blocks_for("weekly_typo")
     _bad_digest = False
 except ValueError:
     _bad_digest = True
 check("产物名写错时抛异常（不返回空正文）", _bad_digest)
+try:
+    _rp._footer_for("weekly_typo")
+    _bad_footer = False
+except ValueError:
+    _bad_footer = True
+check("产物名写错时页脚也抛异常", _bad_footer)
 
 # ── 每个区块：要么给行，要么给空列表；不许返回 None / 非字符串
+#
+# ⚠️ 2026-10-05 加周报后，判据必须**按产物分别做**：
+# 日报的区块与周报的区块读的是同一份 data 的不同字段，
+# 拿日报的 data 去逼周报的区块出现，只会得到一堆假红。
 _rich = _rp.ReportData(
     date=_RD,
     todos=[_rp.Todo("做完的", True), _rp.Todo("没做完的", False)],
@@ -3304,29 +3324,62 @@ _rich = _rp.ReportData(
     digest_gap_note="上一份日报是 2 天前")
 _empty = _rp.ReportData(date=_RD)
 
+_WEEK_RICH = _rp.WeekData(
+    start=_dt2.date(2026, 9, 28), end=_dt2.date(2026, 10, 4),
+    submitted=[("待办", 5), ("日程", 2), ("备忘", 1)], completed=7,
+    per_day=[(_dt2.date(2026, 9, 28) + _dt2.timedelta(days=i),
+              n) for i, n in enumerate([1, 2, 0, 3, 1, 0, 0])], streak=5)
+_week_rich = _rp.ReportData(date=_RD, digest="weekly", week=_WEEK_RICH,
+                            generated_at=_dt2.datetime(2026, 10, 4, 20, 0))
+_week_empty = _rp.ReportData(date=_RD, digest="weekly",
+                             week=_rp.WeekData(start=_dt2.date(2026, 9, 28),
+                                               end=_dt2.date(2026, 10, 4),
+                                               submitted=[("待办", 0)],
+                                               completed=0, per_day=[],
+                                               streak=0))
+# 第三份 fixture：**读失败**的那一种。必须单独有一份 ——
+# 因为"提醒事项读不到"时完成数根本没有意义（写 0 就是在撒谎），
+# 所以它不能和"有一周数据"混在同一份 data 里（混了就不是真实情形）。
+_week_err = _rp.ReportData(
+    date=_RD, digest="weekly",
+    week=_rp.WeekData(start=_dt2.date(2026, 9, 28), end=_dt2.date(2026, 10, 4),
+                      submitted=[("待办", 0)], completed=0, per_day=[], streak=0),
+    errors=[_rp.SourceError(_rp.SRC_REMINDERS, "拒绝访问")])
+
+# 每份产物的 fixture 集：什么都有 / 什么都没有 / 读失败
+_FIXTURES: dict = {"daily": (_rich, _empty),
+                   "weekly": (_week_rich, _week_empty, _week_err)}
+
 _shapes_ok = True
 _dead: list[str] = []
-for _b in _rp.BLOCKS:
-    for _d in (_rich, _empty):
-        _r = _b.render(_d)
-        if not isinstance(_r, list) or not all(isinstance(x, str) for x in _r):
-            _shapes_ok = False
-    # ⚠️ 判据是"**这两份 data 里至少有一份**让它出现"，不能只看 rich：
-    # `reminders_empty` 与"有待办"是**互斥**的（有待办时它必须不出现），
-    # 所以"rich 下为空"对它是**正确行为**，不是死区块。
-    if not _b.render(_rich) and not _b.render(_empty):
-        _dead.append(_b.id)
+for _dig, _fxs in _FIXTURES.items():
+    for _b in _rp.blocks_for(_dig):
+        for _d in _fxs:
+            _r = _b.render(_d)
+            if not isinstance(_r, list) or not all(isinstance(x, str) for x in _r):
+                _shapes_ok = False
+        # ⚠️ 判据是"这些 fixture 里**至少有一份**让它出现"，不能只看 rich：
+        # `reminders_empty` 与"有待办"是**互斥**的（有待办时它必须不出现），
+        # `week_empty` 与"有数据"同理 —— 所以"rich 下为空"对它们是正确行为。
+        if not any(_b.render(_d) for _d in _fxs):
+            _dead.append(f"{_dig}:{_b.id}")
 check("每个区块渲染出 列表[str]（空列表=省略）", _shapes_ok)
-# "注册了却永远不出现" = 死区块。两份互为补集的数据（什么都有 / 什么都没有）
-# 合起来必须能点亮全部区块 —— 否则说明判据写错了，或那个区块根本是摆设。
-check("没有死区块（两份互补 data 合起来能点亮每个区块）", not _dead,
+# "注册了却永远不出现" = 死区块。每份产物各自的两份互补数据合起来
+# 必须能点亮它自己的全部区块 —— 否则说明判据写错了，或那个区块根本是摆设。
+check("没有死区块（每份产物的互补 data 都能点亮自己的区块）", not _dead,
       f"这些区块在 rich 与 empty 下都为空：{_dead}")
+
+# 每个区块都必须属于**至少一份**产物 —— 否则它会永远不渲染（注册了但没人要）
+_orphan = [_b.id for _b in _rp.BLOCKS
+           if not any(_b in _rp.blocks_for(_d) for _d in _FIXTURES)]
+check("没有不属于任何产物的区块", not _orphan, str(_orphan))
 
 # ── build_report 真的不再认识任何一段文案
 import inspect as _insp9  # noqa: E402
 _br_src = _insp9.getsource(_rp.build_report)
 _leaked = [w for w in ("今日完成", "未完成", "明日日程", "备忘放了",
-                       "读取失败", "投递通道读数", "上一份日报") if w in _br_src]
+                       "读取失败", "投递通道读数", "上一份日报",
+                       "本周记下", "连续") if w in _br_src]
 check("build_report 里没有区块文案（正文全在区块里）", not _leaked,
       f"这些文案还留在主函数里：{_leaked} → 加段落时仍要改它")
 
@@ -3337,10 +3390,36 @@ check("心跳摘要含各区块的计数", "完成1" in _hb and "未完成1" in 
 check("心跳摘要仍有读取失败计数", "读取失败1" in _hb, _hb)
 check("心跳摘要仍然只报数字（不带正文）",
       "一条备忘" not in _hb and "没做完的" not in _hb, _hb)
-check("心跳摘要的顺序跟着 BLOCKS 声明走",
-      [_hb.index(f"{b.heartbeat}") for b in _rp.BLOCKS
-       if b.heartbeat] == sorted(_hb.index(f"{b.heartbeat}")
-                                 for b in _rp.BLOCKS if b.heartbeat), _hb)
+def _hb_labels(summary: str) -> list:
+    """把心跳摘要里的 `标签+数字` 拆出标签来（顺序保留）。
+
+    ⚠️ 不能用 `"完成" in 摘要` 来判"混进了别的产物" ——
+    周报的「本周完成9」**包含**"完成"这两个字，子串判断会假红。
+    （这条断言自己踩过一次，所以拆词而不是找子串。）
+    """
+    out = []
+    for _t in summary.split():
+        _m = _re.fullmatch(r"(.+?)(\d+)", _t)
+        if _m:
+            out.append(_m.group(1))
+    return out
+
+
+for _dig, _fx in (("daily", _rich), ("weekly", _week_rich)):
+    _s = _rp._heartbeat_summary(_fx, [("telegram", True, "ok")], _dig)
+    _labels = [b.heartbeat for b in _rp.blocks_for(_dig) if b.heartbeat]
+    check(f"{_dig} 心跳摘要含本产物的每个计数",
+          all(lb in _hb_labels(_s) for lb in _labels), _s)
+    check(f"{_dig} 心跳摘要的顺序跟着区块声明走",
+          [_hb_labels(_s).index(lb) for lb in _labels]
+          == sorted(_hb_labels(_s).index(lb) for lb in _labels), _s)
+    # ⚠️ 心跳**只报这一份产物**的计数：周报的心跳里出现"明日日程0"
+    # 会让远端看到一份与它无关的字段，久了就没人信这串数字。
+    _others = [b.heartbeat for b in _rp.BLOCKS
+               if b.heartbeat and b not in _rp.blocks_for(_dig)]
+    check(f"{_dig} 心跳摘要不含别的产物的计数",
+          not (set(_hb_labels(_s)) & set(_others)),
+          f"{_s} 里混进了 {_others}")
 
 # ── 两条"防退化"的判据（都是这次重构顺带修掉的静默失效）
 # ① 来源判断必须是**精确匹配**：以前写的是 `"提醒事项" in e`（子串包含），
@@ -3358,6 +3437,185 @@ _b7d = _rp.build_report(_rp.ReportData(date=_RD, memo_nag_days=7, memos=[
 check("备忘天数随 --memo-days 变（正文不撒谎）", "放了 7 天以上" in _b7d, _b7d)
 check("默认仍是 3 天", "放了 3 天以上" in _rp.build_report(_rp.ReportData(
     date=_RD, memos=[_rp.Memo("x", _dt2.datetime(2026, 9, 20, 9, 0))]))[1])
+
+
+section("周报（周日 20:00）与「两种产物不能互相冒充」")
+
+# ── 一、先验"不能互相冒充"
+#
+# 周报也会往 digest_pushed 留痕。而 `delivered_on()` 原先只看"这一天有没有
+# digest_pushed 记录" —— 于是**周日 20:00 的周报会把当天的日报标记成已送达**：
+# 看门狗 23:30 检查时看到"送到了"就不告警，而那天 21:30 的日报根本没跑。
+# 看门狗唯一的职责就是发现这件事，被骗过去 = 白装。
+#
+# 所以 2026-10-05 给 digest_pushed 加了 `digest_kind` 字段
+# （按 KERNEL-CONTRACT §五：给已有事件加字段 = MINOR）。
+# 同样的骗法在**机器之外**还有一份：周报不能去 ping 日报那个心跳 URL，
+# 否则远端监控也会以为日报跑过了 —— 见本节的第三部分。
+_jw = _fresh_journal()
+try:
+    _wd = "2026-10-04"           # 周日
+    _jr.log_digest_pushed([("telegram", True, "ok")], digest_date=_wd,
+                          digest_kind="weekly")
+    check("周报投递**不算**当天日报送到（看门狗不会被骗）",
+          _jr.delivered_on(_wd) is False)
+    check("周报投递在 weekly 这一侧算数",
+          _jr.delivered_on(_wd, kind="weekly") is True)
+    check("digest_dates 默认只数日报",
+          _jr.digest_dates(days=3, end=_wd) == [])
+    check("digest_dates(kind='weekly') 数得到周报",
+          _jr.digest_dates(days=3, end=_wd, kind="weekly") == [_wd])
+
+    # 老记录（没有 digest_kind 字段）必须**仍然算日报** ——
+    # 否则升级那一刻，历史投递读数会全部凭空消失（而它们是不可再生的）。
+    _jr.append(_jr.EV_DIGEST_PUSHED, digest_date=_wd,
+               channels=[{"name": "telegram", "ok": True, "detail": ""}],
+               **{_jr.DATE_KEY: _wd})
+    check("没有 digest_kind 的老记录算日报（历史读数不消失）",
+          _jr.delivered_on(_wd) is True)
+    check("digest_kind_of 对老记录返回 daily",
+          _jr.digest_kind_of({"event": _jr.EV_DIGEST_PUSHED}) == "daily")
+finally:
+    _sh2.rmtree(_jw, ignore_errors=True)
+
+# 通道读数：周报的成功**不能**把日报的连续失败清零 ——
+# "连续几天没成功"是这条读数唯一要发现的东西（单通道静默失效能瞒几个月）。
+_jw2 = _fresh_journal()
+try:
+    _hb_base = _dt2.date(2026, 10, 4)
+    for _i in (2, 1, 0):
+        _jr.log_digest_pushed(
+            [("telegram", False, "超时")],
+            digest_date=(_hb_base - _dt2.timedelta(days=_i)).isoformat())
+    _jr.log_digest_pushed([("telegram", True, "ok")],
+                          digest_date=_hb_base.isoformat(), digest_kind="weekly")
+    _hh = _jr.channel_health(days=7, end=_hb_base.isoformat())
+    check("日报通道连续失败天数不被周报的成功清零",
+          _hh.get("telegram", {}).get("consecutive_fail_days") == 3, str(_hh))
+finally:
+    _sh2.rmtree(_jw2, ignore_errors=True)
+
+# ── 二、周报本身
+check("周报区间是周一到周日（周日属于本周）",
+      _rp._week_bounds(_dt2.date(2026, 10, 4)) == (_dt2.date(2026, 9, 28),
+                                                   _dt2.date(2026, 10, 4)))
+check("周报区间：周中也落在同一周",
+      _rp._week_bounds(_dt2.date(2026, 9, 30)) == (_dt2.date(2026, 9, 28),
+                                                   _dt2.date(2026, 10, 4)))
+
+# 连续天数。⚠️ "今天还没有完成不算断"是刻意的：否则每天早上打开都显示
+# "连续 0 天"，而你昨天明明做了事 —— 一条每天都会骗你一次的读数比没有更糟。
+check("连续天数：今天有完成就从今天数",
+      _rp._streak_from({_dt2.date(2026, 10, 4): 1}, _dt2.date(2026, 10, 4)) == 1)
+check("连续天数：今天还没有完成不算断（从昨天往前数）",
+      _rp._streak_from({_dt2.date(2026, 10, 3): 2}, _dt2.date(2026, 10, 4)) == 1)
+check("连续天数：连着三天就数三",
+      _rp._streak_from({_dt2.date(2026, 10, 2): 1, _dt2.date(2026, 10, 3): 1,
+                        _dt2.date(2026, 10, 4): 1},
+                       _dt2.date(2026, 10, 4)) == 3)
+check("连续天数：中间断了就从断点重数",
+      _rp._streak_from({_dt2.date(2026, 10, 1): 5, _dt2.date(2026, 10, 2): 0,
+                        _dt2.date(2026, 10, 3): 1, _dt2.date(2026, 10, 4): 1},
+                       _dt2.date(2026, 10, 4)) == 2)
+check("连续天数：一天都没完成就是 0",
+      _rp._streak_from({}, _dt2.date(2026, 10, 4)) == 0)
+
+_tw, _bw = _rp.build_report(_week_rich)
+check("周报标题带周区间",
+      _tw.startswith("📋 周报 ") and "09-28" in _tw and "10-04" in _tw, _tw)
+check("周报含完成数与本周记下",
+      "✅ 完成 7 件" in _bw and "📥 本周记下：待办 5 · 日程 2 · 备忘 1" in _bw, _bw)
+check("周报含连续天数", "🔥 连续 5 天有完成" in _bw, _bw)
+# 这是"同一份渲染管线、另一套区块"的实证：日报的段一个都不该漏进周报
+check("周报不带日报的段（明日日程 / 备忘提醒 / 打钩）",
+      "明日日程" not in _bw and "备忘放了" not in _bw and "打钩" not in _bw, _bw)
+# 口径必须写出来：不写清"完成数只是下限"，这份周报就在骗人
+# （你在提醒事项里删掉一条已完成的，它就从统计里消失了，而数字看起来仍然精确）
+check("周报写明口径（只数得到还在的条目）",
+      "只数得到" in _bw and "删掉" in _bw, _bw)
+# 每天一格只画到今天：未来的日子显示 0 只会让人以为漏了
+# （_week_rich.date 是 10-03 周六，本周最后一天是 10-04 周日）
+check("周报的每天一格只画到今天", "周六" in _bw and "周日" not in _bw, _bw)
+
+_twe, _bwe = _rp.build_report(_week_empty)
+check("周报：一周什么都没有时如实说", "这周什么都没有" in _bwe, _bwe)
+# 读不到 ≠ 没有（与日报同一条原则，日报为此专门有断言）
+_bwf = _rp.build_report(_week_err)[1]
+check("周报读不到时**不说**「这周什么都没有」",
+      "这周什么都没有" not in _bwf, _bwf)
+check("周报读不到时如实列出失败来源", "拒绝访问" in _bwf, _bwf)
+# ⚠️ 这一条是**真实跑出来的**：第一版周报在 -10004 越权时照样打"✅ 完成 0 件"，
+# 读起来就是"你这周什么都没干"。与日报的"读不到不能说成没有"同源。
+check("周报读不到时**不写**「完成 0 件」（那是在撒谎）",
+      "完成 0 件" not in _bwf and "完成：读不到" in _bwf, _bwf)
+check("周报读不到时不画每天的完成格子（0 会被当成真没做）",
+      "周一" not in _bwf, _bwf)
+
+# ── 三、投递链（与日报共用同一条：存档 / 推送 / 心跳 / 留痕）
+_dw = _P2(_tf2.mkdtemp())
+_old_root_w = _rp.ROOT
+_rp.ROOT = _dw
+_jw3 = _fresh_journal()
+try:
+    _sent_w: list = []
+    _beats_w: list = []
+    _data_w = _rp.ReportData(
+        date=_dt2.date(2026, 10, 4), digest="weekly", week=_WEEK_RICH,
+        generated_at=_dt2.datetime(2026, 10, 4, 20, 0))
+    _twr, _bwr, _okw = _rp.run_weekly(
+        today=_dt2.date(2026, 10, 4), push=True,
+        now=_dt2.datetime(2026, 10, 4, 20, 0), data=_data_w,
+        sender=lambda t, b, channels=None: (
+            _sent_w.append((t, b)), [("telegram", True, "ok")])[1],
+        heartbeat=lambda ok, summary="": (
+            _beats_w.append(summary), (True, "ok"))[1])
+    check("周报存档到 data/digest/week-<周一>.md",
+          (_dw / "data" / "digest" / "week-2026-09-28.md").is_file())
+    check("周报也走推送", len(_sent_w) == 1)
+    check("周报的推送结果照旧如实返回（退出码同源）", _okw is True)
+    check("周报标题里的周区间与存档名一致", "09-28" in _twr and "10-04" in _twr, _twr)
+
+    _recs_w = [r for r in _jr.read_day("2026-10-04")
+               if r.get("event") == _jr.EV_DIGEST_PUSHED]
+    check("周报留痕带 digest_kind=weekly（与日报分得开）",
+          bool(_recs_w) and _recs_w[-1].get("digest_kind") == "weekly",
+          str(_recs_w))
+    check("周报心跳只报周报的计数（不含日报字段）",
+          bool(_beats_w) and "本周完成" in _beats_w[-1]
+          and "明日日程" not in _beats_w[-1] and "未完成" not in _beats_w[-1],
+          str(_beats_w))
+finally:
+    _rp.ROOT = _old_root_w
+    _sh2.rmtree(_dw, ignore_errors=True)
+    _sh2.rmtree(_jw3, ignore_errors=True)
+
+# ── 四、心跳 URL 也必须分开（同样的骗法，发生在机器之外）
+check("周报心跳用独立的 URL 变量（不复用日报那个）",
+      "HEALTHCHECK_URL" not in _notify.heartbeat_env_keys("weekly")
+      and "WEEKLY_HEALTHCHECK_URL" in _notify.heartbeat_env_keys("weekly"),
+      str(_notify.heartbeat_env_keys("weekly")))
+check("不认识的产物名按日报处理（保守，不错配到别的 URL）",
+      _notify.heartbeat_env_keys("nope") == _notify.heartbeat_env_keys("daily"))
+
+_saved_hb_env = os.environ.pop("HEALTHCHECK_URL", None)
+_saved_hb_env2 = os.environ.pop("WEEKLY_HEALTHCHECK_URL", None)
+try:
+    os.environ["HEALTHCHECK_URL"] = "https://daily.invalid/abc"
+    _u_d, _ = _notify.load_heartbeat_url("daily")
+    _u_w, _ = _notify.load_heartbeat_url("weekly")
+    check("配了日报心跳时，日报取得到", _u_d == "https://daily.invalid/abc", str(_u_d))
+    # ⚠️ 这一条是关键：周报**不能**退回去用日报的 URL
+    check("配了日报心跳时，周报**不**误用它", _u_w is None, str(_u_w))
+    os.environ["WEEKLY_HEALTHCHECK_URL"] = "https://weekly.invalid/xyz"
+    _u_w2, _ = _notify.load_heartbeat_url("weekly")
+    check("配了周报心跳时，周报取得到", _u_w2 == "https://weekly.invalid/xyz",
+          str(_u_w2))
+finally:
+    for _k, _v in (("HEALTHCHECK_URL", _saved_hb_env),
+                   ("WEEKLY_HEALTHCHECK_URL", _saved_hb_env2)):
+        os.environ.pop(_k, None)
+        if _v is not None:
+            os.environ[_k] = _v
 
 
 section("v4 投递与监控（心跳 / 投递留痕 / 生成时刻）")
@@ -3444,6 +3702,20 @@ check("report 的计划时间与 plist 一致",
       f"<key>Hour</key>\n\t\t<integer>{_rp.SCHEDULE_HOUR}</integer>" in _plist_rep
       and f"<key>Minute</key>\n\t\t<integer>{_rp.SCHEDULE_MINUTE}</integer>" in _plist_rep,
       f"report.py 写的是 {_rp.SCHEDULE_HOUR:02d}:{_rp.SCHEDULE_MINUTE:02d}")
+
+# 周报的计划时间同样要与它自己的 plist 一致 —— 而且是**周日**
+# （Weekday 0 = 周日，launchd 的约定）。
+_plist_wk = (ROOT / "deploy" / "com.carl.pdca.weekly.plist").read_text(
+    encoding="utf-8")
+_wk_h, _wk_m = _rp.SCHEDULES["weekly"]
+check("周报的计划时间与 plist 一致",
+      f"<key>Hour</key>\n\t\t<integer>{_wk_h}</integer>" in _plist_wk
+      and f"<key>Minute</key>\n\t\t<integer>{_wk_m}</integer>" in _plist_wk,
+      f"report.py 写的是 {_wk_h:02d}:{_wk_m:02d}")
+check("周报真的只在**周日**跑（Weekday 0）",
+      "<key>Weekday</key>\n\t\t<integer>0</integer>" in _plist_wk)
+check("周报任务带 --weekly（否则会当成日报跑两遍）",
+      "--weekly" in _plist_wk and "src/report.py" in _plist_wk)
 
 # 生成时刻 / 迟到告警：launchd 睡过后会在唤醒时补跑（man launchd.plist：
 # coalesced into one event upon wake），所以日报**必须自己说出**它多新。
@@ -3726,14 +3998,20 @@ section("v4 安装脚本")
 _inst_path = ROOT / "deploy" / "install_launchd.sh"
 _inst = _inst_path.read_text(encoding="utf-8")
 
-# 只装 v4 的两个任务（v1 的三个 plist 文件保留但不再安装）
-check("安装脚本只装 daemon 与 report",
-      "LABELS=(com.carl.pdca.daemon com.carl.pdca.report)" in _inst)
+# 只装 v4 的任务（v1 的三个 plist 文件保留但不再安装）
+#
+# ⚠️ 2026-10-05 加了第三个任务（周报）。这条断言写死整行字符串，
+# 所以**加任务时必须一起改这里** —— 它就是"这是第几个任务"的记录点
+# （与"命令条数"那条断言同一个用法：加东西要是一次有意的决定）。
+check("安装脚本只装 v4 的三个任务（daemon / report / weekly）",
+      "LABELS=(com.carl.pdca.daemon com.carl.pdca.report"
+      " com.carl.pdca.weekly)" in _inst)
 # 安装脚本**不安装** v1 任务，但会**清理**它们 ——
 # 实测踩到：换架构时只装新的、不管旧的，旧任务会继续按老逻辑动数据
 # （v1 的 report 会在 21:30 发一份基于旧留档的误导日报）。
-check("安装列表只含 v4 两个任务",
-      "LABELS=(com.carl.pdca.daemon com.carl.pdca.report)" in _inst)
+check("安装列表只含 v4 三个任务",
+      "LABELS=(com.carl.pdca.daemon com.carl.pdca.report"
+      " com.carl.pdca.weekly)" in _inst)
 check("安装脚本会清理 v1 遗留任务", "cleanup_legacy" in _inst
       and "LEGACY_LABELS" in _inst)
 check("v1 任务被标为遗留而非安装",

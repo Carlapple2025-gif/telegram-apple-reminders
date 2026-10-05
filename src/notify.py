@@ -191,24 +191,42 @@ def broadcast(title: str, body: str, channels: list[str] | None = None,
 
 HEARTBEAT_ENV_KEYS = ("HEALTHCHECK_URL", "HC_PING_URL")
 
+# 各产物**各用各的**心跳 URL（2026-10-05 周报落地时加）。
+#
+# ⚠️ 为什么不能让周报去 ping 日报那个 URL：远端监控唯一能发现"根本没跑"的
+# 手段就是"到点没收到 ping"。周报在周日 20:00 ping 一次，就会被远端当成
+# "这一趟跑过了" —— 而它盯的那一趟（21:30 日报）可能压根没跑。
+# 这与 journal 那边 `digest_kind` 要解决的是同一个问题，只是发生在机器之外。
+HEARTBEAT_ENV_KEYS_BY_KIND: dict[str, tuple[str, ...]] = {
+    "daily": HEARTBEAT_ENV_KEYS,
+    "weekly": ("WEEKLY_HEALTHCHECK_URL", "HC_WEEKLY_PING_URL"),
+}
 
-def load_heartbeat_url() -> tuple[str | None, str]:
+
+def heartbeat_env_keys(kind: str = "daily") -> tuple[str, ...]:
+    """这份产物用哪几个环境变量名。不认识的产物 → 按日报处理（保守）。"""
+    return HEARTBEAT_ENV_KEYS_BY_KIND.get(kind, HEARTBEAT_ENV_KEYS)
+
+
+def load_heartbeat_url(kind: str = "daily") -> tuple[str | None, str]:
     """
     取心跳 URL，返回 (url, 来源说明)。
 
-    顺序：环境变量 HEALTHCHECK_URL / HC_PING_URL → 本仓库 .env。
-    **刻意不设默认值** —— 没配就是不配，不猜、不静默找一个代替品。
+    顺序：环境变量 → 本仓库 .env。
+    **刻意不设默认值** —— 没配就是不配，不猜、不静默找一个代替品；
+    也**不会**回退到另一种产物的 URL（那会让远端把两份产物混成一份）。
     """
-    for key in HEARTBEAT_ENV_KEYS:
+    keys = heartbeat_env_keys(kind)
+    for key in keys:
         if os.environ.get(key):
             return os.environ[key].strip(), f"环境变量 {key}"
 
     env = _read_env_file(ROOT / ".env")
-    for key in HEARTBEAT_ENV_KEYS:
+    for key in keys:
         if env.get(key):
             return env[key].strip(), f"本仓库 .env 的 {key}"
 
-    return None, "未配置（.env 里没有 HEALTHCHECK_URL；配法见 .env.example）"
+    return None, (f"未配置（.env 里没有 {keys[0]}；配法见 .env.example）")
 
 
 def heartbeat_target(url: str, ok: bool) -> str:
@@ -224,7 +242,7 @@ def heartbeat_target(url: str, ok: bool) -> str:
 
 
 def send_heartbeat(ok: bool, summary: str = "",
-                   attempts: int = 3) -> tuple[bool, str]:
+                   attempts: int = 3, kind: str = "daily") -> tuple[bool, str]:
     """
     给外部心跳服务发一次 ping。返回 (是否成功, 说明)。**永不抛异常**。
 
@@ -232,8 +250,9 @@ def send_heartbeat(ok: bool, summary: str = "",
     · 失败重试 `attempts` 次（默认 3）：心跳丢一次会被远端误判成"任务没跑"，
       所以它比普通推送更值得重试；重试本身无害（远端只是多记一次 ping）。
     · `summary` 只放计数，不放正文 —— 见上面的隐私约定。
+    · `kind` = 哪份产物（日报 / 周报），**各用各的 URL**，理由见上面那张表。
     """
-    url, source = load_heartbeat_url()
+    url, source = load_heartbeat_url(kind)
     if not url:
         # 没配是**选择**，不是故障 —— 返回一句短的，别天天在日报里报"警告"。
         # （配法提示留给 --status 与 --heartbeat，那里才是你要看的时候。）
