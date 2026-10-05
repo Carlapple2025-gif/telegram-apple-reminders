@@ -387,6 +387,13 @@ def run_once(offset: int | None = None, wait: int = 25) -> int | None:
             # 留痕只进 logs/（程序日志），不进 journal（你的内容留痕）——
             # 命令是读操作，不产生任何要复盘的内容。见 commands.py 末尾说明。
             _log(f"命令 {text!r} → ok={ok}")
+            # ⚠️ 把回执里的"读不到"也转进日志：否则日志只说 ok=True，
+            # 而"某个 App 没读到"这件事只存在于你看到的那条消息里 ——
+            # 排查时就回答不了"刚才那次日历到底读到没有"（真实踩到：
+            # 用户问 /list 的结果对不对，日志里看不出来）。
+            for _line in reply.splitlines():
+                if "读不到" in _line:
+                    _log(f"  ⚠️ {_line.strip()[:70]}")
             send_receipt(reply, silent=ok)
             continue
 
