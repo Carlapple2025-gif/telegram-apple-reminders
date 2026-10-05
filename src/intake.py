@@ -355,17 +355,32 @@ def _real_add_todo(text: str, when: dt.datetime | None = None) -> str:
     注意：**不设到期日**。给每条待办都设 due 会制造假紧迫感
     （到期就弹通知），而用户要的是"记下来别忘了"，不是催命。
     时间信息留在提醒事项的备注里。
+
+    ## 备注里**不再写去重键**（2026-10-05 改，用户提出）
+
+    原先备注是 `pdca:<内容指纹> · 10-05`。那个 `pdca:xxxx` 是 **v1 的产物**：
+    v1 靠它把"备忘录当天页里的行"与"提醒事项里的条目"对上
+    （见 `reminders.make_key` 的注释：指纹 + 日期，同一天内幂等）。
+
+    v4 不需要它，理由不止一条：
+
+      · v4 **只增不去重**（"一条消息 = 一条新记录"是明确行为），幂等没有用武之地；
+      · 靠它匹配的那条链路（`completion` / `push_tasks` / `carry_over`）整体下线，
+        launchd 里只剩 daemon 与 report 两个任务（其余在 `deploy/legacy/`）；
+      · v4 真要认"这条是我建的"时，用的是 journal 里的 `x-apple-reminder://` id ——
+        比内容哈希可靠（你改一个字，哈希就变了）。
+
+    所以它只是在你的列表里当噪音。备注现在只留时间提示；没给时间就空着。
     """
     import reminders
     rem = reminders.Reminders()
     rem.verify_list()
-    body = reminders.make_key(text)
+    body = ""
     if when is not None:
-        # 只有日期时（时刻被归零）**不要**在备注里写 "00:00" ——
+        # 只有日期时（时刻被归零）**不要**写 "00:00" ——
         # 那看起来像"半夜有安排"。全天/只给日期 → 只写日期。
-        stamp = (when.strftime("%m-%d") if when.time() == dt.time(0, 0)
-                 else when.strftime("%m-%d %H:%M"))
-        body = f"{body} · {stamp}"
+        body = (when.strftime("%m-%d") if when.time() == dt.time(0, 0)
+                else when.strftime("%m-%d %H:%M"))
     r = rem.create(name=text, body=body)
     return getattr(r, "id", "") or ""
 

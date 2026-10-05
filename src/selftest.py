@@ -1474,12 +1474,14 @@ try:
 finally:
     _sh2.rmtree(_d, ignore_errors=True)
 
-# 待办的**备注文本**：只有日期时不写 "00:00"（那看起来像半夜有安排）
+# 待办的**备注文本**（2026-10-05 改：不再写 v1 的去重键 `pdca:xxxx`）
 #
-# 这一条是全天归零的连带：归零之后，只给日期的待办 start 变成 00:00，
-# 若备注照旧格式化成 "10-05 00:00"，就从一个假时刻换成另一个假时刻。
+# 那个键在现行链路上**没有任何读者**（读它的 completion / push_tasks / carry_over
+# 全是 v1 模块，launchd 里只剩 daemon 与 report）。v4 只增不去重，
+# 要认"这条是我建的"用的是 journal 里的 x-apple-reminder:// id。
+# 现在备注只留时间提示，没给时间就空着。
 _rm_mod = sys.modules.get("reminders") or _load(SRC / "reminders.py")
-_saved_rem_cls, _saved_mkkey = _rm_mod.Reminders, _rm_mod.make_key
+_saved_rem_cls = _rm_mod.Reminders
 try:
     _notes: list = []
 
@@ -1492,16 +1494,18 @@ try:
             return type("_R", (), {"id": "RID"})()
 
     _rm_mod.Reminders = _FakeReminders
-    _rm_mod.make_key = lambda t: "pdca:test"
 
     _it._real_add_todo("交电费", _dt2.datetime(2026, 10, 5, 0, 0))
-    check("待办备注：只有日期时不写 00:00",
-          _notes[-1] == "pdca:test · 10-05", repr(_notes[-1]))
+    check("待办备注：只有日期时不写 00:00", _notes[-1] == "10-05", repr(_notes[-1]))
     _it._real_add_todo("交电费", _dt2.datetime(2026, 10, 5, 14, 0))
     check("待办备注：真给了时刻就照写",
-          _notes[-1] == "pdca:test · 10-05 14:00", repr(_notes[-1]))
+          _notes[-1] == "10-05 14:00", repr(_notes[-1]))
+    _it._real_add_todo("交电费", None)
+    check("待办备注：没给时间就空着", _notes[-1] == "", repr(_notes[-1]))
+    check("待办备注：不再写 pdca: 去重键（v1 遗留）",
+          all("pdca:" not in n for n in _notes), str(_notes))
 finally:
-    _rm_mod.Reminders, _rm_mod.make_key = _saved_rem_cls, _saved_mkkey
+    _rm_mod.Reminders = _saved_rem_cls
 
 # ② 日程 → 只写日历（含时间与重复规则）
 _d = _fresh_journal()
