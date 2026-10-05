@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import datetime as dt
 import sys
+
+import whens
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -81,6 +83,7 @@ class Event:
     location: str = ""
     end: dt.datetime | None = None      # /list 要用它判"今天这场还没结束"
     all_day: bool = False               # 全天日程不能显示成 00:00
+    recurrence: str = ""                # RRULE；非空 = 重复事件的某一次发生
 
 
 @dataclass
@@ -180,7 +183,9 @@ def build_report(data: ReportData) -> tuple[str, str]:
             loc = f"　@{e.location}" if e.location else ""
             when = ("全天" if e.all_day
                     else f"{e.start.hour:02d}:{e.start.minute:02d}")
-            lines.append(f"　{when} {e.summary}{loc}")
+            # 重复事件的某一次发生要标出来，否则"明天的跑步"看起来像一次性安排
+            rec = f"（{whens.rrule_text(e.recurrence)}）" if e.recurrence else ""
+            lines.append(f"　{when} {e.summary}{rec}{loc}")
         lines.append("")
 
     if data.memos:
@@ -392,10 +397,23 @@ def is_all_day(start: dt.datetime, end: dt.datetime) -> bool:
 
 def _read_events(day: dt.date) -> list[Event]:
     """读某一天的日程。"""
+    return read_events_between(day, day + dt.timedelta(days=1))
+
+
+def read_events_between(start: dt.date, end: dt.date) -> list[Event]:
+    """
+    读一段日期内的日程（`end` 不含当天）。
+
+    与 `read_events(day)` 走**同一份实现**（后者就是它的一日版）。
+    为什么要这个入口：`/list` 要"今天 + 明天"，一次读取比读两次便宜 ——
+    每次读取都包含一遍**重复事件扫描**，而那份扫描是全表的
+    （AppleScript 没法按 recurrence 筛，见 applecal 的说明）。
+    """
     import applecal
-    evs = applecal.events_between(day, day + dt.timedelta(days=1))
+    evs = applecal.events_between(start, end)
     return [Event(summary=e.summary, start=e.start, location=e.location,
-                  end=e.end, all_day=is_all_day(e.start, e.end))
+                  end=e.end, all_day=is_all_day(e.start, e.end),
+                  recurrence=e.recurrence)
             for e in evs]
 
 
@@ -413,7 +431,7 @@ def read_open_todos(day: dt.date | None = None) -> list[Todo]:
 
 def read_events(day: dt.date) -> list[Event]:
     """某一天的日程。"""
-    return _read_events(day)
+    return read_events_between(day, day + dt.timedelta(days=1))
 
 
 def _read_stale_memos(today: dt.date, days: int) -> list[Memo]:

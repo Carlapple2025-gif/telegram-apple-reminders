@@ -2238,9 +2238,13 @@ _EVS_C = {
         _rp_c.Event("国庆值班", _dt2.datetime(2026, 10, 5, 0, 0), "",
                   _dt2.datetime(2026, 10, 6, 0, 0), True)],
 }
+def _evs_range(a, b):
+    return [e for d, evs in _EVS_C.items() if a <= d < b for e in evs]
+
+
 _r_c, _ok_c = _cmd.run("list", now=_NOW_C,
                        open_todos=lambda d: _TODOS_C,
-                       events_of=lambda d: _EVS_C.get(d, []))
+                       events_range=_evs_range)
 check("命令：正常执行 → ok=True（静音发）", _ok_c is True)
 check("命令：列出未完成待办",
       "　交电费" in _r_c and "跟进竣工报验" in _r_c, _r_c)
@@ -2256,21 +2260,21 @@ check("命令：全天日程写成「全天」而不是 00:00",
 def _boom_c(day=None):
     raise RuntimeError("AppleScript 超时")
 
-_r_fail, _ = _cmd.run("list", now=_NOW_C, open_todos=_boom_c, events_of=_boom_c)
+_r_fail, _ = _cmd.run("list", now=_NOW_C, open_todos=_boom_c, events_range=_boom_c)
 check("命令：读不到时**不说**「一件都没有」", "一件都没有" not in _r_fail, _r_fail)
 check("命令：读不到时**不说**「没有日程」", "没有日程" not in _r_fail, _r_fail)
 check("命令：读不到时如实写「读不到」",
       _r_fail.count("读不到（见下方告警）") == 2, _r_fail)
 
 _r_empty, _ = _cmd.run("list", now=_NOW_C,
-                       open_todos=lambda d: [], events_of=lambda d: [])
+                       open_todos=lambda d: [], events_range=lambda a, b: [])
 check("命令：真没有时才说「一件都没有」", "一件都没有" in _r_empty, _r_empty)
 check("命令：真没有时才说「今明两天都没有日程」",
       "今明两天都没有日程" in _r_empty, _r_empty)
 
 _many = [_rp_c.Todo(f"第{i}件", False) for i in range(20)]
 _r_many, _ = _cmd.run("list", now=_NOW_C, open_todos=lambda d: _many,
-                      events_of=lambda d: [])
+                      events_range=lambda a, b: [])
 check("命令：超过上限时截断并说明总数",
       "待办 20 件" in _r_many and "…还有 5 件" in _r_many, _r_many)
 
@@ -2347,7 +2351,7 @@ try:
                                       "text": "/list"}}]
     # 读取注入成假的：自检不该真的去 osascript 读提醒事项/日历
     _rp_c.read_open_todos = lambda day=None: [_rp_c.Todo("甲", False)]
-    _rp_c.read_events = lambda day: []
+    _rp_c.read_events_between = lambda a, b: []
 
     _dm.run_once(offset=1, wait=1)
     check("命令：一个字都不写进 App", _wrote_c == [], str(_wrote_c))
@@ -2477,7 +2481,7 @@ check("日程解析：summary 同样归一", _ac8.parse_events(
 
 # ② Calendar 没在跑时，**读**会失败（-600）而**写**不会 —— 读路径要自己把 App 拉起来。
 #    这里把两次调用换成假的，验"只在 -600 时拉、只重试一次、别的不动"。
-_saved_once = _ac8._events_between_once
+_saved_once = _ac8._events_in_window
 _saved_launch = _ac8._launch_calendar
 try:
     _n = {"once": 0, "launch": 0}
@@ -2497,7 +2501,7 @@ try:
         raise _ac8.CalendarError(_always.msg)
 
     _ac8._launch_calendar = _fake_launch
-    _ac8._events_between_once = _fail_first
+    _ac8._events_in_window = _fail_first
     check("日程读取：-600 时拉起 Calendar 并重试一次",
           _ac8.events_between(_dt2.date(2026, 10, 5),
                               _dt2.date(2026, 10, 6)) == []
@@ -2506,7 +2510,7 @@ try:
     # 别的错误不该去拉 App（-10004 是授权问题，拉一百次也没用）
     _n.update(once=0, launch=0)
     _always.msg = "-10004 越权"
-    _ac8._events_between_once = _always
+    _ac8._events_in_window = _always
     try:
         _ac8.events_between(_dt2.date(2026, 10, 5), _dt2.date(2026, 10, 6))
         check("日程读取：非 -600 的错误直接抛", False, "没抛")
@@ -2524,7 +2528,7 @@ try:
         check("日程读取：重试后仍失败就如实抛（不重试第三次）",
               _n["once"] == 2 and _n["launch"] == 1, str(_n))
 finally:
-    _ac8._events_between_once = _saved_once
+    _ac8._events_in_window = _saved_once
     _ac8._launch_calendar = _saved_launch
 check("日程读取：拉起用的是 open -g + osascript launch 两条路，且都有超时",
       '"/usr/bin/open", "-g", "-a", APP' in
@@ -2591,6 +2595,85 @@ try:
           and 'date "' not in _gen1[-1], _gen1[-1][:160])
 finally:
     _ac8.run_applescript = _saved_ar1
+
+# ── 重复日程按天展开（2026-10-05）
+#
+# 日历里一条重复事件是**一个**对象，start date 是**首次**发生日 ——
+# 窗口查询永远查不到它之后的发生（`@每天八点 跑步` 从第二天起就消失了）。
+# 这里把两个数据源都换成假的，验"展开 + 去重 + 看不懂时不猜"。
+_saved_win = _ac8._events_between_once
+_saved_rec = _ac8._recurring_masters
+try:
+    def _fake_win(s_, e_, c=None):
+        # 窗口里有一个一次性事件，和一个重复事件的**首次**发生
+        return [_ac8.Event(summary="体检",
+                           start=_dt2.datetime(2026, 10, 5, 9, 0),
+                           end=_dt2.datetime(2026, 10, 5, 10, 0), uid="U1"),
+                _ac8.Event(summary="跑步",
+                           start=_dt2.datetime(2026, 10, 5, 8, 0),
+                           end=_dt2.datetime(2026, 10, 5, 9, 0), uid="U2",
+                           recurrence="FREQ=DAILY")]
+
+    _ac8._events_between_once = _fake_win
+    _ac8._recurring_masters = lambda c=None: [
+        _ac8.Event(summary="跑步", start=_dt2.datetime(2026, 10, 5, 8, 0),
+                   end=_dt2.datetime(2026, 10, 5, 9, 0), uid="U2",
+                   recurrence="FREQ=DAILY")]
+
+    _evs = _ac8.events_between(_dt2.date(2026, 10, 5), _dt2.date(2026, 10, 8))
+    _names = [(e.summary, e.start.strftime("%m-%d %H:%M")) for e in _evs]
+    check("重复日程：之后的每一天都出现（不再只有首次）",
+          _names.count(("跑步", "10-06 08:00")) == 1
+          and _names.count(("跑步", "10-07 08:00")) == 1, str(_names))
+    check("重复日程：首次那天不重复（窗口查询已给过）",
+          _names.count(("跑步", "10-05 08:00")) == 1, str(_names))
+    check("重复日程：时刻与时长平移后不变",
+          all(e.end - e.start == _dt2.timedelta(hours=1) for e in _evs), str(_names))
+    check("重复日程：一次性事件照旧", ("体检", "10-05 09:00") in _names, str(_names))
+    check("重复日程：结果按时间排序",
+          [e.start for e in _evs] == sorted(e.start for e in _evs))
+
+    # 看不懂的规则 → **不猜**（只在首次那天显示），且不静默
+    _ac8._recurring_masters = lambda c=None: [
+        _ac8.Event(summary="怪规则", start=_dt2.datetime(2026, 10, 5, 7, 0),
+                   end=_dt2.datetime(2026, 10, 5, 8, 0), uid="U3",
+                   recurrence="FREQ=MONTHLY;BYSETPOS=2;BYDAY=TU")]
+    _evs2 = _ac8.events_between(_dt2.date(2026, 10, 6), _dt2.date(2026, 10, 9))
+    check("看不懂的重复规则：不猜、不加假发生",
+          all(e.summary != "怪规则" for e in _evs2),
+          str([e.summary for e in _evs2]))
+finally:
+    _ac8._events_between_once = _saved_win
+    _ac8._recurring_masters = _saved_rec
+
+# occurs_on：重复规则判据（用户看到"跑步每天都在"全靠它）
+_A5 = _dt2.date(2026, 10, 5)      # 周一
+check("occurs_on：每天", _whens.occurs_on("FREQ=DAILY", _A5, _dt2.date(2026, 11, 1)) is True)
+check("occurs_on：每周一（周二不算）",
+      _whens.occurs_on("FREQ=WEEKLY;BYDAY=MO", _A5, _dt2.date(2026, 10, 6)) is False)
+check("occurs_on：每周一（下周一算）",
+      _whens.occurs_on("FREQ=WEEKLY;BYDAY=MO", _A5, _dt2.date(2026, 10, 12)) is True)
+check("occurs_on：每工作日（周六不算）",
+      _whens.occurs_on("FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR", _A5,
+                          _dt2.date(2026, 10, 10)) is False)
+check("occurs_on：间隔 2 周",
+      _whens.occurs_on("FREQ=WEEKLY;INTERVAL=2;BYDAY=MO", _A5,
+                          _dt2.date(2026, 10, 12)) is False)
+check("occurs_on：COUNT 用完就不再发生",
+      _whens.occurs_on("FREQ=DAILY;COUNT=3", _A5, _dt2.date(2026, 10, 8)) is False)
+check("occurs_on：UNTIL 之后不再发生",
+      _whens.occurs_on("FREQ=DAILY;UNTIL=20261007T235959Z", _A5,
+                          _dt2.date(2026, 10, 8)) is False)
+check("occurs_on：每年",
+      _whens.occurs_on("FREQ=YEARLY", _A5, _dt2.date(2027, 10, 5)) is True)
+check("occurs_on：看不懂的规则返回 None（不是 False）",
+      _whens.occurs_on("FREQ=MONTHLY;BYSETPOS=2;BYDAY=TU", _A5,
+                          _dt2.date(2026, 10, 13)) is None)
+check("occurs_on：anchor 之前不发生",
+      _whens.occurs_on("FREQ=DAILY", _A5, _dt2.date(2026, 10, 4)) is False)
+check("rrule_text：多星期说得出来",
+      _whens.rrule_text("FREQ=WEEKLY;BYDAY=MO,WE,FR") == "每周一、三、五",
+      _whens.rrule_text("FREQ=WEEKLY;BYDAY=MO,WE,FR"))
 
 # ③ 备忘端：memo.add(text) → Memo.note_id
 _sig_memo = _insp8.signature(_mm8.add)

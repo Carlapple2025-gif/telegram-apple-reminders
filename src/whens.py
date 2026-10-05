@@ -432,6 +432,159 @@ _RECUR_MONTHLY = re.compile(r"(每月|每个?月)\s*(\d{1,2})\s*[日号]")
 _BYDAY_NUM = {"MO": 1, "TU": 2, "WE": 3, "TH": 4, "FR": 5, "SA": 6, "SU": 7}
 
 
+def rrule_text(rrule: str) -> str:
+    """
+    把 RRULE 说成人话（回执 / 日报 / `/list` 里别让用户看 `FREQ=WEEKLY`）。
+
+    原本在 `intake._recurrence_text` 里，2026-10-05 搬到 here ——
+    因为**读取路径也要用它**了（重复日程按天出现时要标出"这条是每天的"），
+    而"RRULE ↔ 人话"属于时间词汇，归 `whens`。
+    """
+    rrule = (rrule or "").strip()
+    if not rrule:
+        return ""
+    if "BYDAY=MO,TU,WE,TH,FR" in rrule:
+        return "每个工作日"
+    if "FREQ=DAILY" in rrule:
+        return "每天"
+    if "FREQ=WEEKLY" in rrule:
+        day = rrule.split("BYDAY=", 1)[1].split(";")[0] if "BYDAY=" in rrule else ""
+        name = {"MO": "一", "TU": "二", "WE": "三", "TH": "四",
+                "FR": "五", "SA": "六", "SU": "日"}.get(day, "")
+        if not name and "BYDAY=" in rrule:
+            # 多个星期（MO,WE）→ 逐个说
+            names = [{"MO": "一", "TU": "二", "WE": "三", "TH": "四",
+                      "FR": "五", "SA": "六", "SU": "日"}.get(d, "")
+                     for d in day.split(",")]
+            names = [n for n in names if n]
+            if names:
+                return "每周" + "、".join(names)
+        return f"每周{name}" if name else "每周"
+    if "FREQ=MONTHLY" in rrule:
+        dom = rrule.split("BYMONTHDAY=", 1)[1].split(";")[0] if "BYMONTHDAY=" in rrule else ""
+        return f"每月{dom}日" if dom else "每月"
+    if "FREQ=YEARLY" in rrule:
+        return "每年"
+    return rrule
+
+
+# 这些 RRULE 部件我们**看不懂** —— 见到就返回 None（调用方据此退回旧行为
+# 并记日志，而不是悄悄漏掉）。"
+# "每月第二个周二"（BYSETPOS）、"每年 10 月"（BYMONTH）这类，
+# 要看懂就得写一个完整的 RRULE 引擎，而那是另一个量级的工程。
+_RRULE_UNSUPPORTED = ("BYSETPOS", "BYMONTH=", "BYYEARDAY", "BYWEEKNO",
+                      "BYHOUR", "BYMINUTE", "BYSECOND")
+
+
+def _parse_rrule(rrule: str) -> dict | None:
+    """RRULE → 结构化判据。看不懂返回 None（不是空字典 —— 两者含义不同）。"""
+    r = (rrule or "").strip().upper()
+    if not r or "FREQ=" not in r:
+        return None
+    if any(u in r for u in _RRULE_UNSUPPORTED):
+        return None
+    parts: dict = {}
+    for chunk in r.split(";"):
+        if "=" in chunk:
+            k, v = chunk.split("=", 1)
+            parts[k.strip()] = v.strip()
+    freq = parts.get("FREQ", "")
+    if freq not in ("DAILY", "WEEKLY", "MONTHLY", "YEARLY"):
+        return None
+    try:
+        interval = max(1, int(parts.get("INTERVAL", "1")))
+        count = int(parts["COUNT"]) if "COUNT" in parts else None
+    except ValueError:
+        return None
+    until = None
+    if "UNTIL" in parts:
+        u = parts["UNTIL"].split("T", 1)[0]
+        try:
+            until = dt.date(int(u[:4]), int(u[4:6]), int(u[6:8]))
+        except (ValueError, IndexError):
+            return None
+    # ⚠️ BYDAY 必须转成**整数**（1=周一…7=周日）：存成 "MO" 这种字符串，
+    # 后面拿 `target.isoweekday()`（整数）去比就永远不相等 ——
+    # 结果是**所有"每周X"都判成不发生**（写完第一版时实测踩到）。
+    # ⚠️ 用文件里已有的 `_BYDAY_NUM`（RRULE 的 BYDAY → 数字），
+    # **不要**另起一个常量：第一版我叫它 `_WEEKDAY_NUM`，而那个名字
+    # 上面已经属于"中文星期 → 数字"（`{"一":1,…}`），于是把它覆盖掉，
+    # 后果是"周三""下周三"整类中文星期**解析不出来** —— 被自检第 ⑤ 组抓到。
+    byday = [_BYDAY_NUM[d] for d in parts.get("BYDAY", "").split(",")
+             if d in _BYDAY_NUM]
+    doms = []
+    for x in parts.get("BYMONTHDAY", "").split(","):
+        if x.lstrip("-").isdigit():
+            doms.append(int(x))
+    return {"freq": freq, "interval": interval, "count": count,
+            "until": until, "byday": byday, "bymonthday": doms}
+
+
+def _hits(rule: dict, anchor: dt.date, target: dt.date) -> bool:
+    """不含 COUNT/UNTIL 的频率判据：这一天在不在节奏上。"""
+    freq, interval = rule["freq"], rule["interval"]
+    if freq == "DAILY":
+        return (target - anchor).days % interval == 0
+    if freq == "WEEKLY":
+        days = rule["byday"] or [anchor.isoweekday()]
+        if target.isoweekday() not in days:
+            return False
+        a_mon = anchor - dt.timedelta(days=anchor.isoweekday() - 1)
+        t_mon = target - dt.timedelta(days=target.isoweekday() - 1)
+        return ((t_mon - a_mon).days // 7) % interval == 0
+    if freq == "MONTHLY":
+        doms = rule["bymonthday"] or [anchor.day]
+        if target.day not in doms:
+            return False
+        months = (target.year - anchor.year) * 12 + (target.month - anchor.month)
+        return months >= 0 and months % interval == 0
+    # YEARLY
+    years = target.year - anchor.year
+    return (target.month == anchor.month and target.day == anchor.day
+            and years >= 0 and years % interval == 0)
+
+
+def occurs_on(rrule: str, anchor: dt.date, target: dt.date) -> bool | None:
+    """
+    这条重复规则在 `target` 那天会发生吗？（`anchor` = 事件第一次发生的日期）
+
+    返回 **None 表示"这条规则我看不懂"** —— 调用方据此退回"只在首次那天显示"
+    并记一行日志，而不是悄悄漏掉（本项目最忌讳的失败形态）。
+
+    ## 为什么需要它
+
+    日历里一条重复事件是**一个**对象，它的 `start date` 是**首次**发生日。
+    所以按日期窗口查（`whose start date ≥ dFrom and …`）只能查到它首次那天 ——
+    `@每天八点 跑步` 从此在 `/list` 与日报里再也看不见
+    （2026-10-05 发现；实测 `whose recurrence is not missing value`
+    会报 -1700，AppleScript 这一层**筛不出来**，只能在 Python 侧判断）。
+
+    ## 支持到哪
+
+    支持我们生成的 + 日历界面常见的那些：DAILY / WEEKLY / MONTHLY / YEARLY，
+    可带 INTERVAL、BYDAY、BYMONTHDAY、COUNT、UNTIL。
+    看不懂的（BYSETPOS / BYMONTH / BYYEARDAY …）返回 None，由调用方兜底。
+    """
+    rule = _parse_rrule(rrule)
+    if rule is None:
+        return None
+    if target < anchor:
+        return False
+    if rule["until"] is not None and target > rule["until"]:
+        return False
+    if not _hits(rule, anchor, target):
+        return False
+    if rule["count"] is None:
+        return True
+    # COUNT：从 anchor 数到 target（含）为止发生了几次，超了就不算
+    n, d = 0, anchor
+    while d <= target:
+        if _hits(rule, anchor, d):
+            n += 1
+        d += dt.timedelta(days=1)
+    return n <= rule["count"]
+
+
 def parse_recurrence(text: str) -> str:
     """
     解析周期性表达，返回 iCal RRULE 片段。

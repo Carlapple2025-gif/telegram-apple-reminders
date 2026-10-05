@@ -45,6 +45,8 @@ from __future__ import annotations
 
 import datetime as dt
 
+import whens
+
 # 命令名（小写）→ 规范名。目前所有别名都指向同一条命令：
 # 保持"一条命令"是有意的 —— 每多一条命令，就多一份要在文档、
 # 启动通知、自检三处同步的词汇（`/help` 就是因此被否决的）。
@@ -95,7 +97,7 @@ def match(text: str) -> str | None:
 
 
 def run(name: str, now: dt.datetime | None = None,
-        open_todos=None, events_of=None) -> tuple[str, bool]:
+        open_todos=None, events_range=None) -> tuple[str, bool]:
     """
     执行命令，返回 `(要发的文本, 是否正常)`。
 
@@ -104,20 +106,22 @@ def run(name: str, now: dt.datetime | None = None,
     **读不到 App 不算用法错误** —— 正文里会如实写 `⚠️`，
     但那仍然是一条正常回执（你问了我答了，只是某处读不到）。
 
-    `open_todos` / `events_of` 可注入（测试用），默认走 `report.py` 的真实读取。
+    `open_todos` / `events_range` 可注入（测试用），默认走 `report.py` 的真实读取。
     """
     if name == UNKNOWN:
         return f"❓ 不认识这条命令\n　　{USAGE}", False
-    return _listing(now, open_todos, events_of), True
+    return _listing(now, open_todos, events_range), True
 
 
 def _listing(now: dt.datetime | None = None,
-             open_todos=None, events_of=None) -> str:
+             open_todos=None, events_range=None) -> str:
     """把"现在的待办与日程"排成一条消息。**只读**，失败如实写出来。"""
     import report
 
     open_todos = open_todos or report.read_open_todos
-    events_of = events_of or report.read_events
+    # ⚠️ 一次读**两天**（而不是 read_events 读两次）：每次读取都包含一遍
+    # "重复事件扫描"，而那份扫描是全表的（AppleScript 筛不出重复事件）。
+    events_range = events_range or report.read_events_between
 
     now = now or dt.datetime.now()
     today = now.date()
@@ -139,21 +143,18 @@ def _listing(now: dt.datetime | None = None,
         rem_failed = True
         errors.append(f"提醒事项读不到：{e}")
 
-    # ② 日程：今天**还没结束**的 + 明天全部。
+    # ② 日程：今天**还没结束**的 + 明天全部（一次读取拿两天）。
     #    今天那条按"结束时间"筛，而不是开始时间 —— 正在进行的会议还在进行。
     try:
-        today_evs = [e for e in events_of(today)
-                     if e.end is None or e.end > now]
+        _both = list(events_range(today, tomorrow + dt.timedelta(days=1)))
+        today_evs = [e for e in _both
+                     if e.start.date() == today and (e.end is None or e.end > now)]
+        tomorrow_evs = [e for e in _both if e.start.date() == tomorrow]
     except Exception as e:              # noqa: BLE001
         today_evs = []
-        cal_today_failed = True
-        errors.append(f"日历读不到（今天）：{e}")
-    try:
-        tomorrow_evs = list(events_of(tomorrow))
-    except Exception as e:              # noqa: BLE001
         tomorrow_evs = []
-        cal_tomorrow_failed = True
-        errors.append(f"日历读不到（明天）：{e}")
+        cal_today_failed = cal_tomorrow_failed = True
+        errors.append(f"日历读不到：{e}")
 
     lines = [f"📋 现在 {today.month}月{today.day}日 周{wd} {now:%H:%M}", ""]
 
@@ -175,7 +176,10 @@ def _listing(now: dt.datetime | None = None,
             continue
         lines.append(f"📅 {label} {len(evs)} 项")
         for e in evs[:MAX_ITEMS]:
-            lines.append(f"　{_when_text(e)} {e.summary}"
+            # 重复事件的某一次发生要标出来，否则"明天的跑步"看起来像一次性安排
+            rec = (f"（{whens.rrule_text(e.recurrence)}）"
+                   if getattr(e, "recurrence", "") else "")
+            lines.append(f"　{_when_text(e)} {e.summary}{rec}"
                          + (f"　@{e.location}" if e.location else ""))
         if len(evs) > MAX_ITEMS:
             lines.append(f"　…还有 {len(evs) - MAX_ITEMS} 项")

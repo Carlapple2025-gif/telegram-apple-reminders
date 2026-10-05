@@ -33,6 +33,8 @@ import json
 import subprocess
 import sys
 import time
+
+import whens
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -149,6 +151,7 @@ class Event:
     calendar: str = ""
     location: str = ""
     uid: str = ""
+    recurrence: str = ""       # RRULE；空 = 一次性事件（读取路径要用它展开）
 
     @property
     def display(self) -> str:
@@ -202,14 +205,107 @@ def events_between(start: dt.date, end: dt.date,
     所以"拉起 + 重试一次"的代价只在真正需要时才付。
     """
     try:
-        return _events_between_once(start, end, calendar)
+        return _events_in_window(start, end, calendar)
     except CalendarError as e:
         if "-600" not in str(e):
             raise
         _launch_calendar()
         # 再失败就如实抛给调用方（它会写进回执/日报的告警段）——
         # 不吞、不重试第二次。
-        return _events_between_once(start, end, calendar)
+        return _events_in_window(start, end, calendar)
+
+
+def _events_in_window(start: dt.date, end: dt.date,
+                      calendar: str | None = None) -> list[Event]:
+    """
+    窗口内的事件 = **窗口查询**（一次性事件 + 重复事件的首次发生）
+                 + **重复事件按天展开**（`_recurring_masters` → `whens.occurs_on`）。
+
+    为什么必须分两路（2026-10-05）：重复事件在日历里是**一个**对象，
+    它的 `start date` 是**首次**发生日 —— 窗口查询永远查不到它之后的发生。
+    于是 `@每天八点 跑步` 从第二天起就在 `/list` 与日报里消失。
+    （`whose recurrence is not missing value` 试过：报 -1700，
+     AppleScript 这一层筛不出重复事件，只能在 Python 侧判断。）
+    """
+    direct = _events_between_once(start, end, calendar)
+    out = list(direct)
+    seen = {(e.uid, e.start.date()) for e in direct}
+    days = [start + dt.timedelta(days=i) for i in range((end - start).days)]
+
+    for master in _recurring_masters(calendar):
+        anchor = master.start.date()
+        for day in days:
+            if day <= anchor:
+                # anchor 那天由窗口查询给出（同一对象）；这里跳过以免重复
+                continue
+            hit = whens.occurs_on(master.recurrence, anchor, day)
+            if hit is None:
+                # 看不懂的规则（"每月第二个周二"那种）：**不猜**。
+                # 退回旧行为（只在首次那天出现），并在 stderr 留一行 ——
+                # 守护的 stderr 会进 logs/daemon.err.log，日报的进 report.err.log。
+                print(f"[applecal] 重复规则看不懂，只在首次那天显示："
+                      f"{master.summary!r} {master.recurrence!r}", file=sys.stderr)
+                break
+            if not hit:
+                continue
+            key = (master.uid, day)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(_occurrence(master, day))
+
+    return sorted(out, key=lambda e: e.start)
+
+
+def _occurrence(master: Event, day: dt.date) -> Event:
+    """
+    把重复事件的某一次发生，表示成一个普通 Event（时间平移的那一天）。
+
+    时长保持不变：定时事件还是那一小时，全天事件还是整整一天 ——
+    于是 `report.is_all_day` 的判据（0 点起跨满 24 小时）对它同样成立。
+    """
+    span = master.end - master.start
+    start = dt.datetime.combine(day, master.start.time())
+    return Event(summary=master.summary, start=start, end=start + span,
+                 calendar=master.calendar, location=master.location,
+                 uid=master.uid, recurrence=master.recurrence)
+
+
+def _recurring_masters(calendar: str | None = None) -> list[Event]:
+    """
+    所有**带重复规则**的事件（通常很少）。
+
+    ⚠️ 这是全表遍历（AppleScript 没法按 recurrence 筛，见 `_events_in_window`），
+    所以循环里先判 `if (recurrence of e) is not missing value` ——
+    非重复事件只付**一次**属性读取，而不是六次。
+    这是这份读取里唯一还会随事件总数增长的地方；实测日历里 1 条事件时 0.4 秒。
+    """
+    cal = calendar or config_calendar()
+    scope = (f'calendar {_as_literal(cal)}' if cal else "calendar 1")
+
+    out = run_applescript(
+        f'tell application "{APP}"\n'
+        f'  set targetCal to {scope}\n'
+        '  set out to ""\n'
+        '  set FS to character id 1\n'
+        '  set RS to character id 2\n'
+        '  repeat with e in (every event of targetCal)\n'
+        '    if (recurrence of e) is not missing value then\n'
+        '      set sd to start date of e\n'
+        '      set ed to end date of e\n'
+        '      set out to out & (summary of e) & FS '
+        '& (year of sd) & "-" & (month of sd as integer) & "-" & (day of sd) '
+        '& " " & (hours of sd) & ":" & (minutes of sd) & FS '
+        '& (year of ed) & "-" & (month of ed as integer) & "-" & (day of ed) '
+        '& " " & (hours of ed) & ":" & (minutes of ed) & FS '
+        '& (location of e) & FS & (uid of e) & FS '
+        '& (recurrence of e as string) & RS\n'
+        '    end if\n'
+        '  end repeat\n'
+        '  return out\n'
+        'end tell', timeout=120)
+
+    return parse_events(out, cal)
 
 
 def _launch_calendar(wait_up_to: int = 30) -> None:
@@ -284,10 +380,10 @@ def _events_between_once(start: dt.date, end: dt.date,
     比较的是两个绝对时间 —— 全程不经过任何字符串解析。
     写入路径从一开始就是这么构造日期的，读取路径现在与它一致了。
 
-    ⚠️ **已知限制（改前改后都一样）**：重复日程在日历里是**一个**事件对象，
-    `start date` 是它的**首次**发生日。所以 `@每天八点 跑步` 只在
-    首次那天出现，之后既不在 `/list` 里、也不在日报的"明日日程"里。
-    要修得展开重复规则（另一件事，见 docs/PROJECT-STATE.md）。
+    ⚠️ **重复日程不靠这个查询**：日历里一条重复事件是**一个**对象，
+    `start date` 是它的**首次**发生日 —— 所以窗口查询只能查到它首次那天。
+    之后的每一次发生由 `_events_in_window` 用 `whens.occurs_on` 展开补上
+    （2026-10-05 修：`@每天八点 跑步` 从第二天起在 `/list` 与日报里消失）。
 
     ⚠️ 末尾仍保留一次 Python 侧的日期过滤：`whose` 万一被忽略或
     实现有差异，也不会把范围外的事件混进来（多这一层不花什么代价）。
@@ -312,7 +408,8 @@ def _events_between_once(start: dt.date, end: dt.date,
         '& " " & (hours of sd) & ":" & (minutes of sd) & FS '
         '& (year of ed) & "-" & (month of ed as integer) & "-" & (day of ed) '
         '& " " & (hours of ed) & ":" & (minutes of ed) & FS '
-        '& (location of e) & FS & (uid of e) & RS\n'
+        '& (location of e) & FS & (uid of e) & FS '
+        '& (recurrence of e as string) & RS\n'
         '  end repeat\n'
         '  return out\n'
         'end tell', timeout=120)
@@ -348,13 +445,16 @@ def parse_events(raw: str, calendar: str = "") -> list[Event]:
         if len(parts) < 5:
             continue
         summary, s_str, e_str, location, uid = parts[0], parts[1], parts[2], parts[3], parts[4]
+        # 第 6 段是重复规则（只有 _recurring_masters 会带上）；
+        # 老格式只有 5 段 → 空 = 一次性事件。
+        rrule = _as_text(parts[5]) if len(parts) > 5 else ""
         start = _parse_dt(s_str)
         end = _parse_dt(e_str)
         if start is None or end is None:
             continue
         events.append(Event(summary=_as_text(summary), start=start, end=end,
                             calendar=calendar, location=_as_text(location),
-                            uid=_as_text(uid)))
+                            uid=_as_text(uid), recurrence=rrule))
     return events
 
 

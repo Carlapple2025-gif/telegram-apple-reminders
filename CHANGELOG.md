@@ -13,6 +13,49 @@
 
 ## 未发布 / 待定
 
+### 2026-10-05 重复日程从第二天起看不见（读路径不展开重复规则）
+
+**现象**：`@每天八点 跑步` 只在**首次**那天出现在 `/list` 和日报里，
+之后再也不出现 —— 报了却看不见，属于"静默缺口"那一类。
+
+**根因**：日历里一条重复事件是**一个**对象，它的 `start date` 是**首次**发生日。
+而读路径一直只做"窗口查询"（`whose start date ≥ dFrom and start date < dTo`），
+所以只能查到首次那天。
+
+**试过但不行**：`whose recurrence is not missing value` → 报 `-1700`
+（`missing value` 不能当 text 比较）。**AppleScript 这一层筛不出重复事件**，
+只能在 Python 侧判断。
+
+**做法**（三块）：
+
+1. **`whens.occurs_on(rrule, anchor, target)`** —— 纯函数判"这条规则那天会发生吗"。
+   支持 DAILY / WEEKLY / MONTHLY / YEARLY，可带 INTERVAL、BYDAY、BYMONTHDAY、
+   COUNT、UNTIL。
+   **看不懂的（`BYSETPOS`/`BYMONTH`/`BYYEARDAY` 这类，如"每月第二个周二"）
+   返回 `None`，不是 `False`** —— 调用方据此**不猜**：退回旧行为，
+   并在 stderr 留一行（守护的进 `logs/daemon.err.log`，日报的进 `report.err.log`）。
+2. **`applecal._recurring_masters()`** —— 扫出所有带重复规则的事件。
+   是全表遍历，所以循环里先判 `if (recurrence of e) is not missing value`
+   （非重复事件只付**一次**属性读取而不是六次）。
+3. **`_events_in_window()`** —— 窗口查询 + 逐条展开 + 按 `(uid, 日期)` 去重 + 按时间排序。
+   发生的时间点用"平移"得到（保持时刻与时长，于是 `is_all_day` 的判据照样成立）。
+
+**顺带两处**：
+
+- `intake._recurrence_text` 搬到 `whens.rrule_text` —— 读取路径也要用它
+  （标出"这条是每天的"），而"RRULE ↔ 人话"属于时间词汇。
+  多星期现在也说得出来（`FREQ=WEEKLY;BYDAY=MO,WE,FR` → "每周一、三、五"）。
+- `/list` 改成**一次读两天**（`report.read_events_between`）：
+  既然每次读取都含一遍全表扫描，读两次就是浪费一倍。
+
+⚠️ **写这块时撞了一个自己造的坑，值得记**：我给新常量起名 `_WEEKDAY_NUM`，
+而 `whens.py` 里那个名字**早就属于**"中文星期 → 数字"（`{"一":1,…}`）——
+覆盖之后，"周三""下周三"整类中文星期**静默解析不出来**。
+是自检第 ⑤ 组（标题要剥掉时间短语）把它抓出来的：**700 多条断言的用处就在这**。
+现在改用文件里已有的 `_BYDAY_NUM`。
+
+自检：**700 → 717 项**（展开/去重/平移/顺序/看不懂不猜 + occurs_on 十一种判据）。
+
 ### 2026-10-05 日报的日历段又超时：读取改用 `whose`，拉起后等它就绪
 
 **现象**：21:30 的日报里 `日历：AppleScript 超时`（连续第 3 天 —— 10-03 超时、
