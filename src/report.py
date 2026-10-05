@@ -79,6 +79,8 @@ class Event:
     summary: str
     start: dt.datetime
     location: str = ""
+    end: dt.datetime | None = None      # /list 要用它判"今天这场还没结束"
+    all_day: bool = False               # 全天日程不能显示成 00:00
 
 
 @dataclass
@@ -176,8 +178,9 @@ def build_report(data: ReportData) -> tuple[str, str]:
         lines.append(f"📅 明日日程 {len(data.events)} 项")
         for e in data.events:
             loc = f"　@{e.location}" if e.location else ""
-            lines.append(f"　{e.start.hour:02d}:{e.start.minute:02d} "
-                         f"{e.summary}{loc}")
+            when = ("全天" if e.all_day
+                    else f"{e.start.hour:02d}:{e.start.minute:02d}")
+            lines.append(f"　{when} {e.summary}{loc}")
         lines.append("")
 
     if data.memos:
@@ -372,12 +375,45 @@ def _read_todos(day: dt.date | None = None) -> list[Todo]:
     return out
 
 
+def is_all_day(start: dt.datetime, end: dt.datetime) -> bool:
+    """
+    这条日程是不是"全天"？
+
+    日历**没有**把这个标志给我们（`applecal.Event` 里没有该字段），
+    所以从存法反推：全天事件从当天 00:00 起、跨满 24 小时 ——
+    我们自己写全天日程时就是这么存的（见 whens：`end = start + 1 天`）。
+    判错的代价只是显示成 `00:00` 还是 `全天`，不会写错任何东西。
+
+    （为什么值得判：`00:00 体检` 看起来像"半夜十二点的体检"。）
+    """
+    return (start.time() == dt.time(0, 0)
+            and (end - start) >= dt.timedelta(days=1))
+
+
 def _read_events(day: dt.date) -> list[Event]:
     """读某一天的日程。"""
     import applecal
     evs = applecal.events_between(day, day + dt.timedelta(days=1))
-    return [Event(summary=e.summary, start=e.start, location=e.location)
+    return [Event(summary=e.summary, start=e.start, location=e.location,
+                  end=e.end, all_day=is_all_day(e.start, e.end))
             for e in evs]
+
+
+# ── 公开读取入口
+#
+# 日报（build_report）与 `/list` 命令**共用这两条实现**。
+# 特意开成公开函数而不是让 commands.py 去调 `_read_todos`：
+# 跨模块调私有函数，改动时没人知道还有第二个调用方 ——
+# 本项目的"同一件事两处实现"就是这么长出来的。
+
+def read_open_todos(day: dt.date | None = None) -> list[Todo]:
+    """**未完成**的待办（已打钩的不出现在这里）。"""
+    return [t for t in _read_todos(day) if not t.completed]
+
+
+def read_events(day: dt.date) -> list[Event]:
+    """某一天的日程。"""
+    return _read_events(day)
 
 
 def _read_stale_memos(today: dt.date, days: int) -> list[Memo]:

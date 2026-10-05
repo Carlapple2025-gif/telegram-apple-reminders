@@ -47,6 +47,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 import telegram as tg          # noqa: E402
 import journal                 # noqa: E402
+import commands                # noqa: E402
 from intake import Intake      # noqa: E402
 from kinds import Kind         # noqa: E402
 
@@ -81,6 +82,7 @@ STARTUP_NOTICE = (
     "👋 收件守护已启动。直接发一句就行"
     "（行首符号决定去哪，不写符号就是待办）：\n"
     + "\n".join(f"　　「{t}」→ {where}" for t, where in USAGE_EXAMPLES)
+    + "\n\n查现在有什么：发 /list（待办 + 今天/明天的日程）"
 )
 
 
@@ -371,6 +373,23 @@ def run_once(offset: int | None = None, wait: int = 25) -> int | None:
                 _log(f"收到非文本消息（{kind}），未写入任何 App")
                 send_receipt(NON_TEXT_REPLY, silent=False)
             continue
+
+        # ── 命令（只读查询）。判据是**字面**的"以 / 开头"（见 commands.py 顶部）
+        #
+        # 必须在收件**之前**分流：命令不写任何 App —— 若放它过去，
+        # `/list` 会变成一条标题是 "/list" 的待办（裸输入默认待办）。
+        #
+        # 这不算"守护开始做判断"：判断的只是"这串字是不是命令"，
+        # 与上面"这条消息是不是文字"同级，不涉及任何业务语义。
+        cmd = commands.match(text)
+        if cmd is not None:
+            reply, ok = commands.run(cmd)
+            # 留痕只进 logs/（程序日志），不进 journal（你的内容留痕）——
+            # 命令是读操作，不产生任何要复盘的内容。见 commands.py 末尾说明。
+            _log(f"命令 {text!r} → ok={ok}")
+            send_receipt(reply, silent=ok)
+            continue
+
         try:
             handle_message(text, msg.get("message_id", 0), chat)
         except Exception as e:  # noqa: BLE001

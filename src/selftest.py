@@ -2100,6 +2100,137 @@ check("V9：自检期被 PDCA_SUPPRESS_SEND 挡住（不会真发）",
 check("V9：handle_message 在处理前发过 typing",
       'tg.send_chat_action("typing")' in _dm_src)
 
+section("命令 /list：只读、不写 App、不进 journal")
+
+_cmd = _load(SRC / "commands.py")
+# 与文件后段的 _rp 是同一个模块对象（_load 走 sys.modules）——
+# 这里提前取个句柄，免得把整节挪到文件末尾。
+_rp_c = _load(SRC / "report.py")
+
+# 判据是 `/`（**字面**），不是词。这点必须钉死：
+# `list` 不带斜杠就是一条**待办**（"list" 可以是你要买的东西），不是命令。
+for _t, _want in [("/list", "list"), ("/ls", "list"), ("/today", "list"),
+                  ("/now", "list"), ("/列表", "list"), ("/LIST", "list"),
+                  ("/list@carleepersonal_bot", "list"), ("/list 明天", "list")]:
+    check(f"{_t!r} → 命令 {_want}", _cmd.match(_t) == _want, str(_cmd.match(_t)))
+for _t in ("list", "列表", "交电费", "# 备忘", "@明天九点 会"):
+    check(f"{_t!r} 不是命令（照常收件）", _cmd.match(_t) is None,
+          str(_cmd.match(_t)))
+for _t in ("/nope", "/", "/ "):
+    check(f"{_t!r} → 不认识的命令", _cmd.match(_t) == _cmd.UNKNOWN,
+          str(_cmd.match(_t)))
+
+# 未完成的过滤（命令与日报共用 read_open_todos）
+_saved_rt = _rp_c._read_todos
+try:
+    _rp_c._read_todos = lambda day=None: [_rp_c.Todo("甲", False), _rp_c.Todo("乙", True)]
+    check("read_open_todos 只留未完成",
+          [t.name for t in _rp_c.read_open_todos()] == ["甲"],
+          str(_rp_c.read_open_todos()))
+finally:
+    _rp_c._read_todos = _saved_rt
+
+# 全天判定（日历不给我们这个标志，从存法反推）
+check("全日判定：0 点起跨 24 小时",
+      _rp_c.is_all_day(_dt2.datetime(2026, 10, 5), _dt2.datetime(2026, 10, 6)))
+check("全日判定：普通日程不算",
+      not _rp_c.is_all_day(_dt2.datetime(2026, 10, 5, 14, 0),
+                         _dt2.datetime(2026, 10, 5, 15, 0)))
+check("全日判定：0 点但只有 1 小时不算",
+      not _rp_c.is_all_day(_dt2.datetime(2026, 10, 5),
+                         _dt2.datetime(2026, 10, 5, 1, 0)))
+
+_NOW_C = _dt2.datetime(2026, 10, 4, 21, 40)      # 晚上 21:40
+_TODOS_C = [_rp_c.Todo("交电费", False), _rp_c.Todo("跟进竣工报验", False)]
+_EVS_C = {
+    _dt2.date(2026, 10, 4): [
+        _rp_c.Event("体检", _dt2.datetime(2026, 10, 4, 9, 0), "",
+                  _dt2.datetime(2026, 10, 4, 10, 0), False),
+        _rp_c.Event("夜跑", _dt2.datetime(2026, 10, 4, 22, 30), "",
+                  _dt2.datetime(2026, 10, 4, 23, 30), False)],
+    _dt2.date(2026, 10, 5): [
+        _rp_c.Event("项目周会", _dt2.datetime(2026, 10, 5, 14, 0), "会议室",
+                  _dt2.datetime(2026, 10, 5, 15, 0), False),
+        _rp_c.Event("国庆值班", _dt2.datetime(2026, 10, 5, 0, 0), "",
+                  _dt2.datetime(2026, 10, 6, 0, 0), True)],
+}
+_r_c, _ok_c = _cmd.run("list", now=_NOW_C,
+                       open_todos=lambda d: _TODOS_C,
+                       events_of=lambda d: _EVS_C.get(d, []))
+check("命令：正常执行 → ok=True（静音发）", _ok_c is True)
+check("命令：列出未完成待办",
+      "　交电费" in _r_c and "跟进竣工报验" in _r_c, _r_c)
+check("命令：今天**已结束**的日程不出现", "体检" not in _r_c, _r_c)
+check("命令：今天还没结束的日程出现", "22:30 夜跑" in _r_c, _r_c)
+check("命令：明天的日程全列（含地点）",
+      "14:00 项目周会" in _r_c and "@会议室" in _r_c, _r_c)
+check("命令：全天日程写成「全天」而不是 00:00",
+      "全天 国庆值班" in _r_c and "00:00" not in _r_c, _r_c)
+
+# ⚠️ 空列表有两种含义 ——「真的没有」和「读不到」，绝不能混。
+# 第一版就踩了：读不到时照样打印"待办 0 件 🎉 一件都没有"，正文在撒谎。
+def _boom_c(day=None):
+    raise RuntimeError("AppleScript 超时")
+
+_r_fail, _ = _cmd.run("list", now=_NOW_C, open_todos=_boom_c, events_of=_boom_c)
+check("命令：读不到时**不说**「一件都没有」", "一件都没有" not in _r_fail, _r_fail)
+check("命令：读不到时**不说**「没有日程」", "没有日程" not in _r_fail, _r_fail)
+check("命令：读不到时如实写「读不到」",
+      _r_fail.count("读不到（见下方告警）") == 2, _r_fail)
+
+_r_empty, _ = _cmd.run("list", now=_NOW_C,
+                       open_todos=lambda d: [], events_of=lambda d: [])
+check("命令：真没有时才说「一件都没有」", "一件都没有" in _r_empty, _r_empty)
+check("命令：真没有时才说「今明两天都没有日程」",
+      "今明两天都没有日程" in _r_empty, _r_empty)
+
+_many = [_rp_c.Todo(f"第{i}件", False) for i in range(20)]
+_r_many, _ = _cmd.run("list", now=_NOW_C, open_todos=lambda d: _many,
+                      events_of=lambda d: [])
+check("命令：超过上限时截断并说明总数",
+      "待办 20 件" in _r_many and "…还有 5 件" in _r_many, _r_many)
+
+_r_unk, _ok_unk = _cmd.run(_cmd.UNKNOWN)
+check("命令：不认识的命令 → ok=False（有声发送）", _ok_unk is False)
+check("命令：不认识的命令给出可用命令", "/list" in _r_unk, _r_unk)
+
+# ── 整链：/list 一个字都不写，也不进 journal
+_d = _fresh_journal()
+_dm_dir3 = _P2(_tf2.mkdtemp())
+_saved_c = (_dm._make_intake, _dm.tg.send, _dm.STATE_FILE, _dm.tg.get_updates,
+            _dm.tg.load_config, _rp_c.read_open_todos, _rp_c.read_events)
+try:
+    _wrote_c: list = []
+    _dm._make_intake = lambda: _it.Intake(
+        add_todo=lambda t, w=None: (_wrote_c.append(("todo", t)), "T")[1],
+        add_event=lambda *a, **k: (_wrote_c.append(("event",)), "E")[1],
+        add_memo=lambda t: (_wrote_c.append(("memo", t)), "M")[1],
+        testing=True)
+    _sent_c: list = []
+    _dm.tg.send = lambda t, **kw: _sent_c.append((t, kw.get("disable_notification")))
+    _dm.STATE_FILE = _dm_dir3 / "state.json"
+    _dm.tg.load_config = lambda: ("tok", "chat")
+    _dm.tg.get_updates = lambda offset=None, limit=20, timeout=0: [
+        {"update_id": 91, "message": {"message_id": 7, "chat": {"id": "chat"},
+                                      "text": "/list"}}]
+    # 读取注入成假的：自检不该真的去 osascript 读提醒事项/日历
+    _rp_c.read_open_todos = lambda day=None: [_rp_c.Todo("甲", False)]
+    _rp_c.read_events = lambda day: []
+
+    _dm.run_once(offset=1, wait=1)
+    check("命令：一个字都不写进 App", _wrote_c == [], str(_wrote_c))
+    check("命令：发出了一条回执", len(_sent_c) == 1, str(len(_sent_c)))
+    check("命令：回执静音（成功那条不响）", _sent_c[0][1] is True, str(_sent_c))
+    check("命令：回执里有待办", "　甲" in _sent_c[0][0], _sent_c[0][0])
+    _j_c = "".join(p.read_text(encoding="utf-8") for p in _d.glob("*.jsonl"))
+    check("命令：不进 journal（命令是读，不是内容）",
+          "input" not in _j_c and "/list" not in _j_c, _j_c)
+finally:
+    (_dm._make_intake, _dm.tg.send, _dm.STATE_FILE, _dm.tg.get_updates,
+     _dm.tg.load_config, _rp_c.read_open_todos, _rp_c.read_events) = _saved_c
+    _sh2.rmtree(_d, ignore_errors=True)
+    _sh2.rmtree(_dm_dir3, ignore_errors=True)
+
 check("真实自检用分钟精度断言（与 applecal.add 一致）",
       "second=0" in (ROOT / "tools" / "selftest-live.py").read_text(encoding="utf-8"),
       "断言未对齐精度会导致假失败")
@@ -2193,6 +2324,80 @@ check("events_between(date, date) 是合法调用", True)
 check("applecal.Event 有 summary/start/location（report 要用）",
       {"summary", "start", "location"} <=
       {f.name for f in _dc8.fields(_ac8.Event)})
+
+# ── 日程读取的两处真实修复（2026-10-05，都是 /list 第一次真跑撞出来的）
+#
+# ① 没填地点的日程：AppleScript 回传的是字面量 `missing value`，
+#    不是空串 —— 于是回执里会出现 `@missing value`。
+#    日报的"明日日程"同样会带上它（只是那两天日历读不到，没人看见）。
+_msv = (_ac8.FSEP.join(["去龙井村", "2026-10-5 0:0", "2026-10-6 0:0",
+                        "missing value", "UID-1"]) + _ac8.RSEP
+        + _ac8.FSEP.join(["项目周会", "2026-10-5 14:0", "2026-10-5 15:0",
+                          "会议室", "UID-2"]) + _ac8.RSEP)
+_parsed = _ac8.parse_events(_msv)
+check("日程解析：missing value 归一成空串（不显示 @missing value）",
+      _parsed[0].location == "", repr(_parsed[0].location))
+check("日程解析：真有地点就留着", _parsed[1].location == "会议室",
+      repr(_parsed[1].location))
+check("日程解析：summary 同样归一", _ac8.parse_events(
+    _ac8.FSEP.join(["missing value", "2026-10-5 0:0", "2026-10-6 0:0",
+                    "", "U"]) + _ac8.RSEP)[0].summary == "")
+
+# ② Calendar 没在跑时，**读**会失败（-600）而**写**不会 —— 读路径要自己把 App 拉起来。
+#    这里把两次调用换成假的，验"只在 -600 时拉、只重试一次、别的不动"。
+_saved_once = _ac8._events_between_once
+_saved_launch = _ac8._launch_calendar
+try:
+    _n = {"once": 0, "launch": 0}
+
+    def _fake_launch():
+        _n["launch"] += 1
+
+    def _fail_first(s, e, c=None):
+        """第一次 -600，之后成功。"""
+        _n["once"] += 1
+        if _n["once"] == 1:
+            raise _ac8.CalendarError("-600 應用程式不在執行中")
+        return []
+
+    def _always(s, e, c=None):
+        _n["once"] += 1
+        raise _ac8.CalendarError(_always.msg)
+
+    _ac8._launch_calendar = _fake_launch
+    _ac8._events_between_once = _fail_first
+    check("日程读取：-600 时拉起 Calendar 并重试一次",
+          _ac8.events_between(_dt2.date(2026, 10, 5),
+                              _dt2.date(2026, 10, 6)) == []
+          and _n["launch"] == 1 and _n["once"] == 2, str(_n))
+
+    # 别的错误不该去拉 App（-10004 是授权问题，拉一百次也没用）
+    _n.update(once=0, launch=0)
+    _always.msg = "-10004 越权"
+    _ac8._events_between_once = _always
+    try:
+        _ac8.events_between(_dt2.date(2026, 10, 5), _dt2.date(2026, 10, 6))
+        check("日程读取：非 -600 的错误直接抛", False, "没抛")
+    except _ac8.CalendarError:
+        check("日程读取：非 -600 的错误直接抛（不去拉 App）",
+              _n["launch"] == 0 and _n["once"] == 1, str(_n))
+
+    # 拉起来还是失败 → 如实抛，不无限重试
+    _n.update(once=0, launch=0)
+    _always.msg = "-600 还在"
+    try:
+        _ac8.events_between(_dt2.date(2026, 10, 5), _dt2.date(2026, 10, 6))
+        check("日程读取：重试后仍失败就如实抛", False, "没抛")
+    except _ac8.CalendarError:
+        check("日程读取：重试后仍失败就如实抛（不重试第三次）",
+              _n["once"] == 2 and _n["launch"] == 1, str(_n))
+finally:
+    _ac8._events_between_once = _saved_once
+    _ac8._launch_calendar = _saved_launch
+check("日程读取：拉起用的是 open -g + osascript launch 两条路，且都有超时",
+      '"/usr/bin/open", "-g", "-a", APP' in
+      (SRC / "applecal.py").read_text(encoding="utf-8")
+      and "to launch" in (SRC / "applecal.py").read_text(encoding="utf-8"))
 
 # ③ 备忘端：memo.add(text) → Memo.note_id
 _sig_memo = _insp8.signature(_mm8.add)

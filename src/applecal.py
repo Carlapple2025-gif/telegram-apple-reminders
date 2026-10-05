@@ -32,6 +32,7 @@ import datetime as dt
 import json
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -189,9 +190,73 @@ def events_between(start: dt.date, end: dt.date,
     """
     读某段日期内的事件（只读）。`end` 不含当天。
 
+    ⚠️ **Calendar 没在运行时，这个读会失败**（2026-10-05 实测）：
+
+        execution error: 「Calendar」發生錯誤：應用程式不在執行中。(-600)
+
+    而**写**不受影响（`make new event` 会把 App 拉起来）—— 所以这个坑只在读路径上，
+    它让日报的"明日日程"整整缺了两天（10-03 超时、10-04 -600），
+    也让 `/list` 的日程段读不到。见 `_launch_calendar`。
+
+    失败是**立刻**返回的（App 没跑，AppleScript 不做任何遍历），
+    所以"拉起 + 重试一次"的代价只在真正需要时才付。
+    """
+    try:
+        return _events_between_once(start, end, calendar)
+    except CalendarError as e:
+        if "-600" not in str(e):
+            raise
+        _launch_calendar()
+        # 再失败就如实抛给调用方（它会写进回执/日报的告警段）——
+        # 不吞、不重试第二次。
+        return _events_between_once(start, end, calendar)
+
+
+def _launch_calendar() -> None:
+    """
+    把 Calendar 拉起来（尽力而为，**绝不阻塞**）。
+
+    为什么由代码来做：这是台 7×24 的机器，而"日历读不到"的解药只有
+    "让 App 在跑" —— 让人每次手动去开 Calendar，等于这条链路上挂了个
+    必须有人守着的开关（ARCHITECTURE 里最反对的那种）。
+
+    ⚠️ 两种办法都试，是因为实测它们**在不同上下文里表现不同**
+    （2026-10-05，借 launchd 身份跑了三次探针）：
+
+      · `open -a Calendar` —— 在普通终端里立刻返回 0；
+        在 launchd 的上下文里**卡住不返回**（探针的步骤标记停在那一行）。
+        于是加 `-g`（后台开，不抢焦点）+ **短超时**：卡住就杀掉换下一个。
+      · `osascript -e 'tell application "Calendar" to launch'` ——
+        走 AppleScript 自己的 launch，守护对 Calendar 本来就有自动化授权。
+
+    两个都失败就静默放弃：调用方会**如实抛错**，回执里写着"日历读不到"。
+    **这一段的"能否真的拉起来"我无法在本机验证完整**（见 CHANGELOG），
+    所以它写成了"失败也不影响如实报错"的形状。
+    """
+    for cmd in (["/usr/bin/open", "-g", "-a", APP],
+                ["/usr/bin/osascript", "-e",
+                 f'tell application "{APP}" to launch']):
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=8)
+            break
+        except Exception:      # noqa: BLE001
+            continue
+    time.sleep(3)              # 给它起来的时间（实测这个量级够）
+
+
+def _events_between_once(start: dt.date, end: dt.date,
+                         calendar: str | None = None) -> list[Event]:
+    """
+    读某段日期内的事件（只读）。`end` 不含当天。
+
     用 `whose` 过滤会让 AppleScript 自己做日期比较（受区域设置影响），
     所以改为**把事件取出来、在 Python 里比较** —— 时间判断只在 Python 做，
     这是本模块的一贯原则。
+
+    ⚠️ 代价是**遍历整个日历**：日历里事件多的时候这一步是秒级的
+    （实测 /list 的日程段要十几秒）。要提速就得回到 `whose`，
+    而那会把日期比较交给 AppleScript —— 那是本模块刻意避开的东西。
+    暂时接受慢，见 docs/TELEGRAM-VOICE.md 里"宁可慢，不要区域设置 bug"。
     """
     cal = calendar or config_calendar()
     scope = (f'calendar {_as_literal(cal)}' if cal else "calendar 1")
@@ -219,6 +284,20 @@ def events_between(start: dt.date, end: dt.date,
             if start <= e.start.date() < end]
 
 
+# AppleScript 回传的"空值"字面量。
+#
+# ⚠️ 实测（2026-10-05）：日程**没填地点**时，`location of e` 回传的不是空串，
+# 而是这个字面量 —— 于是回执 / 日报 / `/list` 里会出现 `@missing value`。
+# 第一次真跑 `/list` 就把它打出来了（"全天 去龙井村　@missing value"）。
+_AS_MISSING = "missing value"
+
+
+def _as_text(s: str) -> str:
+    """AppleScript 的文本 → Python 文本：`missing value` 归一成空串。"""
+    s = (s or "").strip()
+    return "" if s == _AS_MISSING else s
+
+
 def parse_events(raw: str, calendar: str = "") -> list[Event]:
     """
     解析事件快照。抽成独立函数便于离线测试。
@@ -236,9 +315,9 @@ def parse_events(raw: str, calendar: str = "") -> list[Event]:
         end = _parse_dt(e_str)
         if start is None or end is None:
             continue
-        events.append(Event(summary=summary.strip(), start=start, end=end,
-                            calendar=calendar, location=location.strip(),
-                            uid=uid.strip()))
+        events.append(Event(summary=_as_text(summary), start=start, end=end,
+                            calendar=calendar, location=_as_text(location),
+                            uid=_as_text(uid)))
     return events
 
 
