@@ -132,6 +132,11 @@ bash deploy/install_launchd.sh test
 
 # 日报（只看内容，不推送）
 python3 src/report.py --no-push
+
+# Telegram 通道（独立 bot）
+python3 src/telegram.py status             # token / chat_id / bot 名
+python3 src/telegram.py menu               # 查看「/」菜单（打 / 时的自动补全）
+python3 src/telegram.py menu --set         # 把 commands.MENU 推上去
 ```
 
 > ⚠️ **`daemon.py --offline` 不等于"隔离测试"。**

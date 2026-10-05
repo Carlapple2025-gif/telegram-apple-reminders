@@ -168,6 +168,55 @@ def send_chat_action(action: str = "typing",
         return False
 
 
+# ── `/` 菜单（setMyCommands）
+#
+# Telegram 在私聊里、你打 `/` 时会弹一个**自动补全列表** —— 那是命令唯一的
+# 原生展示位。不设它，命令就只存在于启动通知那一行里（你可能没翻到）。
+#
+# ⚠️ 硬约束（文档确认，2026-10-05）：
+#   · 命令名只能 `[a-z0-9_]`，1–32 字符 —— **`#` `@` 做不了命令名**
+#   · 描述 3–256 字符
+# 名字不合规时 API 直接报错，所以 `commands.py` 那一侧有断言守着形状。
+
+def set_my_commands(commands: list[tuple[str, str]]) -> bool:
+    """
+    设置 `/` 菜单。`commands` 形如 `[("list", "看现在的待办与日程")]`。
+
+    这是**服务端持久**的设置（不是每次连接都要设），但每次启动推一遍最省心：
+    以后改了命令表，重启就生效，不需要记得手动同步。
+
+    **绝不抛异常**：菜单设不上不该影响收件（调用方只记一行日志）。
+    """
+    if os.environ.get("PDCA_SUPPRESS_SEND"):
+        return False
+    token, _ = load_config()
+    if not token:
+        return False
+    try:
+        _call(token, "setMyCommands",
+              {"commands": [{"command": c, "description": d}
+                            for c, d in commands]}, timeout=10)
+        return True
+    except TelegramError:
+        return False
+
+
+def get_my_commands() -> list[dict]:
+    """
+    读回当前的 `/` 菜单（运维查证用）。失败返回空表 —— 不抛。
+    """
+    if os.environ.get("PDCA_SUPPRESS_SEND"):
+        return []
+    token, _ = load_config()
+    if not token:
+        return []
+    try:
+        result = _call(token, "getMyCommands", None, timeout=10)
+        return result if isinstance(result, list) else []
+    except TelegramError:
+        return []
+
+
 # ── 内联按钮（inline keyboard）
 #
 # 为什么用它：让用户在聊天里**逐个打字回复**太慢，条目多了根本受不了。
@@ -485,6 +534,10 @@ def main() -> int:
 
     sub.add_parser("drain", help="处理掉积压的过期按钮点击（回应并撤掉按钮）")
 
+    p_menu = sub.add_parser("menu", help="查看/推送 Telegram 的「/」菜单")
+    p_menu.add_argument("--set", action="store_true",
+                        help="把 commands.MENU 推上去（默认只查看）")
+
     p_wait = sub.add_parser("wait", help="发提问并等待回复（100 秒）")
     p_wait.add_argument("prompt")
 
@@ -537,6 +590,21 @@ def main() -> int:
         if args.cmd == "drain":
             n = drain_stale_callbacks()
             print(f"已处理 {n} 个积压点击（已回应并撤掉按钮）")
+            return 0
+
+        if args.cmd == "menu":
+            # 延迟导入：通道模块不该在 import 期就依赖业务模块
+            import commands as _cmds
+
+            if args.set:
+                ok = set_my_commands(_cmds.MENU)
+                print("✅ 已推送" if ok else "❌ 推送失败（网络或 token？）")
+            cur = get_my_commands()
+            print("当前的「/」菜单：")
+            for c in cur:
+                print(f"  /{c.get('command')}  {c.get('description')}")
+            if not cur:
+                print("  （空的 —— 用 `menu --set` 推一条上去）")
             return 0
 
         if args.cmd == "updates":

@@ -2194,6 +2194,54 @@ _r_unk, _ok_unk = _cmd.run(_cmd.UNKNOWN)
 check("命令：不认识的命令 → ok=False（有声发送）", _ok_unk is False)
 check("命令：不认识的命令给出可用命令", "/list" in _r_unk, _r_unk)
 
+# ── `/` 菜单（setMyCommands）
+#
+# Telegram 对命令名有硬约束，不合规 API 直接报错 —— 而那种错误在守护日志里
+# 只表现为"菜单设置失败"，很难查。所以在这里守住形状。
+check("菜单：至少有一条命令", len(_cmd.MENU) >= 1, str(_cmd.MENU))
+for _mn, _md in _cmd.MENU:
+    check(f"菜单 {_mn!r}：名字合规（[a-z0-9_]，1–32）",
+          bool(_re.fullmatch(r"[a-z0-9_]{1,32}", _mn)), _mn)
+    check(f"菜单 {_mn!r}：描述 3–256 字符", 3 <= len(_md) <= 256, f"{len(_md)}")
+    check(f"菜单 {_mn!r}：真的是一条能跑的命令", _mn in _cmd.ALIASES, _mn)
+    check(f"菜单 {_mn!r}：别名没被塞进菜单（菜单只列规范名）",
+          len(_cmd.MENU) == 1 and _mn == "list", str(_cmd.MENU))
+
+check("telegram 提供 set_my_commands / get_my_commands",
+      hasattr(_tg, "set_my_commands") and hasattr(_tg, "get_my_commands"))
+check("菜单：自检期被静音阀挡住（不打真网络）",
+      _tg.set_my_commands(_cmd.MENU) is False and _tg.get_my_commands() == [])
+
+# 报文形状：setMyCommands 要的是 [{"command":…,"description":…}, …]
+_saved_call = _tg._call
+_saved_cfg = _tg.load_config
+_saved_env = os.environ.pop("PDCA_SUPPRESS_SEND", None)
+try:
+    _payloads: list = []
+    _tg.load_config = lambda: ("tok", "chat")
+    _tg._call = lambda token, method, params=None, timeout=20: (
+        _payloads.append((method, params)), {})[1]
+    check("菜单：能推上去", _tg.set_my_commands(_cmd.MENU) is True)
+    check("菜单：用的是 setMyCommands",
+          bool(_payloads) and _payloads[-1][0] == "setMyCommands", str(_payloads))
+    check("菜单：报文形状 = [{'command','description'}]",
+          _payloads[-1][1] == {"commands": [{"command": n, "description": d}
+                                            for n, d in _cmd.MENU]},
+          str(_payloads[-1][1]))
+
+    _tg._call = lambda token, method, params=None, timeout=20: [
+        {"command": "list", "description": "x"}]
+    check("菜单：能读回来（运维查证用）",
+          _tg.get_my_commands() == [{"command": "list", "description": "x"}])
+finally:
+    _tg._call = _saved_call
+    _tg.load_config = _saved_cfg
+    if _saved_env is not None:
+        os.environ["PDCA_SUPPRESS_SEND"] = _saved_env
+
+check("守护启动时会推「/」菜单（改了命令表 → 重启即生效）",
+      "tg.set_my_commands(commands.MENU)" in _dm_src)
+
 # ── 整链：/list 一个字都不写，也不进 journal
 _d = _fresh_journal()
 _dm_dir3 = _P2(_tf2.mkdtemp())
