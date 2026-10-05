@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-命令层：**只读**查询。目前只有一条 —— 看现在的待办与日程。
+命令层：**只读**查询。
 
     你发： /list
     别名： /ls  /today  /now  /todo  /列表  /待办  /日程
@@ -20,15 +20,24 @@
   · `routes.py` 只决定"写到哪个 App"，而命令**哪个都不写**；
   · `intake.py` 的契约是"只增"（架构定死），不该承担读操作；
   · 所以单独成模块，由守护在**通道层**分流：判据是**字面**的
-    （以 `/` 开头），不是业务判断 —— 与"这条不是文字"同级。
+    （以 `/` 开头），不是业务判断 —— 与"这条不是消息"同级。
 
-这与 2026-10-04 否决 `/help` 不冲突：那次拒的是"再引入一套与符号并行的
-词汇表（`/memo` `/event`…）"；这里只有**一条**命令，
-而且它是整个系统里唯一的只读操作。
+## 一条命令，还是一张表（2026-10-05）
+
+原先这里写死了一条命令，理由是「**每多一条命令，就多一份要在文档、启动通知、
+自检三处同步的词汇**」—— 那时这个理由成立。
+
+现在改成注册表 `COMMANDS`：**别名、`/` 菜单、认不出命令时的提示语全部从一处派生**。
+于是那条理由不再挡路：加命令 = 加一条声明（+ 改一条断言里的数字，
+那条断言就是"这是一次**有意的**决定"的记录点）。
+
+⚠️ **仍然不做 `/help`**：要消掉的是"三处同步"这种成本，而不是"并行词汇表"这个隐患。
+`/help` 要复述的是**符号表**（`#` `@` 裸输入），而符号表每天已经在日报页脚和
+启动通知里各念一遍 —— 再加一个入口只是在同一个东西上多开一扇门。
 
 ## 只读，且失败要如实说
 
-读取**复用** `report.py` 里那两条读函数，不另写一份 ——
+读取复用 `report.py` 里那两条读函数，不另写一份 ——
 "同一件事两处实现"是本项目反复踩过的坑。
 某处读不到就如实写 `⚠️ …读不到`：**绝不把"读不到"说成"没有"**
 （与日报同一条原则，日报为此专门有断言）。
@@ -44,16 +53,10 @@
 from __future__ import annotations
 
 import datetime as dt
+from dataclasses import dataclass
+from typing import Callable
 
 import whens
-
-# 命令名（小写）→ 规范名。目前所有别名都指向同一条命令：
-# 保持"一条命令"是有意的 —— 每多一条命令，就多一份要在文档、
-# 启动通知、自检三处同步的词汇（`/help` 就是因此被否决的）。
-ALIASES: dict[str, str] = {
-    "list": "list", "ls": "list", "today": "list", "now": "list",
-    "todo": "list", "列表": "list", "待办": "list", "日程": "list",
-}
 
 # `match()` 的第三种返回值：以 `/` 开头，但不认识。
 UNKNOWN = "?"
@@ -61,69 +64,47 @@ UNKNOWN = "?"
 # 一屏最多列多少条。超了就说"还有 N 条" —— 不刷屏，也不隐瞒总数。
 MAX_ITEMS = 15
 
-USAGE = "可用命令：/list（= /ls /today /列表）—— 看现在的待办与日程"
 
-# 要在 Telegram 的 `/` 菜单里出现的命令（守护启动时推上去，见 telegram.set_my_commands）。
-#
-# 只列**规范名**，不列别名：菜单是"发现性"入口，把 8 个别名都塞进去
-# 只会让人以为有 8 条命令（它们全指向同一条）。
-#
-# Telegram 的硬约束：名字只能 `[a-z0-9_]`、1–32 字符；描述 3–256 字符。
-# 自检里有一条断言按这两条规则校验 —— 不合规的话 API 会直接报错，
-# 而那种错误在启动日志里只表现为"菜单设置失败"，很难查。
-MENU: list[tuple[str, str]] = [
-    ("list", "看现在的待办与日程"),
-]
+# ── 命令运行时能拿到的东西
 
-
-def match(text: str) -> str | None:
+@dataclass
+class Ctx:
     """
-    这串输入是不是一条命令？
+    一次命令执行的上下文。
 
-    返回：命令名 / `UNKNOWN`（以 `/` 开头但不认识）/ `None`（不是命令，照常收件）。
+    **读者由调用方给**（而不是命令自己去 import 某个模块）有两个好处：
 
-    **纯字面判断**：不看语义、不看上下文、不读时钟 —— 所以它不需要任何状态。
-    调用方（守护）据此分流，判断的"重量"与"这条消息不是文字"同级。
+      · 命令能**完全离线测** —— 自检注入假读取端，"读不到"和"真没有"
+        两条分支都验得到（这两条混起来过一次真实故障，见 _listing 里的注释）；
+      · 命令不认识"日报"这个功能 —— 读能力是**别人**递进来的。
+
+    ⚠️ `default_ctx()` 是**唯一**一处去取真实读者的地方，
+    也就是 KERNEL-CONTRACT §三 里 `commands → report` 那条越界边的钉点。
     """
-    s = (text or "").strip()
-    if not s.startswith("/"):
-        return None
-    rest = s[1:].strip()
-    if not rest:
-        return UNKNOWN
-    word = rest.split()[0].lower()
-    word = word.split("@", 1)[0]        # 群里发过来会是 /list@botname
-    return ALIASES.get(word, UNKNOWN)
+    now: dt.datetime
+    open_todos: Callable[..., list]
+    events_range: Callable[..., list]
 
 
-def run(name: str, now: dt.datetime | None = None,
-        open_todos=None, events_range=None) -> tuple[str, bool]:
-    """
-    执行命令，返回 `(要发的文本, 是否正常)`。
-
-    `ok=False` 只用于**用法错误**（不认识的命令），好让调用方按音量分档
-    用"有声"发它（见 docs/TELEGRAM-VOICE.md 的 V2：成功静音、失败有声）。
-    **读不到 App 不算用法错误** —— 正文里会如实写 `⚠️`，
-    但那仍然是一条正常回执（你问了我答了，只是某处读不到）。
-
-    `open_todos` / `events_range` 可注入（测试用），默认走 `report.py` 的真实读取。
-    """
-    if name == UNKNOWN:
-        return f"❓ 不认识这条命令\n　　{USAGE}", False
-    return _listing(now, open_todos, events_range), True
-
-
-def _listing(now: dt.datetime | None = None,
-             open_todos=None, events_range=None) -> str:
-    """把"现在的待办与日程"排成一条消息。**只读**，失败如实写出来。"""
+def default_ctx(now: dt.datetime | None = None) -> Ctx:
+    """生产用的上下文（真实读取）。测试请自己造一个 Ctx。"""
     import report
 
-    open_todos = open_todos or report.read_open_todos
-    # ⚠️ 一次读**两天**（而不是 read_events 读两次）：每次读取都包含一遍
-    # "重复事件扫描"，而那份扫描是全表的（AppleScript 筛不出重复事件）。
-    events_range = events_range or report.read_events_between
+    return Ctx(now=now or dt.datetime.now(),
+               open_todos=report.read_open_todos,
+               events_range=report.read_events_between)
 
-    now = now or dt.datetime.now()
+
+# ── 命令实现
+
+def _when_text(e) -> str:
+    """日程的时间写法：全天就说"全天"，别显示成 00:00。"""
+    return "全天" if getattr(e, "all_day", False) else f"{e.start:%H:%M}"
+
+
+def _listing(ctx: Ctx) -> tuple[str, bool]:
+    """把"现在的待办与日程"排成一条消息。**只读**，失败如实写出来。"""
+    now, open_todos, events_range = ctx.now, ctx.open_todos, ctx.events_range
     today = now.date()
     tomorrow = today + dt.timedelta(days=1)
     wd = "一二三四五六日"[today.isoweekday() - 1]
@@ -144,6 +125,8 @@ def _listing(now: dt.datetime | None = None,
         errors.append(f"提醒事项读不到：{e}")
 
     # ② 日程：今天**还没结束**的 + 明天全部（一次读取拿两天）。
+    #    ⚠️ 一次读两天（而不是读两次）：每次读取都包含一遍"重复事件扫描"，
+    #    而那份扫描是全表的（AppleScript 筛不出重复事件）。
     #    今天那条按"结束时间"筛，而不是开始时间 —— 正在进行的会议还在进行。
     try:
         _both = list(events_range(today, tomorrow + dt.timedelta(days=1)))
@@ -197,12 +180,99 @@ def _listing(now: dt.datetime | None = None,
         for e in errors:
             lines.append(f"　{e}")
 
-    return "\n".join(lines).strip()
+    return "\n".join(lines).strip(), True
 
 
-def _when_text(e) -> str:
-    """日程的时间写法：全天就说"全天"，别显示成 00:00。"""
-    return "全天" if getattr(e, "all_day", False) else f"{e.start:%H:%M}"
+# ── 命令表（加命令 = 在这里加一条）
+
+@dataclass(frozen=True)
+class Command:
+    """
+    一条命令。**别名、`/` 菜单、认不出命令时的提示语全部由它派生** ——
+    所以加一条命令不需要去别处同步任何词汇。
+    """
+    name: str                                # 规范名：[a-z0-9_]{1,32}（Telegram 硬约束）
+    run: Callable[[Ctx], tuple[str, bool]]   # (要发的文本, 是否正常)
+    aliases: tuple[str, ...] = ()            # 其他写法（中文、缩写）；**不进菜单**
+    menu: str = ""                           # `/` 菜单里的一句话；空 = 不进菜单
+    usage: str = ""                          # 认不出命令时念的那一行
+    note: str = ""                           # 为什么有它（给人看）
+
+
+COMMANDS: tuple[Command, ...] = (
+    Command(
+        name="list",
+        run=_listing,
+        aliases=("ls", "today", "now", "todo", "列表", "待办", "日程"),
+        menu="看现在的待办与日程",
+        usage="/list（= /ls /today /列表）—— 看现在的待办与日程",
+        note="整个系统里唯一的只读操作；其余入口都是'写'",
+    ),
+)
+
+
+# ── 从命令表派生出来的三样东西（都不要再手写第二份）
+
+# 别名（含规范名自己）→ 规范名。
+ALIASES: dict[str, str] = {a: c.name for c in COMMANDS for a in (c.name, *c.aliases)}
+
+# 要在 Telegram 的 `/` 菜单里出现的命令（守护启动时推上去，
+# 见 telegram.set_my_commands）。
+#
+# 只列**规范名**，不列别名：菜单是"发现性"入口，把 8 个别名都塞进去
+# 只会让人以为有 8 条命令（它们全指向同一条）。
+#
+# Telegram 的硬约束：名字只能 `[a-z0-9_]`、1–32 字符；描述 3–256 字符。
+# 自检里有一条断言按这两条规则校验 —— 不合规的话 API 会直接报错，
+# 而那种错误在启动日志里只表现为"菜单设置失败"，很难查。
+MENU: list[tuple[str, str]] = [(c.name, c.menu) for c in COMMANDS if c.menu]
+
+# 认不出命令时给的那一行提示。
+USAGE: str = "可用命令：" + "；".join(c.usage for c in COMMANDS if c.usage)
+
+
+# ── 入口
+
+def match(text: str) -> str | None:
+    """
+    这串输入是不是一条命令？
+
+    返回：命令名 / `UNKNOWN`（以 `/` 开头但不认识）/ `None`（不是命令，照常收件）。
+
+    **纯字面判断**：不看语义、不看上下文、不读时钟 —— 所以它不需要任何状态。
+    调用方（守护）据此分流，判断的"重量"与"这条消息不是文字"同级。
+    """
+    s = (text or "").strip()
+    if not s.startswith("/"):
+        return None
+    rest = s[1:].strip()
+    if not rest:
+        return UNKNOWN
+    word = rest.split()[0].lower()
+    word = word.split("@", 1)[0]        # 群里发过来会是 /list@botname
+    return ALIASES.get(word, UNKNOWN)
+
+
+def find(name: str) -> Command | None:
+    """按规范名取命令（取不到返回 None —— 调用方决定怎么说）。"""
+    return next((c for c in COMMANDS if c.name == name), None)
+
+
+def run(name: str, ctx: Ctx | None = None) -> tuple[str, bool]:
+    """
+    执行命令，返回 `(要发的文本, 是否正常)`。
+
+    `ok=False` 只用于**用法错误**（不认识的命令），好让调用方按音量分档
+    用"有声"发它（见 docs/TELEGRAM-VOICE.md 的 V2：成功静音、失败有声）。
+    **读不到 App 不算用法错误** —— 正文里会如实写 `⚠️`，
+    但那仍然是一条正常回执（你问了我答了，只是某处读不到）。
+
+    `ctx` 可注入（测试用）；不传就取真实的读取端（`default_ctx()`）。
+    """
+    cmd = find(name) if name != UNKNOWN else None
+    if cmd is None:
+        return f"❓ 不认识这条命令\n　　{USAGE}", False
+    return cmd.run(ctx or default_ctx())
 
 
 def main() -> int:

@@ -2352,9 +2352,9 @@ def _evs_range(a, b):
     return [e for d, evs in _EVS_C.items() if a <= d < b for e in evs]
 
 
-_r_c, _ok_c = _cmd.run("list", now=_NOW_C,
-                       open_todos=lambda d: _TODOS_C,
-                       events_range=_evs_range)
+_r_c, _ok_c = _cmd.run("list", _cmd.Ctx(now=_NOW_C,
+                                        open_todos=lambda d: _TODOS_C,
+                                        events_range=_evs_range))
 check("命令：正常执行 → ok=True（静音发）", _ok_c is True)
 check("命令：列出未完成待办",
       "　交电费" in _r_c and "跟进竣工报验" in _r_c, _r_c)
@@ -2370,21 +2370,23 @@ check("命令：全天日程写成「全天」而不是 00:00",
 def _boom_c(day=None):
     raise RuntimeError("AppleScript 超时")
 
-_r_fail, _ = _cmd.run("list", now=_NOW_C, open_todos=_boom_c, events_range=_boom_c)
+_r_fail, _ = _cmd.run("list", _cmd.Ctx(now=_NOW_C, open_todos=_boom_c,
+                                       events_range=_boom_c))
 check("命令：读不到时**不说**「一件都没有」", "一件都没有" not in _r_fail, _r_fail)
 check("命令：读不到时**不说**「没有日程」", "没有日程" not in _r_fail, _r_fail)
 check("命令：读不到时如实写「读不到」",
       _r_fail.count("读不到（见下方告警）") == 2, _r_fail)
 
-_r_empty, _ = _cmd.run("list", now=_NOW_C,
-                       open_todos=lambda d: [], events_range=lambda a, b: [])
+_r_empty, _ = _cmd.run("list", _cmd.Ctx(now=_NOW_C,
+                                        open_todos=lambda d: [],
+                                        events_range=lambda a, b: []))
 check("命令：真没有时才说「一件都没有」", "一件都没有" in _r_empty, _r_empty)
 check("命令：真没有时才说「今明两天都没有日程」",
       "今明两天都没有日程" in _r_empty, _r_empty)
 
 _many = [_rp_c.Todo(f"第{i}件", False) for i in range(20)]
-_r_many, _ = _cmd.run("list", now=_NOW_C, open_todos=lambda d: _many,
-                      events_range=lambda a, b: [])
+_r_many, _ = _cmd.run("list", _cmd.Ctx(now=_NOW_C, open_todos=lambda d: _many,
+                                       events_range=lambda a, b: []))
 check("命令：超过上限时截断并说明总数",
       "待办 20 件" in _r_many and "…还有 5 件" in _r_many, _r_many)
 
@@ -2402,8 +2404,59 @@ for _mn, _md in _cmd.MENU:
           bool(_re.fullmatch(r"[a-z0-9_]{1,32}", _mn)), _mn)
     check(f"菜单 {_mn!r}：描述 3–256 字符", 3 <= len(_md) <= 256, f"{len(_md)}")
     check(f"菜单 {_mn!r}：真的是一条能跑的命令", _mn in _cmd.ALIASES, _mn)
-    check(f"菜单 {_mn!r}：别名没被塞进菜单（菜单只列规范名）",
-          len(_cmd.MENU) == 1 and _mn == "list", str(_cmd.MENU))
+    check(f"菜单 {_mn!r}：菜单里放的是规范名（不是别名）",
+          any(c.name == _mn for c in _cmd.COMMANDS), _mn)
+    check(f"菜单 {_mn!r}：提示语里也念得到它",
+          f"/{_mn}" in _cmd.USAGE, _cmd.USAGE)
+
+# ── 命令注册表：加命令不该需要去别处同步词汇
+#
+# 2026-10-05 起，别名 / `/` 菜单 / 提示语都从 `COMMANDS` **派生**。
+# 这一节验的是"派生真的成立" —— 否则注册表只是换了个写法。
+# （原先 ALIASES / MENU / USAGE 是三份手写表，加一条命令要三处同步。）
+
+# ① 别名不能撞车 —— 撞了的话字典推导会**静默**让后声明的那条赢
+_seen_alias: dict = {}
+_clash: list = []
+for _c in _cmd.COMMANDS:
+    for _a in (_c.name, *_c.aliases):
+        if _a in _seen_alias:
+            _clash.append(f"{_a}（{_seen_alias[_a]} 与 {_c.name} 撞）")
+        _seen_alias[_a] = _c.name
+check("命令别名不撞车", not _clash, "；".join(_clash))
+
+# ② 别名的目标必须是一条真命令 —— 否则 match() 会给出一个 run() 不认识的名字，
+#    表现是"命令打得出来，回一句不认识"
+check("别名的目标都真实存在",
+      all(_cmd.find(v) is not None for v in _cmd.ALIASES.values()),
+      str(sorted(set(_cmd.ALIASES.values()))))
+
+# ③ 每条命令都要在提示语里出现 —— 否则它存在但**永远发现不了**
+check("提示语覆盖每条命令",
+      all(f"/{c.name}" in _cmd.USAGE for c in _cmd.COMMANDS), _cmd.USAGE)
+check("每条命令都有自己的 usage 文案",
+      all(c.usage for c in _cmd.COMMANDS),
+      str([c.name for c in _cmd.COMMANDS if not c.usage]))
+
+# ④ 每条命令都真的能跑（**注册表不许撒谎**）。
+#    用一份"什么都没有"的假 ctx：只读命令在这上面不该抛异常。
+_stub_ctx = _cmd.Ctx(now=_NOW_C, open_todos=lambda d: [],
+                     events_range=lambda a, b: [])
+for _c in _cmd.COMMANDS:
+    try:
+        _out = _cmd.run(_c.name, _stub_ctx)
+        _runnable = (isinstance(_out, tuple) and len(_out) == 2
+                     and isinstance(_out[0], str) and isinstance(_out[1], bool))
+    except Exception as _e:  # noqa: BLE001
+        _runnable, _out = False, repr(_e)
+    check(f"命令 {_c.name!r}：真的能跑（注册表不撒谎）", _runnable, str(_out))
+
+# ⑤ 命令条数是**有意的决定**，不是随手加的。
+#    ⚠️ 加第二条命令时把这个数字一起改 —— 它就是那次决定的记录点
+#    （2026-10-04 为"要不要 /help"专门裁决过：不做与符号并行的词汇表）。
+check("命令条数没变（加命令要是一次有意的决定）",
+      len(_cmd.COMMANDS) == 1,
+      f"现在有 {len(_cmd.COMMANDS)} 条：" + "、".join(c.name for c in _cmd.COMMANDS))
 
 check("telegram 提供 set_my_commands / get_my_commands",
       hasattr(_tg, "set_my_commands") and hasattr(_tg, "get_my_commands"))
