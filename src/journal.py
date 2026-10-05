@@ -185,10 +185,20 @@ def log_todo(text: str, reminder_id: str = "", ok: bool = True,
 
 def log_event(summary: str, start: str = "", end: str = "",
               location: str = "", calendar: str = "", ok: bool = True,
-              detail: str = "", src_msg_id: int | None = None,
+              detail: str = "", recurrence: str = "",
+              src_msg_id: int | None = None,
               reply_msg_id: int | None = None) -> dict:
+    """
+    记下"我建了一条日程"。
+
+    `recurrence` 是 iCal RRULE（空 = 一次性）。**2026-10-05 补上**：
+    那天想核对"用户发的那条英语学习到底是不是每天重复"，
+    发现 journal 里记了标题和时间、**唯独没记规则** ——
+    于是这个"我们提交了什么"的问题只能靠猜（读路径展开也要靠这个字段）。
+    """
     return append(EV_EVENT_ADDED, summary=summary, start=start, end=end,
                   location=location, calendar=calendar, ok=ok, detail=detail,
+                  recurrence=recurrence,
                   src_msg_id=src_msg_id, reply_msg_id=reply_msg_id)
 
 

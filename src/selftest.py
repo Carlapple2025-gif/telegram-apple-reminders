@@ -2675,6 +2675,20 @@ check("rrule_text：多星期说得出来",
       _whens.rrule_text("FREQ=WEEKLY;BYDAY=MO,WE,FR") == "每周一、三、五",
       _whens.rrule_text("FREQ=WEEKLY;BYDAY=MO,WE,FR"))
 
+# RRULE → 人话**只有一份实现**（在 whens.rrule_text）。
+# 2026-10-05 差点分叉：intake 里那份说要搬、实际没搬 ——
+# 两份并存的代价是"改了一处、另一处不变"，正是本项目反复踩的坑。
+_intake_src_rt = (SRC / "intake.py").read_text(encoding="utf-8")
+check("RRULE 说人话只有一份实现（intake 里没有第二份）",
+      "_recurrence_text" not in _intake_src_rt.replace(
+          "# 注：这里曾有 `_recurrence_text()`（RRULE → 人话）。2026-10-05 搬到", ""))
+check("回执用的是 whens.rrule_text",
+      "whens.rrule_text(it.recurrence)" in _intake_src_rt)
+# journal 要记下我们提交的规则（否则"这条到底是不是每天"只能靠猜）
+check("journal 记事件时带上 recurrence",
+      "recurrence=it.recurrence" in _intake_src_rt
+      and "recurrence: str = \"\"" in (SRC / "journal.py").read_text(encoding="utf-8"))
+
 # ③ 备忘端：memo.add(text) → Memo.note_id
 _sig_memo = _insp8.signature(_mm8.add)
 _sig_memo.bind("x")

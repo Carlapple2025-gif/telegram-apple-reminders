@@ -159,28 +159,19 @@ def _reply_ok(it: Item, ref_id: str) -> str:
         detail.append(f"{whens.format_when(it.when, all_day_note=False)}"
                       f"（只写进备注，不会到期提醒）")
     if it.recurrence:
-        detail.append(_recurrence_text(it.recurrence))
+        detail.append(whens.rrule_text(it.recurrence))
     if detail:
         line += "\n　　" + " · ".join(detail)
     line += f"\n　　→ 在「{place}」里"
     return line
 
 
-def _recurrence_text(rrule: str) -> str:
-    """把 RRULE 转成人话（回执里别让用户看 FREQ=WEEKLY）。"""
-    if "BYDAY=MO,TU,WE,TH,FR" in rrule:
-        return "每个工作日"
-    if "FREQ=DAILY" in rrule:
-        return "每天"
-    if "FREQ=WEEKLY" in rrule:
-        day = rrule.split("BYDAY=", 1)[1].split(";")[0] if "BYDAY=" in rrule else ""
-        name = {"MO": "一", "TU": "二", "WE": "三", "TH": "四",
-                "FR": "五", "SA": "六", "SU": "日"}.get(day, "")
-        return f"每周{name}" if name else "每周"
-    if "FREQ=MONTHLY" in rrule:
-        dom = rrule.split("BYMONTHDAY=", 1)[1].split(";")[0] if "BYMONTHDAY=" in rrule else ""
-        return f"每月{dom}日" if dom else "每月"
-    return rrule
+
+
+# 注：这里曾有 `_recurrence_text()`（RRULE → 人话）。2026-10-05 搬到
+# `whens.rrule_text()` —— 因为**读取路径也要用它**（重复日程按天出现时
+# 要标出"这条是每天的"），而"RRULE ↔ 人话"属于时间词汇，归 whens。
+# 留着两份的代价是：改了一处、另一处不变（本项目反复踩过的那个坑）。
 
 
 # ── 主流程
@@ -302,7 +293,7 @@ class Intake:
         self._journal("event_added", summary=it.text,
                       start=it.when.start.isoformat(),
                       end=it.when.end.isoformat(),
-                      calendar="", ok=True,
+                      calendar="", ok=True, recurrence=it.recurrence,
                       **({"rolled_to_next_day": True} if it.rolled else {}))
 
         reply = _reply_ok(it, ref)
