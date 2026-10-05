@@ -212,26 +212,30 @@ def events_between(start: dt.date, end: dt.date,
         return _events_between_once(start, end, calendar)
 
 
-def _launch_calendar() -> None:
+def _launch_calendar(wait_up_to: int = 30) -> None:
     """
-    把 Calendar 拉起来（尽力而为，**绝不阻塞**）。
+    把 Calendar 拉起来，并**等它真的能应答**（尽力而为，绝不无限阻塞）。
 
     为什么由代码来做：这是台 7×24 的机器，而"日历读不到"的解药只有
     "让 App 在跑" —— 让人每次手动去开 Calendar，等于这条链路上挂了个
     必须有人守着的开关（ARCHITECTURE 里最反对的那种）。
 
-    ⚠️ 两种办法都试，是因为实测它们**在不同上下文里表现不同**
-    （2026-10-05，借 launchd 身份跑了三次探针）：
+    ⚠️ **光"启动"不够**（2026-10-05 实测）：守护在 Calendar 没运行时读日历，
+    会先 -600 → 启动它 → 再重试 —— 而重试正好撞上**冷启动**
+    （加载数据库 + iCloud 同步），于是 120 秒的超时又被打满，
+    21:30 的日报第二次报"日历超时"（当晚 App 确实被拉起来了，pid 可查）。
+    所以这里等到它**能应答**再回去重试：用最便宜的查询探活，最多等 30 秒。
 
-      · `open -a Calendar` —— 在普通终端里立刻返回 0；
+    ⚠️ 两种启动办法都试，是因为实测它们**在不同上下文里表现不同**：
+
+      · `open -g -a Calendar` —— 在普通终端里立刻返回 0；
         在 launchd 的上下文里**卡住不返回**（探针的步骤标记停在那一行）。
         于是加 `-g`（后台开，不抢焦点）+ **短超时**：卡住就杀掉换下一个。
       · `osascript -e 'tell application "Calendar" to launch'` ——
         走 AppleScript 自己的 launch，守护对 Calendar 本来就有自动化授权。
 
-    两个都失败就静默放弃：调用方会**如实抛错**，回执里写着"日历读不到"。
-    **这一段的"能否真的拉起来"我无法在本机验证完整**（见 CHANGELOG），
-    所以它写成了"失败也不影响如实报错"的形状。
+    最终验证（2026-10-05 19:27，端到端）：`pkill -x Calendar` 退掉 App →
+    发一条 `/list` → 日程段正常显示。所以这条路是通的。
     """
     for cmd in (["/usr/bin/open", "-g", "-a", APP],
                 ["/usr/bin/osascript", "-e",
@@ -241,7 +245,17 @@ def _launch_calendar() -> None:
             break
         except Exception:      # noqa: BLE001
             continue
-    time.sleep(3)              # 给它起来的时间（实测这个量级够）
+
+    # 等它能应答（冷启动十几秒是常态，不是异常）
+    deadline = time.time() + wait_up_to
+    while time.time() < deadline:
+        try:
+            run_applescript(
+                f'tell application "{APP}" to return (count of calendars)',
+                timeout=10)
+            return
+        except Exception:      # noqa: BLE001
+            time.sleep(2)
 
 
 def _events_between_once(start: dt.date, end: dt.date,
@@ -249,14 +263,34 @@ def _events_between_once(start: dt.date, end: dt.date,
     """
     读某段日期内的事件（只读）。`end` 不含当天。
 
-    用 `whose` 过滤会让 AppleScript 自己做日期比较（受区域设置影响），
-    所以改为**把事件取出来、在 Python 里比较** —— 时间判断只在 Python 做，
-    这是本模块的一贯原则。
+    ## 为什么用 `whose` 让日历自己筛（2026-10-05 改）
 
-    ⚠️ 代价是**遍历整个日历**：日历里事件多的时候这一步是秒级的
-    （实测 /list 的日程段要十几秒）。要提速就得回到 `whose`，
-    而那会把日期比较交给 AppleScript —— 那是本模块刻意避开的东西。
-    暂时接受慢，见 docs/TELEGRAM-VOICE.md 里"宁可慢，不要区域设置 bug"。
+    原先的做法是"把整个日历的事件全查出来，再在 Python 里比日期"。
+    事件一多，这一步能慢到**分钟级** —— 21:30 的日报因此超时
+    （上限 120 秒，实测超了；而**同一份读取**在两小时前只要十几秒）。
+    慢的根源是它要读每一个事件的 5 个属性。
+
+    现在把日期条件交给 Calendar（`whose start date ≥ dFrom and …`），
+    只取窗口内的事件。这也是 Apple 自己的 Calendar Scripting Guide
+    列"今天的日程"时给的写法。
+
+    ## 这与本模块"日期判断只在 Python 做"的原则冲突吗
+
+    不冲突，而且正是那条原则的**边界**：它要防的是
+    `date "2026年10月5日 下午2:00:00"` 这种**字符串字面量**
+    （先解析再比较，解析受系统区域设置影响，是"差一天"bug 的来源）。
+
+    这里两个边界日期都是**逐字段构造**的（`_set_date_script`），
+    比较的是两个绝对时间 —— 全程不经过任何字符串解析。
+    写入路径从一开始就是这么构造日期的，读取路径现在与它一致了。
+
+    ⚠️ **已知限制（改前改后都一样）**：重复日程在日历里是**一个**事件对象，
+    `start date` 是它的**首次**发生日。所以 `@每天八点 跑步` 只在
+    首次那天出现，之后既不在 `/list` 里、也不在日报的"明日日程"里。
+    要修得展开重复规则（另一件事，见 docs/PROJECT-STATE.md）。
+
+    ⚠️ 末尾仍保留一次 Python 侧的日期过滤：`whose` 万一被忽略或
+    实现有差异，也不会把范围外的事件混进来（多这一层不花什么代价）。
     """
     cal = calendar or config_calendar()
     scope = (f'calendar {_as_literal(cal)}' if cal else "calendar 1")
@@ -267,7 +301,10 @@ def _events_between_once(start: dt.date, end: dt.date,
         '  set out to ""\n'
         '  set FS to character id 1\n'
         '  set RS to character id 2\n'
-        '  repeat with e in (every event of targetCal)\n'
+        + _set_date_script("dFrom", dt.datetime.combine(start, dt.time(0, 0)))
+        + _set_date_script("dTo", dt.datetime.combine(end, dt.time(0, 0)))
+        + '  repeat with e in (every event of targetCal '
+          'whose start date ≥ dFrom and start date < dTo)\n'
         '    set sd to start date of e\n'
         '    set ed to end date of e\n'
         '    set out to out & (summary of e) & FS '

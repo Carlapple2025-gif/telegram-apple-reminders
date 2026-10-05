@@ -554,24 +554,49 @@ _SHELL_FILES = (sorted((ROOT / "deploy").glob("*.sh"))
                 + sorted((ROOT / "tools").glob("*.sh"))
                 + sorted((ROOT / "tools" / "legacy").glob("*.sh")))
 
-_WHOSE_OK = _re5.compile(r"whose.{0,40}?(is|contains)\b", _re5.S)
+_WHOSE_OK = _re5.compile(
+    r"whose.{0,40}?(?:(?:is|contains)\b|[≥≤<>=≠])", _re5.S)
 _hits5: list[str] = []
 _scanned5 = 0
+
+
+def _docstring_lines(path) -> set:
+    """
+    这个文件里**所有 docstring 占用的行号** —— 用 ast，不数引号。
+
+    2026-10-05 换掉了"数三引号出现次数的奇偶"那套写法：`applecal.py` 的
+    注释里**引用**了三引号（解释 -2741 那个编译错误），于是奇偶被带偏、
+    之后整个文件的"在不在 docstring 里"判反 ——
+    既漏报真代码（一大段被当成 docstring 跳过），又误报 docstring
+    （把讲解 whose 用法的句子当成违规）。
+    看得见的那次误报是运气好；看不见的漏报才是真问题。
+
+    （连这个函数的注释都得绕着三引号写 —— 那正是它的理由。）
+    """
+    _tree = ast.parse(path.read_text(encoding="utf-8"))
+    _out: set = set()
+    _nodes = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+    for _n in ast.walk(_tree):
+        if not isinstance(_n, _nodes):
+            continue
+        _body = getattr(_n, "body", [])
+        if (_body and isinstance(_body[0], ast.Expr)
+                and isinstance(_body[0].value, ast.Constant)
+                and isinstance(_body[0].value.value, str)):
+            _out.update(range(_body[0].lineno, _body[0].end_lineno + 1))
+    return _out
+
+
 for _f in list((ROOT / "src").glob("*.py")) + _SHELL_FILES:
     if _f.name == "selftest.py":
         continue
     _lines5 = _f.read_text(encoding="utf-8").splitlines()
-    # 逐行跟踪"是否在文档字符串里"：docstring 里提到 whose 是在讲事情，
-    # 不是在写 AppleScript。（本项目扫描器的老毛病：把 docstring 里的
-    # 函数名当成调用、把注释里的反例当成代码 —— 这次提前处理掉。）
-    _in_doc = False
+    # docstring 里提到 whose 是在讲事情，不是在写 AppleScript。
+    # 行号由 ast 给出（见 _docstring_lines 的说明：数引号会被注释带偏）。
+    _in_doc = _docstring_lines(_f) if _f.suffix == ".py" else set()
     for _ln, _line in enumerate(_lines5, 1):
         _stripped = _line.lstrip()
-        _quotes = _line.count('"""')
-        if _quotes == 1:
-            _in_doc = not _in_doc
-            continue                      # 定界行本身不算
-        if _in_doc:
+        if _ln in _in_doc:
             continue
         # 跳过注释：注释里会引用反例（"whose id \"...\""），误报过
         if _stripped.startswith("#"):
@@ -590,6 +615,12 @@ for _f in list((ROOT / "src").glob("*.py")) + _SHELL_FILES:
 check(f"{_scanned5} 个 whose 子句都带 is/contains",
       not _hits5 and _scanned5 > 5,
       "；".join(_hits5[:3]) if _hits5 else f"只扫描到 {_scanned5} 个，可能扫描失败")
+
+# ⚠️ 2026-10-05 把上面那条正则放宽了：它原本只认 `is|contains`，
+# 而日历读取现在用 `whose start date ≥ dFrom and start date < dTo`
+# 按日期筛 —— 比较运算符是**同一类合法写法**，缺运算符才会编译失败。
+# 放宽没有削弱它要防的东西（缺运算符的 `whose id "X"` 照样会被抓到）。
+#
 
 # 不能出现重复的 is（批量替换时误伤过，产生 "is is"）
 _dup5: list[str] = []
@@ -2540,6 +2571,26 @@ try:
     check("定时日程：不带 allday 标记", "allday event:true" not in _sc_ad2)
 finally:
     _ac8.run_applescript = _saved_arun
+
+# 不过"正则有运算符"只是形状检查。真正能证明语法对的是**编译一遍**：
+# 把 applecal 实际生成的读取脚本丢给 osacompile。
+_saved_ar1 = _ac8.run_applescript
+try:
+    _gen1: list = []
+    _ac8.run_applescript = lambda src, timeout=120: (_gen1.append(src), "")[1]
+    _ac8._events_between_once(_dt2.date(2026, 10, 6), _dt2.date(2026, 10, 7),
+                               "测试日历")
+    _rc1 = _sp.run(["osacompile", "-o", os.devnull, "-e", _gen1[-1]],
+                   capture_output=True, text=True)
+    check("日历读取脚本（含 whose 日期比较）真的能编译",
+          _rc1.returncode == 0, _rc1.stderr.strip()[:120])
+    check("日历读取：日期比较交给日历自己（不再遍历整个日历）",
+          "whose start date" in _gen1[-1], _gen1[-1][:160])
+    check("日历读取：边界日期逐字段构造（不走 date \"…\" 字面量）",
+          "set year of dFrom to 2026" in _gen1[-1]
+          and 'date "' not in _gen1[-1], _gen1[-1][:160])
+finally:
+    _ac8.run_applescript = _saved_ar1
 
 # ③ 备忘端：memo.add(text) → Memo.note_id
 _sig_memo = _insp8.signature(_mm8.add)
