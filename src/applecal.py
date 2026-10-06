@@ -63,6 +63,26 @@ class CalendarError(Exception):
     """日历操作失败（带可操作的提示）。"""
 
 
+def _note(msg: str) -> None:
+    """
+    把"日历这一路发生了什么"写到 stderr。
+
+    ⚠️ 为什么需要它（2026-10-06）：日报的日历段连续几晚都是"AppleScript 超时"，
+    而**同一台机器、同一个 python3、同样的权限**下，守护读日历却是好的。
+    没有痕迹就只能在"冷启动 / 权限 / 卡死"之间猜 —— 而 10-05 那次没拿到证据
+    就改了读取策略，结果没解决问题。所以先让它说话。
+
+    去向：守护的进 `logs/daemon.err.log`，日报的进 `logs/report.err.log`
+    （launchd 的 StandardErrorPath）。**只在异常或慢时写**，不刷屏。
+
+    ⚠️ 第一次加它时**替换没匹配上、静默没生效**（我写的锚点是
+    `CalendarError(RuntimeError)`，而源码是 `(Exception)`）——
+    于是九处调用全指向一个不存在的名字，而自检没发现（那些行没被执行到）。
+    现在自检里有三条断言**真的走到这些行**（见「日历诊断」一节）。
+    """
+    print(f"[applecal] {msg}", file=sys.stderr, flush=True)
+
+
 # ── AppleScript 通道
 
 def _as_literal(s: str) -> str:
@@ -227,12 +247,25 @@ def _events_in_window(start: dt.date, end: dt.date,
     （`whose recurrence is not missing value` 试过：报 -1700，
      AppleScript 这一层筛不出重复事件，只能在 Python 侧判断。）
     """
+    # ⚠️ 失败/超时也要留痕（2026-10-06 补）：原先只在"读完之后"记耗时，
+    # 于是**最需要证据的那种情况（卡满 120 秒然后超时）一个字都不写** ——
+    # 而日报连续几晚报的正是"AppleScript 超时"。现在失败也写，带耗时。
     _t0 = time.time()
-    direct = _events_between_once(start, end, calendar)
+    try:
+        direct = _events_between_once(start, end, calendar)
+    except Exception as e:              # noqa: BLE001
+        _note(f"窗口查询失败：{type(e).__name__}: {str(e).splitlines()[0][:80]}"
+              f"（耗时 {time.time() - _t0:.0f} 秒，{start}–{end}）")
+        raise
     if time.time() - _t0 > 5:
         _note(f"窗口查询用了 {time.time() - _t0:.0f} 秒（{start}–{end}）")
     _t1 = time.time()
-    masters = _recurring_masters(calendar)
+    try:
+        masters = _recurring_masters(calendar)
+    except Exception as e:              # noqa: BLE001
+        _note(f"重复事件扫描失败：{type(e).__name__}: "
+              f"{str(e).splitlines()[0][:80]}（耗时 {time.time() - _t1:.0f} 秒）")
+        raise
     if time.time() - _t1 > 5:
         _note(f"重复事件扫描用了 {time.time() - _t1:.0f} 秒"
               f"（{len(masters)} 条重复事件）")

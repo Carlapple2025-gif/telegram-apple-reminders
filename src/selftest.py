@@ -2812,6 +2812,69 @@ finally:
     _ac8._events_between_once = _saved_win
     _ac8._recurring_masters = _saved_rec
 
+# ── 日历诊断：让这些行**真的被执行**（2026-10-06）
+#
+# 起因：`_note` 被调用 9 次、却**从未定义成功** —— 一次替换没匹配上、
+# 静默没生效（我写的锚点是 `CalendarError(RuntimeError)`，源码是 `(Exception)`）。
+# 自检当时没发现，因为**那些行从来没被执行到**：-600 路径与超时路径都没测。
+# 下面两条把两条异常路径都跑一遍，并检查 stderr 里真的留下了痕迹。
+import io as _io      # noqa: E402
+import contextlib as _ctx  # noqa: E402
+
+_saved_once2 = _ac8._events_between_once
+_saved_rec2 = _ac8._recurring_masters
+_saved_ar2 = _ac8.run_applescript
+_saved_sub2 = _ac8.subprocess
+try:
+    class _FakeSub:
+        @staticmethod
+        def run(*a, **k):
+            return None
+
+    _ac8.subprocess = _FakeSub        # _launch_calendar 里的两条拉起命令
+    _ac8._recurring_masters = lambda c=None: []
+    _calls2 = {"once": 0, "poll": 0}
+
+    def _once_600(s_, e_, c=None):
+        _calls2["once"] += 1
+        if _calls2["once"] == 1:
+            raise _ac8.CalendarError("-600 應用程式不在執行中")
+        return []
+
+    def _poll(src, timeout=120):
+        _calls2["poll"] += 1
+        return "1"
+
+    _ac8._events_between_once = _once_600
+    _ac8.run_applescript = _poll
+    _buf2 = _io.StringIO()
+    with _ctx.redirect_stderr(_buf2):
+        _out2 = _ac8.events_between(_dt2.date(2026, 10, 7), _dt2.date(2026, 10, 8))
+    check("日历诊断：-600 路径真的跑通（不留 NameError）",
+          _out2 == [] and _calls2["once"] == 2 and _calls2["poll"] >= 1,
+          str(_calls2))
+    _txt2 = _buf2.getvalue()
+    check("日历诊断：-600 时往 stderr 留了痕（没在 / 已就绪）",
+          "正在拉起" in _txt2 and "已就绪" in _txt2, repr(_txt2[:140]))
+
+    # 超时路径：**抛出去**（不许吞）+ 留下带耗时的痕迹
+    _ac8._events_between_once = lambda s_, e_, c=None: (_ for _ in ()).throw(
+        _ac8.CalendarError("AppleScript 超时（日历可能在冷启动，稍后重试）"))
+    _buf3 = _io.StringIO()
+    try:
+        with _ctx.redirect_stderr(_buf3):
+            _ac8._events_in_window(_dt2.date(2026, 10, 7), _dt2.date(2026, 10, 8))
+        check("日历诊断：超时要抛出去（不能被吞）", False, "没抛")
+    except _ac8.CalendarError:
+        check("日历诊断：超时往 stderr 留了带耗时的痕",
+              "窗口查询失败" in _buf3.getvalue()
+              and "耗时" in _buf3.getvalue(), repr(_buf3.getvalue()[:160]))
+finally:
+    _ac8._events_between_once = _saved_once2
+    _ac8._recurring_masters = _saved_rec2
+    _ac8.run_applescript = _saved_ar2
+    _ac8.subprocess = _saved_sub2
+
 # occurs_on：重复规则判据（用户看到"跑步每天都在"全靠它）
 _A5 = _dt2.date(2026, 10, 5)      # 周一
 check("occurs_on：每天", _whens.occurs_on("FREQ=DAILY", _A5, _dt2.date(2026, 11, 1)) is True)
