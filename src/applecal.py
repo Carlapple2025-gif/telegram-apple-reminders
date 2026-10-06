@@ -227,12 +227,20 @@ def _events_in_window(start: dt.date, end: dt.date,
     （`whose recurrence is not missing value` 试过：报 -1700，
      AppleScript 这一层筛不出重复事件，只能在 Python 侧判断。）
     """
+    _t0 = time.time()
     direct = _events_between_once(start, end, calendar)
+    if time.time() - _t0 > 5:
+        _note(f"窗口查询用了 {time.time() - _t0:.0f} 秒（{start}–{end}）")
+    _t1 = time.time()
+    masters = _recurring_masters(calendar)
+    if time.time() - _t1 > 5:
+        _note(f"重复事件扫描用了 {time.time() - _t1:.0f} 秒"
+              f"（{len(masters)} 条重复事件）")
     out = list(direct)
     seen = {(e.uid, e.start.date()) for e in direct}
     days = [start + dt.timedelta(days=i) for i in range((end - start).days)]
 
-    for master in _recurring_masters(calendar):
+    for master in masters:
         anchor = master.start.date()
         for day in days:
             if day <= anchor:
@@ -333,25 +341,32 @@ def _launch_calendar(wait_up_to: int = 30) -> None:
     最终验证（2026-10-05 19:27，端到端）：`pkill -x Calendar` 退掉 App →
     发一条 `/list` → 日程段正常显示。所以这条路是通的。
     """
+    _note("日历没在运行（读操作 -600）→ 正在拉起")
     for cmd in (["/usr/bin/open", "-g", "-a", APP],
                 ["/usr/bin/osascript", "-e",
                  f'tell application "{APP}" to launch']):
         try:
             subprocess.run(cmd, capture_output=True, timeout=8)
             break
-        except Exception:      # noqa: BLE001
+        except Exception as e:      # noqa: BLE001
+            _note(f"拉起命令卡住/失败（{cmd[0].rsplit('/', 1)[-1]}："
+                  f"{type(e).__name__}）→ 换下一种办法")
             continue
 
     # 等它能应答（冷启动十几秒是常态，不是异常）
-    deadline = time.time() + wait_up_to
+    t0 = time.time()
+    deadline = t0 + wait_up_to
     while time.time() < deadline:
         try:
             run_applescript(
                 f'tell application "{APP}" to return (count of calendars)',
                 timeout=10)
+            _note(f"日历已就绪（等了 {time.time() - t0:.0f} 秒）")
             return
-        except Exception:      # noqa: BLE001
+        except Exception as e:      # noqa: BLE001
+            _note(f"还没应答（{type(e).__name__}）…")
             time.sleep(2)
+    _note(f"⚠️ 等了 {wait_up_to} 秒它仍未应答 —— 接下来那次读取多半会超时")
 
 
 def _events_between_once(start: dt.date, end: dt.date,
