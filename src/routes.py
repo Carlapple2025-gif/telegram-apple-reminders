@@ -16,6 +16,8 @@
 | `# 内容` | 备忘（备忘录） | |
 | `@内容` | 日历 | 载荷里必须有可解析的时间，否则**报错不写入** |
 | `- [ ] 内容` | 待办（提醒事项） | |
+| `!内容` | 待办 + **旗标** | 进提醒事项的"已加上旗标" |
+| `!!内容` | 待办 + 旗标 + **高优先级** | 2026-10-07 新增（用户裁决"先跑几天试手感"）|
 | 裸内容 | 待办 | **最高频情况，零符号** |
 
 ## 不做什么（都是刻意的不做）
@@ -26,6 +28,7 @@
 | 追问"这是哪一类" | 追问要跨消息记住东西 → 命中 `ARCHITECTURE.md` §十一 判据 1 |
 | `@` 缺时间时退回当备忘 | 那是**替你改主意**。你说 `@` 就是要进日历 |
 | `@` 缺时间时用默认时刻 | 最坏的一种：静默写入一条错时间的日程 |
+| 从"尽快""重要"这类词猜旗标/优先级 | 与"猜类型"同源。旗标与优先级由 `!` / `!!` **声明** |
 
 `@` 缺时间的处理是**报错并拒绝写入** ——
 与「宁可报错，不可静默」同源：报错是陈述事实，提问是要求你再交互一次。
@@ -58,6 +61,13 @@ class RouteError(ValueError):
 # 教训：**新符号的语义归新模块**，别让它污染 v1 的词表。
 _MEMO_MARKERS = "#＃"
 _EVENT_MARKERS = "@＠"
+# 旗标记号（2026-10-07 新增）：`!` = 旗标，`!!` = 旗标 + 高优先级。
+# 全角 `！` 同样认（与 `#`/`@` 的全角容错一致）。
+_FLAG_MARKERS = "!！"
+# 提醒事项的优先级取值（Apple 字典原话：0 无 / 1–4 高 / 5 中 / 6–9 低；
+# EventKit 里的常量是 None=0 / High=1 / Medium=5 / Low=9）。
+# `!!` 只用到"高"这一档 —— 另外两档等真有需要再加，**先不预造**。
+PRIORITY_HIGH = 1
 # v1 遗留的 `@时段` 前缀（`@中午` / `@下午` …）。
 # 在新语义下 `@` 恒定是日历，所以这里**不做**兼容剥离 ——
 # 但在 `parse.content_fingerprint()` 里做，那里是去重键的入口。
@@ -119,7 +129,7 @@ def route(text: str, base: dt.date | None = None) -> Item:
     if not raw:
         raise RouteError("空消息")
 
-    payload, kind = _split_symbol(raw)
+    payload, kind, flagged, priority = _split_symbol(raw)
 
     # 备忘保留换行，待办/日程的正文必须是单行标题 —— 两者不能共用 clean_text
     body = (_clean_memo_body(payload) if kind is Kind.MEMO
@@ -139,12 +149,13 @@ def route(text: str, base: dt.date | None = None) -> Item:
         stripped = whens.strip_time_phrases(body)
         if stripped:
             body = whens.clean_text(stripped)
-    return Item(kind=kind, text=body, raw=raw, when=when)
+    return Item(kind=kind, text=body, raw=raw, when=when,
+                flagged=flagged, priority=priority)
 
 
-def _split_symbol(raw: str) -> tuple[str, Kind]:
+def _split_symbol(raw: str) -> tuple[str, Kind, bool, int]:
     """
-    把输入拆成 (载荷, 类型)。**这是唯一决定归属的地方。**
+    把输入拆成 (载荷, 类型, 旗标, 优先级)。**这是唯一决定归属的地方。**
 
     顺序说明：`@` 的日历判定排在 v1 遗留的 `@时段` 之前 ——
     否则 `@明天上午九点开会` 会被旧前缀吃掉"明天"，**丢掉日期**。
@@ -154,13 +165,23 @@ def _split_symbol(raw: str) -> tuple[str, Kind]:
     s = raw.strip()
 
     if s[0] in _MEMO_MARKERS:
-        return s[1:].lstrip(), Kind.MEMO
+        return s[1:].lstrip(), Kind.MEMO, False, 0
     if s[0] in _EVENT_MARKERS:
-        return s[1:].lstrip(), Kind.EVENT
+        return s[1:].lstrip(), Kind.EVENT, False, 0
+
+    # `!` / `!!`：旗标；`!!` 再叠一个高优先级（2026-10-07 新增）。
+    if s[0] in _FLAG_MARKERS:
+        n = 2 if (len(s) > 1 and s[1] in _FLAG_MARKERS) else 1
+        payload = s[n:].lstrip()
+        # 剥完后面可能还跟着列表符号（`!- 交电费`）—— 交给 v1 的机械剥除，
+        # 与裸输入的待遇一致。**类型不受它影响**：`!` 已经声明了是待办。
+        payload, _ = parse.strip_leading_marker(payload)
+        return (payload, Kind.TODO, True,
+                PRIORITY_HIGH if n >= 2 else 0)
 
     # 其余交给 v1 的机械剥除（列表符号、复选框），它认得 `-` / `*` / `•`
     payload, v1_kind = parse.strip_leading_marker(s)
-    return payload, _SYMBOL_KIND.get(v1_kind or "", DEFAULT_KIND)
+    return payload, _SYMBOL_KIND.get(v1_kind or "", DEFAULT_KIND), False, 0
 
 
 def _route_event(body: str, raw: str, base: dt.date | None) -> Item:

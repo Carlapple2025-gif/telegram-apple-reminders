@@ -257,8 +257,13 @@ def _make_intake() -> Intake:
 
     calls: list[str] = []
 
-    def _t(text, when=None):
-        calls.append(f"提醒事项 ← {text}")
+    def _t(text, when=None, flagged=False, priority=0):
+        extra = f" @ {when.start}" if when is not None else ""
+        if flagged:
+            extra += " ⚑旗标"
+        if priority:
+            extra += " 高优先级"
+        calls.append(f"提醒事项 ← {text}{extra}")
         return "OFFLINE-TODO"
 
     def _e(summary, start, end, location="", recurrence="", allday=False,

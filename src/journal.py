@@ -169,7 +169,9 @@ def log_input(text: str, source: str = "telegram", msg_id: int | None = None) ->
 
 
 def log_todo(text: str, reminder_id: str = "", ok: bool = True,
-             detail: str = "", src_msg_id: int | None = None,
+             detail: str = "", due: str = "", allday: bool = False,
+             flagged: bool = False, priority: int = 0,
+             src_msg_id: int | None = None,
              reply_msg_id: int | None = None) -> dict:
     """
     记下"我建了一条待办"。
@@ -177,10 +179,16 @@ def log_todo(text: str, reminder_id: str = "", ok: bool = True,
     `reply_msg_id` 是**我发出的那条回执**的 message_id ——
     有了它，用户"回复我的回执"时才能精确定位到这一条（见 resolve_prev）。
     没有它就只能靠"最近一条"猜，而猜身份是本项目踩过四次的坑。
+
+    `due` / `allday` / `flagged` / `priority`（**2026-10-07 补**）＝ 这条待办
+    落成的**原生字段**。为什么不靠读回来答：日报只读
+    name / completed / body / 完成时刻，**不读**到期日与旗标 ——
+    所以"我当时到底设了什么"只有这里记得下来。
     """
     return append(EV_TODO_ADDED, text=text, reminder_id=reminder_id,
-                  ok=ok, detail=detail, src_msg_id=src_msg_id,
-                  reply_msg_id=reply_msg_id)
+                  ok=ok, detail=detail, due=due, allday=allday,
+                  flagged=flagged, priority=priority,
+                  src_msg_id=src_msg_id, reply_msg_id=reply_msg_id)
 
 
 def log_event(summary: str, start: str = "", end: str = "",

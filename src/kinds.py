@@ -15,10 +15,11 @@
 
 **从你写的符号来**，不由代码推断：
 
-    # 内容      → Kind.MEMO
-    @内容      → Kind.EVENT
-    - [ ] 内容  → Kind.TODO
-    裸内容      → Kind.TODO（最高频，零符号）
+    # 内容       → Kind.MEMO
+    @内容       → Kind.EVENT
+    - [ ] 内容   → Kind.TODO
+    裸内容       → Kind.TODO（最高频，零符号）
+    !内容 / !!内容 → Kind.TODO + 旗标（!! 再叠一个高优先级）
 
 见 `parse.strip_leading_marker()`（认符号）与 `routes.py`（决定落点）。
 """
@@ -57,3 +58,9 @@ class Item:
     # 只说了时刻、而该时刻今天已过 → 已顺延到次日。
     # 回执要如实说明，否则用户看到的时间与自己说的对不上会困惑。
     rolled: bool = False
+    # 提醒事项的**原生**组织方式（2026-10-07 起，由行首 `!` / `!!` 声明）：
+    #   旗标 → 进"已加上旗标"；优先级 0 无 / 1 高 / 5 中 / 9 低。
+    # 只有待办用得上（日程与备忘在 Apple 那边没有这两个字段）。
+    # 为什么必须由符号声明：从"尽快""重要"这类词去猜 = 把"猜"请回来。
+    flagged: bool = False
+    priority: int = 0

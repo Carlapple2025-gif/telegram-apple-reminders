@@ -1627,8 +1627,9 @@ class _FakeSinks:
     def __init__(self):
         self.calls = []
 
-    def todo(self, text, when=None):
-        self.calls.append(("todo", text, when))
+    def todo(self, text, when=None, flagged=False, priority=0):
+        # ⚠️ 新参数**追加在末尾**：上面的断言按下标取过前 3 个。
+        self.calls.append(("todo", text, when, flagged, priority))
         return "T-1"
 
     def event(self, summary, start, end, location="", recurrence="",
@@ -1676,28 +1677,66 @@ finally:
 # 现在备注只留时间提示，没给时间就空着。
 _rm_mod = sys.modules.get("reminders") or _load(SRC / "reminders.py")
 _saved_rem_cls = _rm_mod.Reminders
+def _W(start, *, all_day=False, has_date=True, has_time=False):
+    """造一个 whens.When（离线测写入端）。"""
+    return _whens.When(start=start, end=start + _dt2.timedelta(hours=1),
+                       all_day=all_day, has_date=has_date, has_time=has_time)
+
+
 try:
-    _notes: list = []
+    _writes: list = []
 
     class _FakeReminders:
         def verify_list(self):
             pass
 
-        def create(self, name, body=""):
-            _notes.append(body)
+        def create(self, name, body="", due=None, allday_due=False,
+                   remind=False, flagged=False, priority=0):
+            _writes.append(dict(name=name, body=body, due=due,
+                                allday_due=allday_due, remind=remind,
+                                flagged=flagged, priority=priority))
             return type("_R", (), {"id": "RID"})()
 
     _rm_mod.Reminders = _FakeReminders
 
-    _it._real_add_todo("交电费", _dt2.datetime(2026, 10, 5, 0, 0))
-    check("待办备注：只有日期时不写 00:00", _notes[-1] == "10-05", repr(_notes[-1]))
-    _it._real_add_todo("交电费", _dt2.datetime(2026, 10, 5, 14, 0))
-    check("待办备注：真给了时刻就照写",
-          _notes[-1] == "10-05 14:00", repr(_notes[-1]))
+    # ① 有日期 → **原生到期日**；全天走 allday due date（没有时刻可弹）
+    _it._real_add_todo("交电费", _W(_dt2.datetime(2026, 10, 5, 9, 0), all_day=True))
+    _w = _writes[-1]
+    check("待办：有日期 → 写原生到期日",
+          _w["due"] == _dt2.datetime(2026, 10, 5, 9, 0), str(_w))
+    check("待办：全天 → allday due date（不弹）",
+          _w["allday_due"] is True and _w["remind"] is False, str(_w))
+    check("待办：日期进了原生字段，备注就空着", _w["body"] == "", repr(_w["body"]))
+
+    # ② 有日期 + 有时刻 → due + remind me（"该弹就弹"，用户 2026-10-07 裁决）
+    _it._real_add_todo("交电费", _W(_dt2.datetime(2026, 10, 5, 14, 0),
+                                    has_time=True))
+    _w = _writes[-1]
+    check("待办：给了时刻 → 连 remind me date 一起写（到点弹）",
+          _w["due"] == _dt2.datetime(2026, 10, 5, 14, 0)
+          and _w["remind"] is True and _w["allday_due"] is False, str(_w))
+
+    # ③ 只有时刻、没有日期 → 落不成日期，退回备注（信息不丢）
+    _it._real_add_todo("交电费", _W(_dt2.datetime(2026, 10, 5, 14, 0),
+                                    has_date=False, has_time=True))
+    _w = _writes[-1]
+    check("待办：只有时刻 → 不写日期，时间退回备注",
+          _w["due"] is None and _w["body"] == "10-05 14:00", str(_w))
+
+    # ④ 没给时间 → 什么都不写
     _it._real_add_todo("交电费", None)
-    check("待办备注：没给时间就空着", _notes[-1] == "", repr(_notes[-1]))
-    check("待办备注：不再写 pdca: 去重键（v1 遗留）",
-          all("pdca:" not in n for n in _notes), str(_notes))
+    _w = _writes[-1]
+    check("待办：没给时间 → 不写日期也不写备注",
+          _w["due"] is None and _w["body"] == "", str(_w))
+
+    # ⑤ 旗标/优先级透传（行首「!」「!!」）
+    _it._real_add_todo("交电费", None, True, 1)
+    _w = _writes[-1]
+    check("待办：旗标与优先级透传到写入端",
+          _w["flagged"] is True and _w["priority"] == 1, str(_w))
+
+    check("待办：不再写 v1 的去重键",
+          all("pdca:" not in str(w["body"]) for w in _writes), str(_writes))
 finally:
     _rm_mod.Reminders = _saved_rem_cls
 
@@ -1919,6 +1958,17 @@ check("干跑 CLI：回执看得见闹钟", "到点会提醒" in _out11, _out11[
 check("干跑 CLI：干跑行写明了会调用的写入",
       "event(" in _out11 and "闹钟" in _out11, _out11[-200:])
 
+# 待办那一路也要跑 —— 干跑 CLI 里那份 fake_todo 是**第二份实现**，
+# 2026-10-07 就漏过一次（主干加参数它没跟上，而当时自检全绿）。
+_sp11b = _sp5.run([sys.executable, str(SRC / "intake.py"), "--dry",
+                   "!!明天下午两点 交电费"],
+                  capture_output=True, text=True, cwd=str(ROOT))
+_out11b = _sp11b.stdout + _sp11b.stderr
+check("干跑 CLI：待办不报错", "❌" not in _out11b, _out11b[:200])
+check("干跑 CLI：待办看得见旗标与优先级",
+      "旗标" in _out11b and "高优先级" in _out11b, _out11b[:200])
+check("干跑 CLI：待办行写明了会调用的写入", "todo(" in _out11b, _out11b[-200:])
+
 
 section("v4 「整句只是一个时间」的判据（is_bare_time）")
 
@@ -2058,10 +2108,10 @@ _d = _fresh_journal()
 try:
     _i, _f = _new_intake()
     _i.handle("明天交电费", _B)
-    check("intake 把时间传给了待办端",
-          _f.calls[0][2] is not None
-          and _f.calls[0][2].date() == _dt2.date(2026, 10, 4),
-          str(_f.calls[0][2]))
+    _w_arg = _f.calls[0][2]
+    check("intake 把时间传给了待办端（传的是 When，不是裸 datetime）",
+          _w_arg is not None and _w_arg.has_date
+          and _w_arg.start.date() == _dt2.date(2026, 10, 4), str(_w_arg))
 finally:
     _sh2.rmtree(_d, ignore_errors=True)
 
@@ -2164,7 +2214,8 @@ try:
 
     def _make(_wrote=_wrote):
         return _it.Intake(
-            add_todo=lambda t, w=None: (_wrote.append(("todo", t, w)), "T1")[1],
+            add_todo=lambda t, w=None, f=False, p=0: (
+                _wrote.append(("todo", t, w, f, p)), "T1")[1],
             add_event=lambda s, a, b, **k: (
                 _wrote.append(("event", s, a, k.get("recurrence"))), "E1")[1],
             add_memo=lambda t: (_wrote.append(("memo", t)), "M1")[1],
@@ -2306,10 +2357,19 @@ try:
     _i_v6, _f_v6 = _new_intake()
     _o_v6 = _i_v6.handle("明天交电费", _B)
     check("回执：待办也显示时间", "10月" in _o_v6.reply, _o_v6.reply)
-    check("回执：说清时间只进备注、不会到期提醒",
-          "备注" in _o_v6.reply and "到期" in _o_v6.reply, _o_v6.reply)
-    check("回执：待办的时间不说『全天』（它没有到期日）",
-          "全天" not in _o_v6.reply, _o_v6.reply)
+    # 2026-10-07 改判：有日期的待办**落成原生到期日**了 ——
+    # 回执从"只写进备注"改成说清"落成了什么、会不会弹"。
+    check("回执：待办的时间落成原生日期（不再说『只写进备注』）",
+          "不弹提醒" in _o_v6.reply and "备注" not in _o_v6.reply, _o_v6.reply)
+    check("回执：全天待办说清『全天 · 不弹提醒』",
+          "全天" in _o_v6.reply, _o_v6.reply)
+
+    _i_v6t, _f_v6t = _new_intake()
+    _o_v6t = _i_v6t.handle("!!明天下午两点 交电费", _B)
+    check("回执：给了时刻的待办说『到点提醒』",
+          "到点提醒" in _o_v6t.reply, _o_v6t.reply)
+    check("回执：旗标与高优先级也回显",
+          "已加旗标" in _o_v6t.reply and "高优先级" in _o_v6t.reply, _o_v6t.reply)
 
     _i_v6b, _f_v6b = _new_intake()
     _long_v6 = "# " + "这段感慨很长" * 6
@@ -2593,7 +2653,8 @@ _saved_c = (_dm._make_intake, _dm.tg.send, _dm.STATE_FILE, _dm.tg.get_updates,
 try:
     _wrote_c: list = []
     _dm._make_intake = lambda: _it.Intake(
-        add_todo=lambda t, w=None: (_wrote_c.append(("todo", t)), "T")[1],
+        add_todo=lambda t, w=None, f=False, p=0: (
+        _wrote_c.append(("todo", t)), "T")[1],
         add_event=lambda *a, **k: (_wrote_c.append(("event",)), "E")[1],
         add_memo=lambda t: (_wrote_c.append(("memo", t)), "M")[1],
         testing=True)
@@ -2664,6 +2725,131 @@ try:
 except Exception:
     _rem_ok = False
 check("Reminders 可用 config 字典构造", _rem_ok)
+
+
+section("v4 待办的原生字段（2026-10-07：跟随默认列表 + 原生到期日 + 旗标）")
+
+# 为什么单开一节：这一节守的是**用户当天的改判**（见 CHANGELOG 的 2.0.0）：
+#   ① 落点从固定的 PDCA 列表改成**跟随系统默认列表**
+#   ② 待办的时间从"写进备注"改成**原生到期日**（"今天/已编排"两个智能列表靠它）
+#   ③ 新增 `!` / `!!` 声明旗标与高优先级
+# 三件都在"写入那一刻"生效，而失效方式全是**静默的** —— 所以都在这儿钉住。
+
+# ① 列表名：配置为空 → 读系统的 default list（只读属性）
+_rl_saved = _lv.run
+try:
+    _rl_calls: list[str] = []
+
+    def _rl_fake(src, retries=3, backoff=1.5):
+        _rl_calls.append(src)
+        return "原生提醒事项\n"
+
+    _lv.run = _rl_fake
+    check("列表：配置为空 → 跟随系统默认列表",
+          _lv.Reminders({"reminders_list": ""}).list_name == "原生提醒事项")
+    check("列表：读的是字典里的 default list",
+          any("default list" in c for c in _rl_calls), str(_rl_calls[:1]))
+    check("列表：配置写了名字就不去问系统",
+          _lv.Reminders({"reminders_list": "X"}).list_name == "X")
+finally:
+    _lv.run = _rl_saved
+
+# ② create() **实际会执行的那段 AppleScript**（不看源码，看脚本）
+_sv_saved = _lv.run
+try:
+    _scripts: list[str] = []
+    _last = {"allday": False}
+
+    def _cap_run(src, retries=3, backoff=1.5):
+        _scripts.append(src)
+        if "default list" in src:
+            return "默认列表"
+        if "make new reminder" in src:
+            _last["allday"] = "allday due date:" in src
+            return "ok"
+        if "flagged of r" in src:          # 读回校验（_verify_written）
+            tail = "none\n2026,10,7\n" if _last["allday"] else "2026,10,7,14,0\nnone\n"
+            return "true\n1\n" + tail
+        return "ok"
+
+    _lv.run = _cap_run
+    _rc = _lv.Reminders({"reminders_list": "X"})
+    _seq = {"n": 0}
+
+    def _grow():
+        # 第一次叫（before）返回空，之后返回"刚建的那条"
+        _seq["n"] += 1
+        if _seq["n"] == 1:
+            return []
+        return [_lv.Reminder(id="NEW-1", name="x", completed=False, body="", due="")]
+
+    _rc.all_reminders = _grow
+    _rc.create("交电费", due=_dt2.datetime(2026, 10, 7, 14, 0),
+               remind=True, flagged=True, priority=1)
+    _mk = [s for s in _scripts if "make new reminder" in s][-1]
+    check("create：到期日写 due date", "due date:dueDate" in _mk, _mk[:160])
+    check("create：给了时刻就连 remind me date 一起写（到点弹）",
+          "remind me date:dueDate" in _mk, _mk[:160])
+    check("create：旗标进了脚本", "flagged:true" in _mk, _mk[:160])
+    check("create：优先级进了脚本", "priority:1" in _mk, _mk[:160])
+    check("create：日期逐字段构造（不用日期字面量）",
+          "set year of dueDate to 2026" in _mk and 'date "' not in _mk, _mk[:160])
+
+    _scripts.clear()
+    _seq["n"] = 0
+    _rc.create("交电费", due=_dt2.datetime(2026, 10, 7, 9, 0),
+               allday_due=True, flagged=True, priority=1)
+    _mk2 = [s for s in _scripts if "make new reminder" in s][-1]
+    # ⚠️ 不能写 `"due date:dueDate" not in _mk2` —— `allday due date:dueDate`
+    # **含**这个子串，那样写永远红（同一天的第二次子串陷阱：
+    # 上一次是 "display alarm" 撞 "display alarms"）。数出现次数才可靠。
+    check("create：全天 → allday due date（且只写一次日期）",
+          "allday due date:dueDate" in _mk2
+          and _mk2.count("due date:dueDate") == 1, _mk2[:160])
+    check("create：全天不写 remind me date（没有时刻可弹）",
+          "remind me date" not in _mk2, _mk2[:160])
+
+    # 读回校验必须**真的会红** —— 把返回值改成"旗标没生效"再看
+    _scripts.clear()
+    _seq["n"] = 0
+    _lv.run = lambda src, retries=3, backoff=1.5: (
+        _scripts.append(src)
+        or ("默认列表" if "default list" in src else
+            ("ok" if "make new reminder" in src else "false\n1\nnone\nnone\n")))
+    try:
+        _rc.create("交电费", due=_dt2.datetime(2026, 10, 7, 14, 0),
+                   remind=True, flagged=True, priority=1)
+        _verify_red = False
+    except _lv.RemindersError as e:
+        _verify_red = "旗标没写进去" in str(e)
+    check("create：旗标没生效时**真的报错**（不是静默通过）", _verify_red)
+finally:
+    _lv.run = _sv_saved
+
+# ③ journal 记下原生字段 —— 读路径**不返回**到期日与旗标，只有这里记得下来
+_d = _fresh_journal()
+try:
+    _i, _f = _new_intake()
+    _i.handle("!!明天下午两点 交电费", _B)
+    _rec_t = [r for r in _jr.read_day(_jr._today()) if r["event"] == "todo_added"]
+    check("journal：todo_added 记了 due",
+          bool(_rec_t) and _rec_t[-1].get("due") != "", str(_rec_t[-1:]))
+    check("journal：todo_added 记了 flagged / priority",
+          bool(_rec_t) and _rec_t[-1].get("flagged") is True
+          and _rec_t[-1].get("priority") == 1, str(_rec_t[-1:]))
+finally:
+    _sh2.rmtree(_d, ignore_errors=True)
+
+# ④ 符号 `!` / `!!`（2026-10-07 新增，用户裁决"先跑几天试手感"）
+for _txt, _wf, _wp in [("!交电费", True, 0), ("!!交电费", True, 1),
+                       ("！交电费", True, 0), ("！!交电费", True, 1),
+                       ("交电费", False, 0), ("- 交电费", False, 0),
+                       ("!- 交电费", True, 0)]:
+    _it_s = _rt.route(_txt, _B)
+    check(f"符号：{_txt!r} → 旗标={_wf} 优先级={_wp}",
+          _it_s.kind is _K.Kind.TODO and _it_s.flagged is _wf
+          and _it_s.priority == _wp and _it_s.text == "交电费",
+          f"{_it_s.kind} {_it_s.text!r} {_it_s.flagged} {_it_s.priority}")
 
 
 section("v4 对现有模块的调用契约")

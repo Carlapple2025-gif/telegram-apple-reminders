@@ -11,7 +11,15 @@
   1. **写入后必须读回验证** —— AppleScript 会"不报错但没生效"
   2. **判定逻辑留在 Python**，AppleScript 只接受具体 id/字符串 ——
      在 bash/AppleScript 里拼条件表达式反复因引号转义出错
-  3. **所有操作限定在我们自己的列表**（配置里指定），不碰用户其它列表
+  3. **所有操作限定在一个列表里**（配置指定，或**系统的默认列表**），
+     不碰你其它列表
+  4. **写入后连字段一起读回**（旗标 / 优先级 / 到期日都要确认）——
+     这里失效是**静默的**：你看不到旗标、进不了"已编排"，
+     只会以为"我明明设了"
+
+⚠️ **列表名**（2026-10-07 起）：`config.json` 的 `reminders_list` 若为**空**，
+就跟随提醒事项里的**默认列表**（字典里 `default list` 是只读属性，读得到）。
+原先固定写 `PDCA` —— 那是 v1 遗留的列表，已弃用。
 """
 
 from __future__ import annotations
@@ -51,9 +59,46 @@ def _parse_completion(raw: str) -> dt.datetime | None:
         return None
 
 
+def _parse_due(raw: str) -> dt.datetime | None:
+    """
+    解析读回的到期日。AppleScript 那边按"年,月,日[,时,分]"回传，
+    解析不出来返回 None（调用方据此判定"没写进去"）。
+    """
+    s = (raw or "").strip()
+    if not s or s.lower() == "none":
+        return None
+    parts = [p.strip() for p in s.split(",")]
+    try:
+        y, mo, d = (int(p) for p in parts[:3])
+        h = int(parts[3]) if len(parts) > 3 else 0
+        mi = int(parts[4]) if len(parts) > 4 else 0
+        return dt.datetime(y, mo, d, h, mi)
+    except (ValueError, TypeError, IndexError):
+        return None
+
+
 def lit(s: str) -> str:
     """转成 AppleScript 字符串字面量。反斜杠必须最先转义。"""
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _date_script(var: str, when: dt.datetime) -> str:
+    """
+    生成"逐字段构造日期"的 AppleScript 片段。
+
+    ⚠️ **不用日期字面量**（`date "2026年10月7日 下午2:00:00"`）：那种写法
+    要先解析字符串，而解析受系统区域设置影响 —— 换台机器/改个语言就可能差一天，
+    且这类 bug 极难发现（`applecal.py` 顶部有完整说明，这里是同一条规矩）。
+    逐字段赋值全程不经过任何字符串解析。
+    """
+    return (
+        f'  set {var} to current date\n'
+        f'  set year of {var} to {when.year}\n'
+        f'  set month of {var} to {when.month}\n'
+        f'  set day of {var} to {when.day}\n'
+        f'  set hours of {var} to {when.hour}\n'
+        f'  set minutes of {var} to {when.minute}\n'
+        f'  set seconds of {var} to 0\n')
 
 
 # AppleEvent 超时（-1712）值得重试。原因很实际：launchd 在早上 07:00 触发时，
@@ -116,7 +161,8 @@ class Reminders:
     """
     限定在某个列表内的提醒事项访问。
 
-    列表名由 config.json 的 reminders_list 指定；不存在时会**明确报错**
+    列表名来自 `config.json` 的 `reminders_list`；**为空时跟随系统的默认列表**
+    （读字典里的 `default list`，只读属性）。列表不存在时会**明确报错**，
     而不是默默用别的列表 —— 写错列表会让待办混进用户真实数据。
     """
 
@@ -129,7 +175,31 @@ class Reminders:
                     "请先运行：bash deploy/setup-v4.sh --apply")
             config = json.loads(p.read_text(encoding="utf-8"))
         self.config = config
-        self.list_name = config.get("reminders_list", "PDCA")
+        # 列表名的解析**推迟到第一次用到**（见 list_name）：
+        # 空 = 跟随系统的默认列表（2026-10-07 起；PDCA 是 v1 遗留，已弃用）。
+        self._list_cfg = (config.get("reminders_list") or "").strip()
+        self._list_resolved: str | None = None
+
+    @property
+    def list_name(self) -> str:
+        """
+        要操作的列表名。
+
+        配置里写了就用它；**空的就跟随提醒事项的默认列表** ——
+        这样"换默认列表"只用在提醒事项设置里改一次，
+        项目不用跟着改配置（也就不会过期）。
+        """
+        if self._list_cfg:
+            return self._list_cfg
+        if self._list_resolved is None:
+            name = run('tell application "Reminders" to get name of default list')
+            name = (name or "").strip()
+            if not name:
+                raise RemindersError(
+                    "提醒事项没有默认列表（default list 读回空）——"
+                    "请在提醒事项里指定一个默认列表")
+            self._list_resolved = name
+        return self._list_resolved
 
     # ── 列表
 
@@ -274,28 +344,130 @@ class Reminders:
         except ValueError:
             return 0
 
-    def create(self, name: str, body: str = "", due: str | None = None) -> Reminder:
+    def create(self, name: str, body: str = "",
+               due: dt.datetime | None = None, allday_due: bool = False,
+               remind: bool = False, flagged: bool = False,
+               priority: int = 0) -> Reminder:
         """
-        新建条目。`due` 用 AppleScript 的相对时间表达式（如 "1 * days"）。
+        新建条目。**到期日是绝对时刻**（`due`），逐字段构造，不走日期字面量。
 
-        读回验证用 **id 差集**，不按名字 —— 按名字可能撞车（notes.py 的教训）。
+        | 参数组合 | 落成什么 | 到点会弹吗 |
+        |---|---|---|
+        | `due=…` | `due date` | 否 |
+        | `due=…, remind=True` | `due date` + `remind me date` | ✅ 弹 |
+        | `due=…, allday_due=True` | `allday due date`（只有日期）| 否（没有时刻）|
+        | `due=None` | 不写任何日期 | 否 |
+
+        `flagged` / `priority` 是提醒事项**原生**的组织方式（旗标进"已加上旗标"；
+        优先级 0 无 / 1 高 / 5 中 / 9 低）。要它们，是因为用户按提醒事项**自己的
+        智能列表**（今天 / 已编排 / 已加上旗标）管待办 —— 那些列表显示的正是这些字段。
+
+        读回验证分两层（2026-10-07 加第二层）：
+          ① id 差集 —— 不按名字（按名字可能撞车，notes.py 的教训）
+          ② **按 id 读回我们写的那几个字段** —— AppleScript 会"不报错但没生效"，
+             而这里失效是**静默的**：你看不到旗标、进不了"已编排"，
+             只会以为"我明明设了"。
         """
         before = {r.id for r in self.all_reminders()}
-        due_clause = f", due date:(current date) + {due}" if due else ""
+
+        date_lines = ""
+        props = [f'name:{lit(name)}', f'body:{lit(body or "")}']
+        if due is not None:
+            d = due.replace(second=0, microsecond=0)
+            if allday_due:
+                date_lines += _date_script("dueDate", d.replace(hour=0, minute=0))
+                props.append("allday due date:dueDate")
+            else:
+                date_lines += _date_script("dueDate", d)
+                props.append("due date:dueDate")
+                if remind:
+                    props.append("remind me date:dueDate")
+        if flagged:
+            props.append("flagged:true")
+        if priority:
+            props.append(f"priority:{int(priority)}")
+
         run(
             'tell application "Reminders"\n'
             f'  set L to list {lit(self.list_name)}\n'
-            f'  make new reminder at L with properties '
-            f'{{name:{lit(name)}, body:{lit(body)}{due_clause}}}\n'
+            + date_lines
+            + f'  make new reminder at L with properties {{{", ".join(props)}}}\n'
             '  return "ok"\n'
             'end tell'
         )
+
         fresh = [r for r in self.all_reminders() if r.id not in before]
         if not fresh:
             raise RemindersError(
                 f"新建「{name}」后 id 集合没有新增 —— 写入未生效。"
             )
-        return fresh[0]
+        new = fresh[0]
+        self._verify_written(new.id, due=due, allday_due=allday_due,
+                             flagged=flagged, priority=priority)
+        return new
+
+    def _verify_written(self, reminder_id: str, *, due: dt.datetime | None,
+                        allday_due: bool, flagged: bool,
+                        priority: int) -> None:
+        """
+        按 id 读回刚写的那条，确认**我们要求的字段真的生效了**。
+
+        只查"我们写过的东西" —— 这条规矩让读回保持廉价（一次 AppleScript、
+        只读 4 个属性），同时把"静默失效"挡在写入那一刻，而不是等用户
+        第二天发现"旗标怎么没打上"。
+        """
+        out = run(
+            'tell application "Reminders"\n'
+            f'  set hits to (every reminder whose id is {lit(reminder_id)})\n'
+            '  if (count of hits) is 0 then return "NOTFOUND"\n'
+            '  set r to item 1 of hits\n'
+            '  set out to (flagged of r as string) & linefeed\n'
+            '  set out to out & (priority of r as string) & linefeed\n'
+            '  set dd to (due date of r)\n'
+            '  if dd is missing value then\n'
+            '    set out to out & "none" & linefeed\n'
+            '  else\n'
+            '    set out to out & (year of dd as integer) & "," & '
+            '(month of dd as integer) & "," & (day of dd) & "," & '
+            '(hours of dd) & "," & (minutes of dd) & linefeed\n'
+            '  end if\n'
+            '  set ad to (allday due date of r)\n'
+            '  if ad is missing value then\n'
+            '    set out to out & "none" & linefeed\n'
+            '  else\n'
+            '    set out to out & (year of ad as integer) & "," & '
+            '(month of ad as integer) & "," & (day of ad) & linefeed\n'
+            '  end if\n'
+            '  return out\n'
+            'end tell'
+        )
+        if out.strip() == "NOTFOUND":
+            raise RemindersError(f"写入后按 id 找不到条目 {reminder_id}")
+        got = out.splitlines()
+        if len(got) < 4:
+            raise RemindersError(f"读回字段格式异常：{out!r}")
+        got_flagged = got[0].strip().lower() == "true"
+        try:
+            got_priority = int(got[1].strip())
+        except ValueError:
+            got_priority = -1
+        if got_flagged != bool(flagged):
+            raise RemindersError(
+                f"旗标没写进去：要求 {flagged}，读回 {got_flagged}（{reminder_id}）")
+        if got_priority != int(priority):
+            raise RemindersError(
+                f"优先级没写进去：要求 {priority}，读回 {got_priority}（{reminder_id}）")
+        if due is not None:
+            want = due.replace(second=0, microsecond=0)
+            raw = got[3].strip() if allday_due else got[2].strip()
+            got_d = _parse_due(raw)
+            if got_d is None:
+                raise RemindersError(
+                    f"到期日没写进去：要求 {want}，读回 {raw!r}（{reminder_id}）")
+            same = (got_d.date() == want.date() if allday_due else got_d == want)
+            if not same:
+                raise RemindersError(
+                    f"到期日不一致：要求 {want}，读回 {got_d}（{reminder_id}）")
 
     def set_completed(self, reminder_id: str, completed: bool = True) -> Reminder:
         """设置完成状态，并读回验证。"""
@@ -398,7 +570,8 @@ def key_of(reminder: Reminder) -> str | None:
 def main() -> int:
     import argparse
 
-    ap = argparse.ArgumentParser(description="提醒事项访问（限定 PDCA 列表）")
+    ap = argparse.ArgumentParser(
+        description="提醒事项访问（限定一个列表：配置指定，或系统的默认列表）")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("verify", help="确认列表存在并列出条数")
     sub.add_parser("list", help="列出该列表全部条目（含完成状态）")

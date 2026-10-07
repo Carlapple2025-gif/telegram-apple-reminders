@@ -56,8 +56,14 @@ from routes import RouteError
 # 符合签名的假实现，而生产代码不需要知道具体类型。
 
 class TodoSink(Protocol):
-    def __call__(self, text: str, when: dt.datetime | None = None) -> str:
-        """新建一条待办，返回它的 id。"""
+    def __call__(self, text: str, when: whens.When | None = None,
+                 flagged: bool = False, priority: int = 0) -> str:
+        """
+        新建一条待办，返回它的 id。
+
+        `when` 是**解析好的时间对象**（不是 datetime）：由写入端决定它能落成
+        什么 —— 有日期的落成原生到期日，只有时刻的退回备注（见 `_real_add_todo`）。
+        """
         ...
 
 
@@ -171,10 +177,16 @@ def _reply_ok(it: Item, ref_id: str) -> str:
     if it.kind is Kind.EVENT and it.when is not None:
         detail.append(whens.format_when(it.when))
     elif it.kind is Kind.TODO and it.when is not None:
-        # 待办**不设到期日**（见 _real_add_todo）：时间只写进备注。
-        # 所以必须把这件事说出来 —— 否则"10月5日 周一"看起来像会到期通知。
-        detail.append(f"{whens.format_when(it.when, all_day_note=False)}"
-                      f"（只写进备注，不会到期提醒）")
+        # 待办的时间现在**多会落成原生到期日**（2026-10-07 起）——
+        # 回执必须说清它落成了什么、会不会弹（"写进去了"≠"会响"）。
+        _w = whens.format_when(it.when, all_day_note=False)
+        if not it.when.has_date:
+            # 只有时刻、没有日期 → 落不成日期，仍写进备注
+            detail.append(f"{_w}（只写进备注，不会到期提醒）")
+        elif it.when.all_day:
+            detail.append(f"{_w}（全天 · 不弹提醒）")
+        else:
+            detail.append(f"{_w}（到点提醒）")
     if it.recurrence:
         detail.append(whens.rrule_text(it.recurrence))
     if it.kind is Kind.EVENT and _alarm_for(it):
@@ -182,6 +194,10 @@ def _reply_ok(it: Item, ref_id: str) -> str:
         # 回执必须说清这次会不会响 —— 与待办那句"不会到期提醒"对称；
         # 2026-10-07 的真实困惑就是"写进去了"但到点不响、而回执一个字没提。
         detail.append("到点会提醒")
+    if it.kind is Kind.TODO and it.flagged:
+        # 旗标/优先级是提醒事项**原生**的字段（旗标进"已加上旗标"）。
+        # 必须回显：否则它只存在于 App 里，你在 Telegram 这边看不到自己设过。
+        detail.append("已加旗标" + (" · 高优先级" if it.priority else ""))
     if detail:
         line += "\n　　" + " · ".join(detail)
     line += f"\n　　→ 在「{place}」里"
@@ -285,15 +301,19 @@ class Intake:
     # ── 三条写入路径
 
     def _do_todo(self, it: Item) -> Outcome:
-        # 待办可以带时间（"明天交电费"），但**归属仍是提醒事项** ——
-        # 时间不改变归属，只是"什么时候做"的提示。
+        # 待办可以带时间（"明天交电费"）—— 而**有日期的会落成原生到期日**
+        # （2026-10-07 用户裁决），这样提醒事项自己的智能列表
+        # （今天 / 已编排 / 已加上旗标）才有东西可显示。
+        # 只有时刻、没有日期的落不成日期，退回备注（见 _real_add_todo）。
         #
-        # 刻意**不设到期日**：给每条待办都设 due 会制造假紧迫感
-        # （到期弹通知、变红），而用户要的是"记下来别忘了"，不是催命。
-        # 时间由提醒事项的备注携带（见 _real_add_todo）。
-        due = it.when.start if (it.when and it.when.has_date) else None
-        ref = self.add_todo(it.text, due)
-        self._journal("todo_added", text=it.text, reminder_id=ref, ok=True)
+        # 这条决定**取代**了 2026-10-05 的"不设到期日"（当时理由是
+        # "给每条都设 due 会制造假紧迫感"）；改判见 CHANGELOG 的 2.0.0 一节。
+        ref = self.add_todo(it.text, it.when, it.flagged, it.priority)
+        self._journal("todo_added", text=it.text, reminder_id=ref, ok=True,
+                      due=(it.when.start.isoformat()
+                           if (it.when and it.when.has_date) else ""),
+                      allday=bool(it.when and it.when.all_day),
+                      flagged=it.flagged, priority=it.priority)
         return Outcome(ok=True, kind=Kind.TODO, text=it.text,
                        reply=_reply_ok(it, ref), ref_id=ref)
 
@@ -364,13 +384,21 @@ class Intake:
 
 # ── 真实写入端（生产路径）
 
-def _real_add_todo(text: str, when: dt.datetime | None = None) -> str:
+def _real_add_todo(text: str, when: whens.When | None = None,
+                   flagged: bool = False, priority: int = 0) -> str:
     """
     写进提醒事项。
 
-    注意：**不设到期日**。给每条待办都设 due 会制造假紧迫感
-    （到期就弹通知），而用户要的是"记下来别忘了"，不是催命。
-    时间信息留在提醒事项的备注里。
+    **到期日是原生的**（2026-10-07 起，用户裁决）：
+    有日期的落成 `due date`；给了具体时刻的**连带** `remind me date`
+    （"该弹就弹"）；只有日期的落成 `allday due date`。这样提醒事项**自己的**
+    智能列表（今天 / 已编排 / 已加上旗标）才有东西可显示 —— 那正是你要的用法。
+
+    ⚠️ **只有时刻、没有日期**（"交电费 8:35"）落不成日期，退回旧办法：
+    时间写进备注（信息不丢），回执也照实说"只写进备注"。
+
+    ⚠️ 这条**取代**了 2026-10-05 的"不设到期日"（当时理由是"给每条都设 due
+    会制造假紧迫感"）。改判的理由与证据见 CHANGELOG 的 2.0.0 一节。
 
     ## 备注里**不再写去重键**（2026-10-05 改，用户提出）
 
@@ -391,13 +419,21 @@ def _real_add_todo(text: str, when: dt.datetime | None = None) -> str:
     import reminders
     rem = reminders.Reminders()
     rem.verify_list()
+
+    due = when.start if (when is not None and when.has_date) else None
+    allday = bool(when is not None and when.all_day)
+    # "该弹就弹"（用户 2026-10-07 裁决）：给了**具体时刻**才写 remind me date；
+    # 全天的没有时刻可弹，只落到"今天 / 已编排"。
+    remind = bool(due is not None and not allday)
     body = ""
-    if when is not None:
-        # 只有日期时（时刻被归零）**不要**写 "00:00" ——
-        # 那看起来像"半夜有安排"。全天/只给日期 → 只写日期。
-        body = (when.strftime("%m-%d") if when.time() == dt.time(0, 0)
-                else when.strftime("%m-%d %H:%M"))
-    r = rem.create(name=text, body=body)
+    if due is None and when is not None:
+        # 只有时刻、没有日期 → 落不成原生日期，退回备注（信息不丢）。
+        # 时刻被归零时**不要**写 "00:00" —— 那看起来像"半夜有安排"。
+        body = (when.start.strftime("%m-%d")
+                if when.start.time() == dt.time(0, 0)
+                else when.start.strftime("%m-%d %H:%M"))
+    r = rem.create(name=text, body=body, due=due, allday_due=allday,
+                   remind=remind, flagged=flagged, priority=priority)
     return getattr(r, "id", "") or ""
 
 
@@ -434,8 +470,14 @@ def main() -> int:
         # 干跑：用假写入端，验证分类与回执文案
         written: list[str] = []
 
-        def fake_todo(text, when=None):
-            written.append(f"todo({text!r}, when={when})")
+        def fake_todo(text, when=None, flagged=False, priority=0):
+            # ⚠️ 这是**第二份假写入端**（另一份在 daemon 的离线模式里）。
+            # 主干加参数时两份都要改 —— 2026-10-07 就漏过一次，
+            # 而当时自检全绿（它只测了注入的那一份）。现在有断言守着。
+            written.append(
+                f"todo({text!r}, when={when}"
+                f"{', 旗标' if flagged else ''}"
+                f"{', 高优先级' if priority else ''})")
             return "FAKE-TODO"
 
         def fake_event(summary, start, end, location="", recurrence="",

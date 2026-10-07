@@ -56,6 +56,28 @@ completion date, due date, allday due date, remind me date, priority, flagged
 里"周期性事务放日历"那条结论的**唯一依据**。
 （`remind me date` 是有的：**单次**提醒时间能设，重复不能。）
 
+**13 个属性里只有 4 个只读**（`id` / `container` / `creation date` / `modification date`），
+其余**全部可写**。常用的那几个，连 Apple 自己的说明一起抄在这里：
+
+| 字段 | 类型 | Apple 字典里的原话 / 取值 |
+|---|---|---|
+| `due date` | date | "will set **both date and time**" |
+| `allday due date` | date | "will **only set a date**" |
+| `remind me date` | date | "The remind date of the reminder" —— **这个是"到点弹"** |
+| `priority` | integer | "0: 无 / **1–4: 高** / 5: 中 / 6–9: 低"（RFC 5545；EventKit 常量 `High=1 / Medium=5 / Low=9`）|
+| `flagged` | boolean | "Whether the reminder is flagged" |
+
+**还有两个可读的全局属性**（在 application 类上，不在 reminder 上）：
+
+| 属性 | 用途 |
+|---|---|
+| `default list` | **系统的默认列表** —— 项目现在跟随它，不用把列表名写进配置 |
+| `default account` | 默认账户（本项目没用）|
+
+**"已编排"不是字段**：它是提醒事项的**智能列表**（Apple 英文叫 Scheduled），
+显示的正是**有日期**的条目 —— 所以它不是"设"出来的，是**设了日期之后自动进去的**。
+同理"今天"= 到期日落在今天，"已加上旗标"= `flagged` 为真。
+
 ### 2.2 数据模型（EventKit 层）—— 解释"为什么是这个形状"
 
 `EKEvent` 和 `EKReminder` 是**兄弟**，都继承 `EKCalendarItem`：
@@ -117,10 +139,10 @@ grep -o '@property[^;]*' "$SDK"/EKCalendarItem.h "$SDK"/EKEvent.h "$SDK"/EKRemin
 
 ## 四、容易误会的地方（都是真实踩过的）
 
-1. **"提醒事项加了日期，日历就能看到"** —— 对，但**本项目建的待办刻意不设到期日**
-   （时间只写进备注，见 [`USER-GUIDE.md`](USER-GUIDE.md#L210-L211)）。
-   所以**本项目的待办不会出现在日历上**；在日历里看到的带日期待办，
-   都是手动设过到期日的。
+1. **"提醒事项加了日期，日历就能看到"** —— 对，而且**2026-10-07 起本项目的待办
+   也会出现在日历上**了：待办的时间从"写进备注"改成写原生 `due date`
+   （见 [`CHANGELOG.md`](../CHANGELOG.md) 的 2.0.0 一节）。
+   在那之前它确实不会出现 —— 旧代码刻意不设到期日。
 2. **"写进日历就会提醒我"** —— 分两种：**重复**日程会（2026-10-07 起带闹钟），
    **一次性**日程不会（用户裁决：只给重复的加）。日程本身只是"某时间点发生的事"，
    **没有闹钟就不会弹**（§2.3）。
