@@ -1,0 +1,143 @@
+# Apple 侧事实（日历 / 提醒事项）
+
+> **用途**：回答"这件事在 Apple 这边**能不能做**、凭什么"。
+> 每条都带**可复核的证据**（哪个文件、哪条命令）——
+> 这里记的不是设计选择，是**平台约束**：设计选择会变，平台约束不会。
+>
+> **本文不是设计文档。** 拿到这些事实之后**怎么用**，是
+> [`ARCHITECTURE.md`](ARCHITECTURE.md) 的事；本文只负责"事实 + 证据 + 复核方法"。
+>
+> 落笔 **2026-10-07**，核对环境 **macOS 27.0.1（build 26A434）**。
+> ⚠️ **平台事实带版本**：换大版本、或升级后行为与本文不符，
+> **先跑一遍 §二 的命令再改结论** —— 不要凭印象改。
+
+---
+
+## 一、一句话
+
+**日历和提醒事项不是"同一份数据的两个视图"，而是同一个库里两种不同的对象。**
+
+- 日历会把**带日期**的提醒事项**画**在格子上（Apple 叫 Scheduled Reminders）—— **只读叠加**；
+- 提醒事项**看不到**日历事件（没有这条通道，也没有这个入口）；
+- 这条单行道是 2012 年把 to-do 从日历拆出去、变成独立的"提醒事项"App 时定下的。
+
+---
+
+## 二、证据（每条都能自己复核）
+
+### 2.1 脚本字典（AppleScript 层）—— 本项目实际依赖的就是这一层
+
+两个 App 各自的字典文件就是权威：
+
+| 查什么 | 命令 |
+|---|---|
+| 日历有哪些对象类型 | `grep -o '<class name="[^"]*"' /System/Applications/Calendar.app/Contents/Resources/iCal.sdef` |
+| 提醒事项有哪些对象 / 属性 | 同上，路径换成 `/System/Applications/Reminders.app/Contents/Resources/Reminders.sdef` |
+
+**日历（`iCal.sdef`）的全部对象类型**：
+
+```
+attendee · calendar · display alarm · event · mail alarm · open file alarm · sound alarm
+```
+
+→ **没有 to-do 这一类。** 日历里根本没有一个"待办对象"可以承接数据；
+它显示提醒事项是**读出来画一遍**，不是同步。
+
+**提醒事项（`Reminders.sdef`）**：对象类型只有 `account · list · reminder`，
+而 `reminder` 的**全部**属性是：
+
+```
+name, id, container, creation date, modification date, body, completed,
+completion date, due date, allday due date, remind me date, priority, flagged
+```
+
+→ **没有 recurrence。** 所以**脚本建不出重复提醒** —— 这就是
+[`whens.py`](../src/whens.py#L588-L594) 与 [`USER-GUIDE.md`](USER-GUIDE.md#L209)
+里"周期性事务放日历"那条结论的**唯一依据**。
+（`remind me date` 是有的：**单次**提醒时间能设，重复不能。）
+
+### 2.2 数据模型（EventKit 层）—— 解释"为什么是这个形状"
+
+`EKEvent` 和 `EKReminder` 是**兄弟**，都继承 `EKCalendarItem`：
+
+| 类 | 字段 |
+|---|---|
+| `EKCalendarItem`（基类） | title、location、notes、URL、timeZone、**alarms**、**recurrenceRules**、attendees |
+| `EKEvent` 另加 | startDate、endDate、allDay、status、availability、occurrenceDate |
+| `EKReminder` 另加 | **dueDateComponents**、**completed**、completionDate、priority |
+
+复核：
+
+```bash
+SDK=$(xcrun --show-sdk-path)/System/Library/Frameworks/EventKit.framework/Headers
+grep -o '@property[^;]*' "$SDK"/EKCalendarItem.h "$SDK"/EKEvent.h "$SDK"/EKReminder.h
+```
+
+两条**只能从这张表**得出的推论：
+
+1. **"提醒事项不能重复"不是它的天生缺陷。** 基类把 `recurrenceRules` 给了两者，
+   缺的是**脚本层的暴露**（§2.1）。所以本项目的结论**只依赖 §2.1** ——
+   哪天 Apple 把 recurrence 加进 `Reminders.sdef`，这条约束就消失了，
+   而 §2.1 的证据会立刻显示出来。
+   （提醒事项**界面**里有没有"重复"设置：本次**没有取到界面侧证据**，故不下结论。）
+2. **"日程不能打钩"是模型决定的。** `EKEvent` 里**没有任何完成态字段** ——
+   "日历上看得见 + 能打钩"这种条目，在 Apple 的模型里**没有对应物**。
+
+### 2.3 日历事件的闹钟：可以做，但本项目没做
+
+`iCal.sdef` 里 `event` 有元素 `display alarm` / `sound alarm` / `mail alarm`，
+属性 `trigger interval`（相对事件的分钟数，负数 = 提前）与 `trigger date`（绝对时刻）。
+
+→ **给日程加闹钟在技术上可行**（`make new display alarm …`）。
+
+⚠️ **本项目怎么用它**（**2026-10-07 起**）：`@` + **重复规则**的日程会显式带一个
+`display alarm` —— 定时日程在**开始时**（`trigger interval:0`），
+全天日程在当天 **09:00**（`ALLDAY_ALARM_MINUTES = 540`；给 0 会**半夜弹**，
+因为全天事件的"事件时刻"是当天 00:00）。一次性日程**不带**（用户裁决：只给重复的加）。
+
+在那之前的现状是 **0 命中**：写进去的日程到点不响，而回执一个字都没提 ——
+用户只能靠"第二天早上有没有响"来猜。**"不响"不会报错，所以它是静默失效**；
+现在挡住它的有两样：回执那句"到点会提醒"，以及自检里
+"真的调一次 `add()`、再看它生成的脚本"那条断言。
+
+---
+
+## 三、由这些事实得到的"能不能"清单
+
+| 你要的 | 能不能 | 依据 |
+|---|---|---|
+| 待办有"做完 / 没做完" | ✅ 只有提醒事项有 | §2.2 `completed` |
+| 重复（每天 / 每周） | ✅ 只有日历有（**脚本层**） | §2.1 |
+| 到点弹提醒 | ✅ **单次**两边都能设；**重复**只有日历（重复 + 闹钟） | §2.1 / §2.3 |
+| 日历上看到 + 能打钩 | ❌ 模型里没有对应物 | §2.2 |
+| 日历事件自动变成待办 | ❌ 没有这条通道（历史被拆掉了） | §2.1 / §一 |
+| 提醒事项自动出现在日历 | ⚠️ 仅当**有到期日**时才画出来 | §四 第 1 条 |
+
+---
+
+## 四、容易误会的地方（都是真实踩过的）
+
+1. **"提醒事项加了日期，日历就能看到"** —— 对，但**本项目建的待办刻意不设到期日**
+   （时间只写进备注，见 [`USER-GUIDE.md`](USER-GUIDE.md#L210-L211)）。
+   所以**本项目的待办不会出现在日历上**；在日历里看到的带日期待办，
+   都是手动设过到期日的。
+2. **"写进日历就会提醒我"** —— 分两种：**重复**日程会（2026-10-07 起带闹钟），
+   **一次性**日程不会（用户裁决：只给重复的加）。日程本身只是"某时间点发生的事"，
+   **没有闹钟就不会弹**（§2.3）。
+3. **"提醒事项也能重复吧"** —— 模型和界面另说，**脚本接口不能**（§2.1），
+   而本项目只能走脚本。
+4. **2026-10-07 的实例**：`Check my to-dos and plan out the day.每天8:35`
+   没打符号 → 按默认落成**待办**，回执如实写了"只写进备注，不会到期提醒"；
+   同一句打上 `@` → `FREQ=DAILY` 的日历事件。
+   **差别只在行首那个符号，不在"每天8:35"这几个字。**
+
+---
+
+## 五、什么时候该回来改这份文档
+
+- macOS 换大版本之后（本文事实是在 **27.0.1** 上核对的）；
+- **想给 Apple 侧加能力之前** —— 先跑一遍 §二 的命令，别凭印象；
+- `Reminders.sdef` 里出现 `recurrence` —— 那意味着 §三 的第三行要改。
+
+**改的是结论，别改证据。** 证据是命令的输出；如果它变了，把新输出贴进来、
+写清哪天哪版，再改结论 —— 这样下一个人能看出"是平台变了"还是"我们记错了"。

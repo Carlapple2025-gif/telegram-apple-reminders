@@ -64,7 +64,7 @@ class TodoSink(Protocol):
 class EventSink(Protocol):
     def __call__(self, summary: str, start: dt.datetime, end: dt.datetime,
                  location: str = "", recurrence: str = "",
-                 allday: bool = False) -> str:
+                 allday: bool = False, alarm: bool = False) -> str:
         """新建一条日程，返回它的 uid。"""
         ...
 
@@ -144,6 +144,23 @@ def _echo(text: str) -> str:
     return t if len(t) <= ECHO_MAX else t[:ECHO_MAX] + "…"
 
 
+def _alarm_for(it: Item) -> bool:
+    """
+    这条日程要不要设闹钟。
+
+    **只给带重复规则的日程**（2026-10-07 用户裁决）：
+
+    - 一次性日程你本来就知道那天有事；
+    - "每天/每周要做的事"没有闹钟就等于没提醒 —— 而提醒事项的脚本接口
+      **没有重复**（见 `docs/APPLE-FACTS.md` §2.1），
+      所以"每天 8:35 提醒我"只有日历做得到。
+
+    判定放这里、"闹钟在日历里怎么表达"（定时=开始时 / 全天=当天 09:00）
+    放 `applecal.add` —— 一个是产品决定，一个是平台细节，不混在一起。
+    """
+    return bool(it.recurrence)
+
+
 def _reply_ok(it: Item, ref_id: str) -> str:
     import whens
 
@@ -160,6 +177,11 @@ def _reply_ok(it: Item, ref_id: str) -> str:
                       f"（只写进备注，不会到期提醒）")
     if it.recurrence:
         detail.append(whens.rrule_text(it.recurrence))
+    if it.kind is Kind.EVENT and _alarm_for(it):
+        # 放**最后**，读起来是"时间 · 每天 · 到点会提醒"。
+        # 回执必须说清这次会不会响 —— 与待办那句"不会到期提醒"对称；
+        # 2026-10-07 的真实困惑就是"写进去了"但到点不响、而回执一个字没提。
+        detail.append("到点会提醒")
     if detail:
         line += "\n　　" + " · ".join(detail)
     line += f"\n　　→ 在「{place}」里"
@@ -288,12 +310,15 @@ class Intake:
             return self._fail(it.text, "日程没有时间（路由层应已拦下）",
                               kind=Kind.EVENT)
 
+        alarm = _alarm_for(it)
         ref = self.add_event(it.text, it.when.start, it.when.end,
-                             recurrence=it.recurrence, allday=it.when.all_day)
+                             recurrence=it.recurrence, allday=it.when.all_day,
+                             alarm=alarm)
         self._journal("event_added", summary=it.text,
                       start=it.when.start.isoformat(),
                       end=it.when.end.isoformat(),
                       calendar="", ok=True, recurrence=it.recurrence,
+                      alarm=alarm,
                       **({"rolled_to_next_day": True} if it.rolled else {}))
 
         reply = _reply_ok(it, ref)
@@ -378,10 +403,10 @@ def _real_add_todo(text: str, when: dt.datetime | None = None) -> str:
 
 def _real_add_event(summary: str, start: dt.datetime, end: dt.datetime,
                     location: str = "", recurrence: str = "",
-                    allday: bool = False) -> str:
+                    allday: bool = False, alarm: bool = False) -> str:
     import applecal
     ev = applecal.add(summary, start, end, location=location,
-                      recurrence=recurrence, allday=allday)
+                      recurrence=recurrence, allday=allday, alarm=alarm)
     return ev.uid
 
 
@@ -413,8 +438,11 @@ def main() -> int:
             written.append(f"todo({text!r}, when={when})")
             return "FAKE-TODO"
 
-        def fake_event(summary, start, end, location="", recurrence="", allday=False):
-            written.append(f"event({summary!r}, {start} → {end}, rrule={recurrence!r})")
+        def fake_event(summary, start, end, location="", recurrence="",
+                       allday=False, alarm=False):
+            written.append(f"event({summary!r}, {start} → {end}, "
+                           f"rrule={recurrence!r}"
+                           f"{' + 闹钟' if alarm else ''})")
             return "FAKE-EVENT"
 
         def fake_memo(text):

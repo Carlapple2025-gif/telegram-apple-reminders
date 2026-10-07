@@ -185,7 +185,7 @@ def log_todo(text: str, reminder_id: str = "", ok: bool = True,
 
 def log_event(summary: str, start: str = "", end: str = "",
               location: str = "", calendar: str = "", ok: bool = True,
-              detail: str = "", recurrence: str = "",
+              detail: str = "", recurrence: str = "", alarm: bool = False,
               src_msg_id: int | None = None,
               reply_msg_id: int | None = None) -> dict:
     """
@@ -195,10 +195,15 @@ def log_event(summary: str, start: str = "", end: str = "",
     那天想核对"用户发的那条英语学习到底是不是每天重复"，
     发现 journal 里记了标题和时间、**唯独没记规则** ——
     于是这个"我们提交了什么"的问题只能靠猜（读路径展开也要靠这个字段）。
+
+    `alarm` = 这条日程**有没有设闹钟**（**2026-10-07 补**，同 `recurrence` 的理由）：
+    "到点会不会响"属于"我们提交了什么"，而它只存在于**创建那一刻** ——
+    读路径（`applecal.events_between`）**不返回闹钟信息**，
+    所以不记下来就再也查不回来。
     """
     return append(EV_EVENT_ADDED, summary=summary, start=start, end=end,
                   location=location, calendar=calendar, ok=ok, detail=detail,
-                  recurrence=recurrence,
+                  recurrence=recurrence, alarm=alarm,
                   src_msg_id=src_msg_id, reply_msg_id=reply_msg_id)
 
 

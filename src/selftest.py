@@ -1304,6 +1304,15 @@ check("CHANGELOG 的契约版本与 VERSION 一致",
 check("docs/KERNEL-CONTRACT.md 存在",
       (ROOT / "docs" / "KERNEL-CONTRACT.md").is_file())
 
+# 文档头部也写着版本号。2026-10-07 才发现它**停在 1.0.0**（VERSION 早已是 1.1.0），
+# 而当时没有任何断言盯着它 —— 同一条教训：写在两处的版本号一定有一处是错的，
+# 所以第二处也要机器核对，不能靠"记得改"。
+_kc_src_v = (ROOT / "docs" / "KERNEL-CONTRACT.md").read_text(encoding="utf-8")
+_kc_ver_v = _re.search(r"`VERSION` = `([^`]+)`", _kc_src_v)
+check("KERNEL-CONTRACT 的版本与 VERSION 一致",
+      _kc_ver_v is not None and _kc_ver_v.group(1) == _ver,
+      f"契约文档写 {_kc_ver_v.group(1) if _kc_ver_v else '（无）'}，VERSION 写 {_ver}")
+
 # ── ② 模块分类（全量、不重不漏）
 #
 # 与以前那几张"手工名单"（:674 / :3145 / :1195）的关键差别：
@@ -1500,10 +1509,13 @@ for _mod in ("memo", "applecal"):
     _txt5 = (SRC / f"{_mod}.py").read_text(encoding="utf-8")
     _stmt_n = len(_re6.findall(r"make new \w+ (?:at|with|in)\b", _txt5))
     _block_n = sum(1 for _c in _ok5 if "make new" in _c)
-    # 允许少 1 个：`applecal.add()` 的脚本是**运行时拼装**的
-    # （依赖 props 的 join 结果），静态求值器拿不到，只能少这一块。
+    # 允许少几个：`applecal.add()` 的脚本是**运行时拼装**的
+    # （依赖 props 的 join 结果），静态求值器拿不到那一块里的 make 语句。
+    # 2026-10-07 起那一块里有 **2** 句（建事件 + 加闹钟），所以按模块给数 ——
+    # 一刀切给 -2 会把 memo 那边"某段被截断"也放过去。
     # 那一块由下面单独的直接验证覆盖，不是漏检。
-    if _block_n < _stmt_n - 1:
+    _runtime_makes = {"applecal": 2, "memo": 0}
+    if _block_n < _stmt_n - _runtime_makes.get(_mod, 0):
         _missing.append(
             f"{_mod}: 含 make 的完整块 {_block_n} 个，但源码有 {_stmt_n} 处 make 语句")
 
@@ -1524,25 +1536,35 @@ check(f"v4 的 {_as_total} 段 AppleScript 全部可编译",
 check("AppleScript 提取覆盖全部块", not _missing, "；".join(_missing))
 
 # 单独验证 applecal.add() 的脚本形状 ——
-# 它的 AppleScript 是运行时拼装的（依赖 props 的 join 结果），
-# 静态提取器拿不到，所以在这里**按同样方式拼一遍**再编译。
-# 覆盖：日期逐字段 set 的写法、with properties {...} 的组装。
+# 它的 AppleScript 是运行时拼装的（依赖 props 的 join 结果），静态提取器拿不到。
+#
+# 2026-10-07 换法：不再"照样子手拼一段"（那只能证明**手拼的那段**没写错），
+# 而是把 `run_applescript` 换掉之后**真的调一次 add()**，拿到它**实际会执行的那段脚本**
+# 再交给 osacompile。测的是生成器本身 —— 包括新加的闹钟语句。
 import datetime as _dt6  # noqa: E402
 
 _ac = sys.modules.get("applecal") or _load(SRC / "applecal.py")
-_add_src = (
-    f'tell application "Calendar"\n'
-    f'  set targetCal to calendar "X"\n'
-    + _ac._set_date_script("startDate", _dt6.datetime(2026, 10, 5, 14, 0))
-    + _ac._set_date_script("endDate", _dt6.datetime(2026, 10, 5, 15, 0))
-    + '  set newEv to make new event at end of events of targetCal '
-      'with properties {summary:"X", start date:startDate, end date:endDate, '
-      'location:"X", recurrence:"FREQ=WEEKLY;BYDAY=MO"}\n'
-    '  return uid of newEv\n'
-    'end tell')
+
+
+def _capture_add(**kw):
+    """调一次 add()，返回它真正会执行的 AppleScript（不碰任何真实数据）。"""
+    _calls: list[str] = []
+    _real_run = _ac.run_applescript
+    _ac.run_applescript = lambda src, timeout=45: (_calls.append(src), "UID-TEST")[1]
+    try:
+        _ac.add(kw.pop("summary"), kw.pop("start"), kw.pop("end"), **kw)
+    finally:
+        _ac.run_applescript = _real_run
+    return _calls[0]
+
+
+_add_src = _capture_add(summary="X", start=_dt6.datetime(2026, 10, 5, 14, 0),
+                        end=_dt6.datetime(2026, 10, 5, 15, 0), calendar="X",
+                        location="X", recurrence="FREQ=WEEKLY;BYDAY=MO",
+                        alarm=True)
 _r6 = _sp5.run(["osacompile", "-o", _os5.devnull, "-e", _add_src],
                capture_output=True, text=True)
-check("applecal.add 的脚本形状可编译", _r6.returncode == 0,
+check("applecal.add 生成的脚本可编译", _r6.returncode == 0,
       _r6.stderr.strip()[:80])
 
 # 逐字段设日期是刻意选择（避开受区域设置影响的 date 字面量），
@@ -1550,6 +1572,32 @@ check("applecal.add 的脚本形状可编译", _r6.returncode == 0,
 check("日期用逐字段 set（不用 date 字面量）",
       "set year of startDate to 2026" in _add_src
       and 'date "' not in _add_src)
+
+# ── 闹钟（2026-10-07 用户裁决：**只给带重复规则的日程**设）
+#
+# 为什么必须断言：`make new display alarm` 写错了**不会报错**，
+# 只会"到点不响" —— 而那是用户唯一能察觉的信号（他以为设过了）。
+check("重复日程：生成脚本里有 display alarm",
+      "make new display alarm" in _add_src, _add_src[:160])
+check("定时日程：闹钟在开始时（trigger interval:0）",
+      "trigger interval:0" in _add_src, _add_src[:160])
+
+# 全天日程**不能**给 0：全天事件在日历里的"事件时刻"是当天 00:00，
+# 给 0 就是半夜弹 —— 用户看不出那是 bug，只会觉得吵。
+_allday_src = _capture_add(summary="X", start=_dt6.datetime(2026, 10, 5, 9, 0),
+                           end=_dt6.datetime(2026, 10, 6, 9, 0), calendar="X",
+                           recurrence="FREQ=WEEKLY;BYDAY=MO", allday=True,
+                           alarm=True)
+# ⚠️ 数的是 "make new display alarm" 而不是 "display alarm"：
+# 后者在 "display alarms of newEv" 里**又出现一次**（我第一版就数错了，
+# 断言红了才发现 —— 计数类断言要数那个只可能有一份的串）。
+check("全天日程：闹钟在当天 09:00（不是半夜）",
+      f"trigger interval:{_ac.ALLDAY_ALARM_MINUTES}" in _allday_src
+      and _allday_src.count("make new display alarm") == 1, _allday_src[-160:])
+
+_once_src = _capture_add(summary="X", start=_dt6.datetime(2026, 10, 5, 14, 0),
+                         end=_dt6.datetime(2026, 10, 5, 15, 0), calendar="X")
+check("一次性日程：不加闹钟", "display alarm" not in _once_src, _once_src[:160])
 
 # 再静态扫一遍：源码里不该出现 AppleScript 里的 \u 转义
 _u_escapes = []
@@ -1583,8 +1631,10 @@ class _FakeSinks:
         self.calls.append(("todo", text, when))
         return "T-1"
 
-    def event(self, summary, start, end, location="", recurrence="", allday=False):
-        self.calls.append(("event", summary, start, end, recurrence, allday))
+    def event(self, summary, start, end, location="", recurrence="",
+              allday=False, alarm=False):
+        # ⚠️ alarm **追加在末尾**：上面的断言按下标取过前 6 个，不能插在中间。
+        self.calls.append(("event", summary, start, end, recurrence, allday, alarm))
         return "E-1"
 
     def memo(self, text):
@@ -1689,6 +1739,29 @@ try:
     _i.handle("@每周一 早上九点 站会", _B)
     check("周期+时刻：日期仍落在周一",
           _f.calls[0][2] == _dt2.datetime(2026, 10, 5, 9, 0), str(_f.calls[0][2]))
+
+    # ── 闹钟（2026-10-07 用户裁决：**只给带重复规则的日程**设）
+    #
+    # 判定（产品决定）在 intake，表达（定时=开始时 / 全天=09:00）在 applecal。
+    # 用**用户那天真实发的那句话**当样本 —— 他就是在这句上撞见"写进去了却不响"。
+    _d_al = _fresh_journal()
+    try:
+        _i, _f = _new_intake()
+        _o = _i.handle("@每天8:35 Check my to-dos and plan out the day", _B)
+        check("周期日程：要求写入端设闹钟", _f.calls[0][6] is True, str(_f.calls[0]))
+        check("周期日程：回执说清会响", "到点会提醒" in _o.reply, _o.reply)
+        _rec_al = [r for r in _jr.read_day(_jr._today())
+                   if r["event"] == "event_added"]
+        check("周期日程：journal 记下 alarm=True",
+              bool(_rec_al) and _rec_al[-1].get("alarm") is True,
+              str(_rec_al[-1:]))
+
+        _i, _f = _new_intake()
+        _o = _i.handle("@明天下午两点 项目周会", _B)
+        check("一次性日程：不设闹钟", _f.calls[0][6] is False, str(_f.calls[0]))
+        check("一次性日程：回执不提提醒", "到点会提醒" not in _o.reply, _o.reply)
+    finally:
+        _sh2.rmtree(_d_al, ignore_errors=True)
 finally:
     _sh2.rmtree(_d, ignore_errors=True)
 
@@ -1829,6 +1902,22 @@ try:
     check("被拒不写入", len(_f.calls) == 0)
 finally:
     _sh2.rmtree(_d, ignore_errors=True)
+
+# ⑪ 干跑 CLI（`intake.py --dry`）也必须跟上写入端协议
+#
+# ⚠️ 这条是**真的踩到之后**才补的：主干加了 `alarm` 参数、假写入端也改了，
+# 但 CLI 里那份 `fake_event` 是**第二份实现** —— 它没跟上，于是
+# `--dry` 直接报 `fake_event() got an unexpected keyword argument 'alarm'`。
+# 自检当时**全绿**：它只测了"注入的假写入端"那一份，没测 CLI 这一份。
+# 与"RRULE 说人话只有一份实现"同源：**分身的假实现也要有人守**。
+_sp11 = _sp5.run([sys.executable, str(SRC / "intake.py"), "--dry",
+                  "@每天8:35 Check my to-dos and plan out the day"],
+                 capture_output=True, text=True, cwd=str(ROOT))
+_out11 = _sp11.stdout + _sp11.stderr
+check("干跑 CLI：重复日程不报错", "❌" not in _out11, _out11[:200])
+check("干跑 CLI：回执看得见闹钟", "到点会提醒" in _out11, _out11[:200])
+check("干跑 CLI：干跑行写明了会调用的写入",
+      "event(" in _out11 and "闹钟" in _out11, _out11[-200:])
 
 
 section("v4 「整句只是一个时间」的判据（is_bare_time）")
@@ -2610,11 +2699,13 @@ check("Reminder 有 id 字段（intake 要取它）",
 
 # ② 日程端：applecal.add 的关键字与返回值
 _sig_ev = _insp8.signature(_ac8.add)
-for _kw in ("summary", "start", "end", "location", "recurrence", "allday"):
+for _kw in ("summary", "start", "end", "location", "recurrence", "allday",
+            "alarm"):
     check(f"applecal.add 接受 {_kw}", _kw in _sig_ev.parameters)
-# intake 调的是 add(summary, start, end, location=..., recurrence=..., allday=...)
+# intake 调的是 add(summary, start, end, location=..., recurrence=...,
+#                    allday=..., alarm=...)
 _sig_ev.bind(None, _dt2.datetime(2026, 10, 5), _dt2.datetime(2026, 10, 5, 1),
-             location="", recurrence="", allday=False)
+             location="", recurrence="", allday=False, alarm=False)
 check("applecal.add(...) 是合法调用", True)
 check("applecal.Event 有 uid 字段",
       "uid" in {f.name for f in _dc8.fields(_ac8.Event)})
@@ -2917,6 +3008,11 @@ check("回执用的是 whens.rrule_text",
 check("journal 记事件时带上 recurrence",
       "recurrence=it.recurrence" in _intake_src_rt
       and "recurrence: str = \"\"" in (SRC / "journal.py").read_text(encoding="utf-8"))
+# 闹钟同理（2026-10-07）：读路径**不返回**闹钟信息，
+# 所以"这条到底设没设、会不会响"只有 journal 答得出来。
+check("journal 记事件时带上 alarm",
+      "alarm=alarm" in _intake_src_rt
+      and "alarm: bool = False" in (SRC / "journal.py").read_text(encoding="utf-8"))
 
 # ③ 备忘端：memo.add(text) → Memo.note_id
 _sig_memo = _insp8.signature(_mm8.add)

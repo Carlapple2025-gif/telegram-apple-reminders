@@ -544,10 +544,17 @@ def _set_date_script(var: str, when: dt.datetime) -> str:
         f'  set seconds of {var} to 0\n')
 
 
+# 全天事件的闹钟落在当天几点。
+#
+# ⚠️ 不能给 0：全天事件在日历里的"事件时刻"是当天 **00:00**，
+# `trigger interval:0` 会在**半夜**弹 —— 而用户看不出那是 bug，只会觉得吵。
+ALLDAY_ALARM_MINUTES = 9 * 60      # 09:00
+
+
 def add(summary: str, start: dt.datetime, end: dt.datetime | None = None,
         calendar: str | None = None, location: str = "",
         description: str = "", recurrence: str = "",
-        allday: bool = False) -> Event:
+        allday: bool = False, alarm: bool = False) -> Event:
     """
     新建一条日程，返回它（含 uid）。
 
@@ -558,6 +565,17 @@ def add(summary: str, start: dt.datetime, end: dt.datetime | None = None,
     秒没有意义；而且固定为 0 能让"写入"与"读回"可精确比对
     （否则读回的秒数与写入时有偏差，看起来像 bug —— 实测踩到过：
     真实环境自检报"写入 15:40:06 / 读回 15:40:00"，其实是断言没对齐精度）。
+
+    **闹钟**（`alarm=True`）：定时日程在**开始时**提醒，全天日程在当天 **09:00**
+    提醒（全天不能给 0，见 `ALLDAY_ALARM_MINUTES`）。
+
+    为什么需要它：提醒事项的脚本接口**没有重复**（见 `docs/APPLE-FACTS.md` §2.1），
+    所以"每天 8:35 提醒我"只有日历做得到 —— 而一条没有闹钟的日程
+    **到点不会响**，等于把"提醒"写成了"记事"。2026-10-07 用户裁决：
+    **只给带重复规则的日程**设（判定在 `intake._do_event`，不在本函数）。
+
+    ⚠️ **只管新建**：已存在的日程不会被补上闹钟（"agent 只增不改"，
+    见 `ARCHITECTURE.md` §三）。
     """
     summary = (summary or "").strip()
     if not summary:
@@ -604,6 +622,14 @@ def add(summary: str, start: dt.datetime, end: dt.datetime | None = None,
     if recurrence:
         props.append(f'recurrence:{_as_literal(recurrence)}')
 
+    # 闹钟 = 重复日程的"到点提醒"（见 docstring）。
+    # 必须在 `make new event` **之后** —— 它挂在 newEv 上。
+    alarm_line = ""
+    if alarm:
+        minutes = ALLDAY_ALARM_MINUTES if allday else 0
+        alarm_line = ('  make new display alarm at end of display alarms '
+                      f'of newEv with properties {{trigger interval:{minutes}}}\n')
+
     src = (
         f'tell application "{APP}"\n'
         f'  set targetCal to calendar {_as_literal(cal)}\n'
@@ -611,7 +637,8 @@ def add(summary: str, start: dt.datetime, end: dt.datetime | None = None,
         + _set_date_script("endDate", end)
         + f'  set newEv to make new event at end of events of targetCal '
           f'with properties {{{", ".join(props)}}}\n'
-        '  return uid of newEv\n'
+        + alarm_line
+        + '  return uid of newEv\n'
         'end tell')
 
     uid = run_applescript(src, timeout=60)

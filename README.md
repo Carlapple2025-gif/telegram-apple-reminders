@@ -280,6 +280,7 @@ pdca/
     ├── SYMBOL-SCHEME.md       符号声明方案（**已实现**，保留作决策记录）
     ├── TELEGRAM-DESIGN.md     Telegram 层设计（已裁决）
     ├── USER-GUIDE.md          使用者视角（怎么用、说错了怎么收拾）
+    ├── APPLE-FACTS.md         Apple 侧"能不能做"（日历/提醒事项，带可复核证据）
     ├── CONCEPT.md             最初的概念（部分已被 ARCHITECTURE 取代）
     ├── archive/               被推翻的 v1 架构（理解"为什么推翻"）
     └── ORIENTATION-ROOTCAUSE.md  照片方向问题排查（与 v4 无关，同属踩坑记录）

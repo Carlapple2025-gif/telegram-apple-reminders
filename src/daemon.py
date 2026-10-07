@@ -261,8 +261,11 @@ def _make_intake() -> Intake:
         calls.append(f"提醒事项 ← {text}")
         return "OFFLINE-TODO"
 
-    def _e(summary, start, end, location="", recurrence="", allday=False):
-        calls.append(f"日历 ← {summary} @ {start} [{recurrence or '不重复'}]")
+    def _e(summary, start, end, location="", recurrence="", allday=False,
+           alarm=False):
+        calls.append(f"日历 ← {summary} @ {start} "
+                     f"[{recurrence or '不重复'}]"
+                     f"{' ⏰到点提醒' if alarm else ''}")
         return "OFFLINE-EVENT"
 
     def _m(text):
