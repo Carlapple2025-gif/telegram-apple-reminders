@@ -133,7 +133,7 @@ agent 提问  →  Telegram   →  你回复  →  agent 读到
 
 | 项 | 结果 |
 |---|---|
-| bot | `@carleepersonal_bot`（**独立 bot**，不与 ltc-spider 共用） |
+| bot | 独立 bot（**不与别的项目共用**）|
 | 发送 | ✅ `sendMessage` 成功 |
 | 接收 | ✅ `getUpdates` 读到你的消息 |
 | **问答闭环** | ✅ 发问 → 你回 `1上午 2下午` → 读到该回复 |
@@ -141,7 +141,7 @@ agent 提问  →  Telegram   →  你回复  →  agent 读到
 
 配置在 `pdca/.env`（0600，已被 gitignore 排除）：`TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`。
 
-**为什么独立 bot**：与 ltc-spider 混用会让日志、权限、归档纠缠在一起，
+**为什么独立 bot**：与别的 bot 混用会让日志、权限、归档纠缠在一起，
 将来排查问题时分不清哪条消息来自哪个系统。对比之下 Bark 是**复用**的 ——
 因为它只是单向推送通道，没有身份与归档问题。
 

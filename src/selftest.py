@@ -2457,7 +2457,7 @@ _rp_c = _load(SRC / "report.py")
 # `list` 不带斜杠就是一条**待办**（"list" 可以是你要买的东西），不是命令。
 for _t, _want in [("/list", "list"), ("/ls", "list"), ("/today", "list"),
                   ("/now", "list"), ("/列表", "list"), ("/LIST", "list"),
-                  ("/list@carleepersonal_bot", "list"), ("/list 明天", "list")]:
+                  ("/list@your_bot", "list"), ("/list 明天", "list")]:
     check(f"{_t!r} → 命令 {_want}", _cmd.match(_t) == _want, str(_cmd.match(_t)))
 for _t in ("list", "列表", "交电费", "# 备忘", "@明天九点 会"):
     check(f"{_t!r} 不是命令（照常收件）", _cmd.match(_t) is None,

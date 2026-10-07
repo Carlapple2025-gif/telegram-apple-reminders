@@ -3,8 +3,9 @@
 通知通道（当前只实现 Bark，够用且已验证）。
 
 设计取舍：
-  · **复用 ltc-spider 里已有的 NOTIFY_BARK_KEY**，不复制密钥到本仓库 ——
-    少一份密钥副本就少一处泄漏面。要独立配置就用 BARK_KEY 覆盖。
+  · **可以从别处已配好的 .env 复用 Bark key**（路径你自己给，见 load_bark_key），
+    不复制密钥到本仓库 —— 少一份密钥副本就少一处泄漏面。
+    要独立配置就直接写 BARK_KEY。
   · 推送失败**不抛异常**，只返回失败原因。理由：日报的价值在于「你看到提醒」，
     如果因为网络抖动让整个定时任务失败退出，反而更糟。调用方决定要不要告警。
   · 支持带 url，手机上点通知可直达备忘录（Bark 的 url 参数）。
@@ -42,8 +43,14 @@ def load_bark_key() -> tuple[str | None, str]:
     """
     按优先级取 Bark key，并返回 (key, 来源说明)。
 
-    顺序：环境变量 BARK_KEY → 本仓库 .env → ltc-spider 的 .env（复用已有配置）
-    刻意**不把 key 写进本仓库**，避免多一份密钥副本。
+    顺序：
+      1. 环境变量 `BARK_KEY`
+      2. 本仓库 `.env` 里的 `BARK_KEY`
+      3. `BARK_UPSTREAM_ENV` 指向的那个 .env 里的 `NOTIFY_BARK_KEY` / `BARK_KEY`
+
+    第 3 档是给"别处已经配过 Bark、不想再多存一份密钥"的人用的：**读，不复制**。
+    路径必须**你显式给**（写在本仓库 `.env` 里）—— 项目不去猜你机器上还有什么别的项目，
+    所以这个文件里**没有任何私人路径**，谁克隆下来都能跑。
     """
     if os.environ.get("BARK_KEY"):
         return os.environ["BARK_KEY"], "环境变量 BARK_KEY"
@@ -52,12 +59,16 @@ def load_bark_key() -> tuple[str | None, str]:
     if local.get("BARK_KEY"):
         return local["BARK_KEY"], "本仓库 .env"
 
-    # 复用已打通的通道。注意这里是**读**，不是复制。
-    upstream = Path.home() / "dev" / "ltc-spider" / ".env"
-    env = _read_env_file(upstream)
-    key = env.get("NOTIFY_BARK_KEY") or env.get("BARK_KEY")
-    if key:
-        return key, f"复用 {upstream} 里的 NOTIFY_BARK_KEY"
+    # 复用别处已打通的通道（**读**，不是复制）。路径由调用方在 .env 里给出。
+    upstream = (local.get("BARK_UPSTREAM_ENV")
+                or os.environ.get("BARK_UPSTREAM_ENV") or "").strip()
+    if upstream:
+        path = Path(upstream).expanduser()
+        env = _read_env_file(path)
+        key = env.get("NOTIFY_BARK_KEY") or env.get("BARK_KEY")
+        if key:
+            return key, f"复用 {path} 里的 NOTIFY_BARK_KEY"
+        return None, f"BARK_UPSTREAM_ENV 指向的 .env 里没有 key：{path}"
 
     return None, "未找到 Bark key"
 
@@ -79,7 +90,8 @@ def send_bark(title: str, body: str, url: str | None = None,
             "没有可用的 Bark key。三种配法（任选其一）：\n"
             "  1. export BARK_KEY=xxx\n"
             "  2. 在 pdca/.env 里写 BARK_KEY=xxx\n"
-            "  3. 复用 ltc-spider/.env 里的 NOTIFY_BARK_KEY（默认已尝试）"
+            "  3. 复用别处已配好的 .env：在本仓库 .env 里写\n"
+            "     BARK_UPSTREAM_ENV=/path/to/other/.env（读里面的 NOTIFY_BARK_KEY）"
         )
 
     payload: dict = {"device_key": key, "title": title, "body": body, "group": group}

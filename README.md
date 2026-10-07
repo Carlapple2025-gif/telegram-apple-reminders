@@ -1,4 +1,17 @@
-# pdca — Telegram 进、Apple 应用出
+# telegram-apple-reminders
+
+> **Telegram in, Apple apps out.** Send one message to a Telegram bot and it lands in
+> the right Apple app on your Mac — **Reminders**, **Calendar** or **Notes**.
+> A daily review is pushed back at 21:30. No database, no sync:
+> **your Apple apps stay the single source of truth.**
+>
+> Python + AppleScript + launchd · self-hosted · single user · macOS.
+> You declare the type with a leading symbol (`#` memo · `@` calendar · `!` flag ·
+> nothing = to-do) — the code **never guesses** what you meant. That was the v1 design,
+> and it was thrown away ([why](CHANGELOG.md)).
+>
+> 中文文档在下面。使用者视角见 [`docs/USER-GUIDE.md`](docs/USER-GUIDE.md)；
+> 系统怎么工作见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
 
 **用一句话说**：你对 Telegram 发一条（用行首符号说明是待办 / 日程 / 备忘），
 Mac mini 把它写进对应的 Apple 应用（提醒事项 / 日历 / 备忘录），21:30 自动生成日报推回来。
@@ -114,7 +127,7 @@ Mac mini 把它写进对应的 Apple 应用（提醒事项 / 日历 / 备忘录�
 ## 三、运维命令
 
 ```bash
-cd /Users/carl-mini/dev/siri-carl/pdca
+cd /path/to/telegram-apple-reminders    # 换成你 clone 的位置
 
 # 自检（513 项，全部离线，不碰你的数据、不需要授权）
 python3 src/selftest.py

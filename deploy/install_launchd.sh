@@ -42,7 +42,7 @@ ALLOW_UNCONFIGURED=0
 LEGACY_LABELS=(com.carl.pdca.carryover com.carl.pdca.sync)
 
 # 固定用系统 python3：它只用标准库，不依赖任何虚拟环境。
-# （ltc-spider 那边踩过"解释器链被清掉导致任务全失效"的坑，
+# （别的项目那边踩过"解释器链被清掉导致任务全失效"的坑，
 #   这里刻意避开：系统解释器 + 只用标准库 = 没有环境可坏。）
 PYTHON="/usr/bin/python3"
 

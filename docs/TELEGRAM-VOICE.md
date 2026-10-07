@@ -405,7 +405,7 @@ Telegram 只在 5 秒内显示，超时自然消失 —— 对这个用途够。
 ## 附录 C：怎么复核这份文档的每一条
 
 ```bash
-cd /Users/carl-mini/dev/siri-carl/pdca
+cd /path/to/telegram-apple-reminders    # 换成你 clone 的位置
 python3 src/routes.py "明天交电费" "周五下午两点项目周会" "想起一件事，荷载要按名称命名" --base 2026-10-04
 python3 src/intake.py --dry "明天交电费" "# 学原理比学语法重要" "@周五下午两点 项目周会" "@上午九点" "#"
 grep -rn "sendChatAction\|setMyCommands\|reply_parameters\|parse_mode=" src/     # 应无调用方

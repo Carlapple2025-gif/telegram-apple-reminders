@@ -240,7 +240,7 @@ agent 只负责"增"：写进去之后，改和删都在你手里。
 （回执是**静音**的，别等声音 —— 看聊天窗口）。没回执时，在终端里：
 
 ```bash
-cd /Users/carl-mini/dev/siri-carl/pdca
+cd /path/to/telegram-apple-reminders    # 换成你 clone 的位置
 bash deploy/install_launchd.sh status      # 要修就：bash deploy/install_launchd.sh restart
 ```
 
