@@ -834,11 +834,22 @@ def read_events_between(start: dt.date, end: dt.date) -> list[Event]:
     （AppleScript 没法按 recurrence 筛，见 applecal 的说明）。
     """
     import applecal
-    evs = applecal.events_between(start, end)
-    return [Event(summary=e.summary, start=e.start, location=e.location,
-                  end=e.end, all_day=is_all_day(e.start, e.end),
-                  recurrence=e.recurrence)
-            for e in evs]
+
+    # **可以跨多个日历**（2026-10-08 起）：日程本来就会分散在「个人」「工作」里，
+    # 只读一个的话，另一个里的日程在日报里会**静默看不见** ——
+    # 而"看不见"和"没有"是两件事。读哪些由 config 的 calendar_read_names 决定
+    # （写路径仍然只有一个落点，见 applecal.config_calendar）。
+    # 没配 → [None] → 退回 applecal 原来的单日历行为（老配置零改动）。
+    cals: list = list(applecal.config_calendars_read()) or [None]
+
+    out: list[Event] = []
+    for cal in cals:
+        for e in applecal.events_between(start, end, cal):
+            out.append(Event(summary=e.summary, start=e.start, location=e.location,
+                             end=e.end, all_day=is_all_day(e.start, e.end),
+                             recurrence=e.recurrence))
+    out.sort(key=lambda e: e.start)
+    return out
 
 
 # ── 公开读取入口

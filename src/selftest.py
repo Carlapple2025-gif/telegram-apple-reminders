@@ -2648,8 +2648,13 @@ check("守护启动时会推「/」菜单（改了命令表 → 重启即生效�
 # ── 整链：/list 一个字都不写，也不进 journal
 _d = _fresh_journal()
 _dm_dir3 = _P2(_tf2.mkdtemp())
+# ⚠️ 这里必须是 **read_events_between**（下面注入的就是它）。
+# 原先写的是 read_events —— 名字差了半截，于是**桩永远没被还原**：
+# 从此往后任何调用 report.read_events_between 的断言，测的都是
+# 一个返回 [] 的 lambda。实测：2026-10-08 加"跨日历"断言时才发现
+# （4 条全红，而 asked 是空的 —— 因为函数体根本不是 report 的）。
 _saved_c = (_dm._make_intake, _dm.tg.send, _dm.STATE_FILE, _dm.tg.get_updates,
-            _dm.tg.load_config, _rp_c.read_open_todos, _rp_c.read_events)
+            _dm.tg.load_config, _rp_c.read_open_todos, _rp_c.read_events_between)
 try:
     _wrote_c: list = []
     _dm._make_intake = lambda: _it.Intake(
@@ -2679,7 +2684,7 @@ try:
           "input" not in _j_c and "/list" not in _j_c, _j_c)
 finally:
     (_dm._make_intake, _dm.tg.send, _dm.STATE_FILE, _dm.tg.get_updates,
-     _dm.tg.load_config, _rp_c.read_open_todos, _rp_c.read_events) = _saved_c
+     _dm.tg.load_config, _rp_c.read_open_todos, _rp_c.read_events_between) = _saved_c
     _sh2.rmtree(_d, ignore_errors=True)
     _sh2.rmtree(_dm_dir3, ignore_errors=True)
 
@@ -4670,6 +4675,57 @@ finally:
 # main 的退出码必须用到这个结果
 _rp_src2 = (SRC / "report.py").read_text(encoding="utf-8")
 check("main 的退出码反映推送结果", "0 if pushed else 3" in _rp_src2)
+
+
+section("v4 日报跨日历读取（2026-10-08：日程分散在「个人」「工作」）")
+
+# 为什么要跨日历：用户的日程天然分在两个 iCloud 日历里，只读一个的话
+# 另一个里的日程在日报里**静默看不见** —— 而"看不见"和"没有"是两件事。
+_rp_x = sys.modules.get("report") or _load(SRC / "report.py")
+_ac_x = _load(SRC / "applecal.py")
+# ⚠️ 这里必须是**赋值**，不能写 setdefault：
+# report 的函数体里是 `import applecal`，**调用时**才去 sys.modules 取。
+# 若那里已经躺着一个 applecal 对象，setdefault 什么都不做 ——
+# 我的 patch 就打在一个没人用的副本上，而 report 拿到的是另一个。
+# （实测：4 条断言全红，但 `_asked` 是**空的**，因为 report 根本没经过这里。）
+_sv_applecal_mod = sys.modules.get("applecal")
+sys.modules["applecal"] = _ac_x
+_sv_cfg_x, _sv_ev_x = _ac_x.config_calendars_read, _ac_x.events_between
+try:
+    _asked: list = []
+
+    def _fake_ev(s, e, c=None):
+        _asked.append(c)
+        return [_ac_x.Event(summary=f"{c}·上午",
+                            start=_dt2.datetime(2026, 10, 9, 9, 0),
+                            end=_dt2.datetime(2026, 10, 9, 10, 0), calendar=c or ""),
+                _ac_x.Event(summary=f"{c}·下午",
+                            start=_dt2.datetime(2026, 10, 9, 14, 0),
+                            end=_dt2.datetime(2026, 10, 9, 15, 0), calendar=c or "")]
+
+    _ac_x.config_calendars_read = lambda: ["个人", "工作"]
+    _ac_x.events_between = _fake_ev
+    _evs_x = _rp_x.read_events_between(_dt2.date(2026, 10, 9), _dt2.date(2026, 10, 10))
+    check("跨日历：两个日历都被读到", _asked == ["个人", "工作"], str(_asked))
+    check("跨日历：两边的事件都进来（不再静默丢一个）",
+          len(_evs_x) == 4, str(len(_evs_x)))
+    check("跨日历：合并后按时间排序",
+          [e.start.hour for e in _evs_x] == [9, 9, 14, 14],
+          str([e.start.hour for e in _evs_x]))
+
+    # 没配 calendar_read_names → 退回单日历：**老配置零改动**
+    _asked.clear()
+    _ac_x.config_calendars_read = lambda: []
+    _rp_x.read_events_between(_dt2.date(2026, 10, 9), _dt2.date(2026, 10, 10))
+    check("跨日历：没配就退回单日历（传 None，行为与以前一致）",
+          _asked == [None], str(_asked))
+finally:
+    _ac_x.config_calendars_read = _sv_cfg_x
+    _ac_x.events_between = _sv_ev_x
+    if _sv_applecal_mod is None:
+        sys.modules.pop("applecal", None)
+    else:
+        sys.modules["applecal"] = _sv_applecal_mod
 
 
 # ── 汇总

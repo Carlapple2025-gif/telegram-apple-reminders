@@ -123,6 +123,37 @@ def config_calendar() -> str:
     return (cfg.get("calendar_name") or "").strip()
 
 
+def config_calendars_read() -> list[str]:
+    """
+    **读**要覆盖哪些日历（日报 / `/list` 用）。与 `config_calendar()`（**写**的落点）
+    分开，因为它们是两件事：
+
+      · 写只有一个落点 —— "每个事实只有一个写入者"（ARCHITECTURE §一）；
+      · 读可以覆盖多个 —— 你的日程本来就会分散在「个人」「工作」里，
+        只读一个的话，另一个里的日程在日报里**看不见**，
+        而"看不见"和"没有"是两件事（照旧：宁可报错，不可静默）。
+
+    `config.json` 的 `calendar_read_names`（列表）；**没配就退回单数的
+    `calendar_name`** —— 老配置零改动仍然工作。去重、保序、丢掉空串。
+    """
+    if not CONFIG.is_file():
+        return []
+    try:
+        cfg = json.loads(CONFIG.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    out: list[str] = []
+    names = cfg.get("calendar_read_names")
+    if isinstance(names, list):
+        for n in names:
+            if isinstance(n, str) and n.strip() and n.strip() not in out:
+                out.append(n.strip())
+    if out:
+        return out
+    one = (cfg.get("calendar_name") or "").strip()
+    return [one] if one else []
+
+
 def create_calendar(name: str) -> tuple[str, bool]:
     """
     新建一个日历，返回 (名字, 是否新建)。
