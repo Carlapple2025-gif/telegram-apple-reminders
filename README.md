@@ -13,6 +13,60 @@
 > 中文文档在下面。使用者视角见 [`docs/USER-GUIDE.md`](docs/USER-GUIDE.md)；
 > 系统怎么工作见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
 
+### Quick start (English)
+
+**Requirements** — a Mac that stays on (a Mac mini is ideal), Python 3 (the system
+`/usr/bin/python3` is enough: stdlib only, no venv to break), a Telegram bot, and
+Automation permission for Reminders / Calendar / Notes.
+
+```bash
+# 1. a dedicated bot: talk to @BotFather → /newbot → copy the token
+git clone https://github.com/Carlapple2025-gif/telegram-apple-reminders.git
+cd telegram-apple-reminders
+
+# 2. config
+cp .env.example .env && chmod 600 .env
+#    put TELEGRAM_BOT_TOKEN in .env, then ask the bot for your chat id:
+python3 src/telegram.py whoami
+
+# 3. find or create the Apple containers (memo folder + calendar). Idempotent.
+bash deploy/setup-v4.sh                                        # dry run, changes nothing
+bash deploy/setup-v4.sh --apply --memo-folder=Memo --calendar=Assistant
+
+# 4. grant Automation (System Settings → Privacy & Security → Automation),
+#    then let it really read all three apps and report honestly:
+bash deploy/install_launchd.sh doctor
+
+# 5. install the three launchd jobs: daemon + 21:30 digest + Sun 20:00 weekly
+bash deploy/install_launchd.sh install
+```
+
+**What you send** — the leading character declares the type. The code never guesses:
+
+| you send | it lands in |
+|---|---|
+| `交电费` / `pay the bill` | Reminders — **bare text is always a to-do** (it goes to your default list) |
+| `!pay the bill` | Reminders, **flagged** (shows up in *Flagged*) |
+| `!!pay the bill` | Reminders, flagged + **high priority** |
+| `明天交电费` | to-do **with a native due date** — *Today* / *Scheduled* start working |
+| `@明天下午两点 项目周会` | Calendar (`@` requires a time it can read, otherwise it errors and writes nothing) |
+| `# 学原理比学语法重要` | Notes (appended) |
+| `/list` | read-only: open to-dos + today/tomorrow's events |
+
+**Verify it works** — everything is checkable without touching your data:
+
+```bash
+python3 src/selftest.py                  # 852 assertions, fully offline
+python3 src/intake.py --dry "明天交电费"  # dry run: routing + receipt, writes nothing
+bash deploy/install_launchd.sh status    # are the three jobs alive?
+```
+
+**Design in one line:** no database, no sync — Reminders / Calendar / Notes stay the
+single source of truth, and the agent only ever **adds**; it never edits or deletes.
+The docs themselves are in Chinese: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) is the
+design authority, and [`CHANGELOG.md`](CHANGELOG.md) records what was built, thrown away
+and why (v1 guessed your intent with a 700-word dictionary — it was deleted).
+
 **用一句话说**：你对 Telegram 发一条（用行首符号说明是待办 / 日程 / 备忘），
 Mac mini 把它写进对应的 Apple 应用（提醒事项 / 日历 / 备忘录），21:30 自动生成日报推回来。
 
