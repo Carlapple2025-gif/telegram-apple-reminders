@@ -126,13 +126,20 @@ cleanup_pre_rename() {
       fi
       launchctl bootout "gui/$(id -u)/$label" 2>/dev/null \
         || launchctl unload "$AGENTS/$label.plist" 2>/dev/null || true
-      if rm -f "$AGENTS/$label.plist" 2>/dev/null; then
-        echo "   🗑️  已停止并清理 ${label}"
+      # ⚠️ **bootout 是异步的**：它返回之后旧进程还能活几秒 —— 实测守护当时正卡在
+      # 一次长轮询里，SIGTERM 之后几秒才退出。而迁移窗口里新旧两套守护同时在跑
+      # = 抢同一个 Telegram offset，同一条消息会被处理两遍。
+      # 所以**必须等它真的走掉**再装新的（复用安装路径已有的 wait_job_gone）。
+      wait_job_gone "$label"
+      rm -f "$AGENTS/$label.plist" 2>/dev/null || true
+      # 提示语**只能照实说**：先前那版只要 rm 成功就打印"已停止"，
+      # 而那一刻旧进程其实还在 —— 说了假话（我自己就被它骗过一次，
+      # 于是 pgrep 里看到两个守护还以为是 bootout 失败）。
+      # 判据用 launchctl print，不从 rm 的成功与否去推断进程状态。
+      if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
+        echo "   ⚠️  ${label} 仍未退出（新任务会与它并存，消息可能被处理两遍）"
       else
-        # ⚠️ 必须写 ${label}：紧跟其后的是**全角**（，bash 3.2 会把它的字节
-        # 当成变量名的一部分 → set -u 下直接报未绑定（README §六 第 13 条）。
-        # 这条是自检当场抓出来的，不是我想起来的。
-        echo "   ⏹  已停止 ${label}（文件删不掉，但不会再运行）"
+        echo "   🗑️  已停止并清理 ${label}"
       fi
     fi
   done
