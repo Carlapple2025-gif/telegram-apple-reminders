@@ -24,8 +24,8 @@ v4 主线在跑，**自检 852 项全过** —— 契约由 `selftest.py` 的
 
 | 项 | 状态 |
 |---|---|
-| 收件守护 `com.carl.pdca.daemon` | ✅ `running`，pid 50489，`runs = 1`（无重启循环）|
-| 日报 `com.carl.pdca.report` | ✅ 已加载，21:30 触发（今天已成功推送，Telegram + Bark 双通道）|
+| 收件守护 `io.github.carlapple2025.pdca.daemon` | ✅ `running`，pid 50489，`runs = 1`（无重启循环）|
+| 日报 `io.github.carlapple2025.pdca.report` | ✅ 已加载，21:30 触发（今天已成功推送，Telegram + Bark 双通道）|
 | 三处 Apple 授权 | ✅ 备忘录 / 日历 / 提醒事项 均可读 |
 | 自检 | ✅ **852 项全过**（含契约断言）|
 | git | ✅ 工作区干净；标签 `v0.9.0`（契约前基线）/ `v1.0.0` / `v1.1.0` |

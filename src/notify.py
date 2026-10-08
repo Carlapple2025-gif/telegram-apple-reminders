@@ -325,7 +325,7 @@ def main() -> int:
             print("怎么配（healthchecks.io 免费档够用，20 个任务）：")
             print("  1. 注册后建一个 check")
             print("  2. Schedule 选 Cron，填     30 21 * * *")
-            print("     （与 deploy/com.carl.pdca.report.plist 的 21:30 一致）")
+            print("     （与 deploy/io.github.carlapple2025.pdca.report.plist 的 21:30 一致）")
             print("  3. Grace Time 设 1 小时")
             print("     （机器睡过头、唤醒后补跑时不会误报）")
             print("  4. 把它的 ping URL 追加到 pdca/.env：")

@@ -13,7 +13,7 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>com.carl.pdca.daemon</string>
+	<string>io.github.carlapple2025.pdca.daemon</string>
 
 	<key>ProgramArguments</key>
 	<array>

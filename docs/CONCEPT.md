@@ -79,7 +79,7 @@
 | `~/Library/Mobile Documents/iCloud~is~workflow~my~workflows/Documents/PDCA/inbox/` | ✅ 存在，**含两张真实清单照片**（9/17、9/18） |
 | `~/Library/Mobile Documents/com~apple~CloudDocs/PDCA/inbox/` | 存在但**空**（9/17 建，从未使用） |
 | `~/.pdca/`（脚本 + README + CHANGELOG） | ❌ **不存在** —— 那套东西留在旧笔记本上，没迁过来 |
-| PDCA 定时任务（`com.carl.pdca.scan`） | ❌ **从未安装** |
+| PDCA 定时任务（`io.github.carlapple2025.pdca.scan`） | ❌ **从未安装** |
 | 已有定时任务 | 只有别的项目的 6 个 |
 
 **结论：这条流水线在旧机器上被完整搭起来并验证过（96~100%），但没有迁移。你现在等于停在了「照片能同步过来、但没人处理」的状态。**

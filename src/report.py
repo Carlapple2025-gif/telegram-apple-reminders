@@ -53,8 +53,8 @@ MEMO_NAG_DAYS = 3
 # （man launchd.plist：coalesced into one event upon wake），所以 21:30 的
 # 日报完全可能在第二天早上才发出 —— 而正文里若没有生成时刻，你**看不出来**。
 SCHEDULES: dict[str, tuple[int, int]] = {
-    "daily": (21, 30),      # com.carl.pdca.report.plist（每天）
-    "weekly": (20, 0),      # com.carl.pdca.weekly.plist（**周日**）
+    "daily": (21, 30),      # io.github.carlapple2025.pdca.report.plist（每天）
+    "weekly": (20, 0),      # io.github.carlapple2025.pdca.weekly.plist（**周日**）
 }
 
 # 兼容旧引用（日报是主产物，SCHEDULE_HOUR/MINUTE 这两个名字到处都在用）

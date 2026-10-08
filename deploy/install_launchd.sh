@@ -13,9 +13,9 @@
 #   ./deploy/install_launchd.sh test        跑一遍三个任务（不推送、不写入）
 #
 # 三个任务的分工：
-#   com.carl.pdca.daemon   常驻，KeepAlive —— 你发一句就有人接
-#   com.carl.pdca.report   21:30 日报，**只读**三处快照
-#   com.carl.pdca.weekly   周日 20:00 周报，只读（完成 / 提交 / 连续天数）
+#   io.github.carlapple2025.pdca.daemon   常驻，KeepAlive —— 你发一句就有人接
+#   io.github.carlapple2025.pdca.report   21:30 日报，**只读**三处快照
+#   io.github.carlapple2025.pdca.weekly   周日 20:00 周报，只读（完成 / 提交 / 连续天数）
 #
 # 为什么守护要常驻而不是定时：v4 的唯一输入入口是 Telegram，
 # "随时发一句都有人接"是它的核心体验，定时轮询做不到这一点。
@@ -25,7 +25,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT="$(cd "$HERE/.." && pwd)"
 AGENTS="$HOME/Library/LaunchAgents"
-LABELS=(com.carl.pdca.daemon com.carl.pdca.report com.carl.pdca.weekly)
+LABELS=(io.github.carlapple2025.pdca.daemon io.github.carlapple2025.pdca.report io.github.carlapple2025.pdca.weekly)
 
 # 允许在"尚未初始化"时就安装。用途：先把任务装好，等用户完成授权与
 # 初始化后系统自动开始工作，不需要再手动装一次。
@@ -39,7 +39,16 @@ ALLOW_UNCONFIGURED=0
 # 实测踩到：v1 的 report 仍指向 daily_report.py，会在 21:30 发出一份
 # 基于旧留档的日报，与 v4 的数据完全无关、且具误导性。
 # 所以安装/卸载时都顺手清掉，避免"两套系统同时在跑"。
-LEGACY_LABELS=(com.carl.pdca.carryover com.carl.pdca.sync)
+LEGACY_LABELS=(io.github.carlapple2025.pdca.carryover io.github.carlapple2025.pdca.sync)
+
+# 2026-10-07 改名**之前**的标签（那会儿前缀里带个人名）。
+#
+# 为什么必须留着这一组：只"装新的"不够 —— **新旧两套守护会同时跑**，
+# 而它们抢的是同一个 Telegram offset：同一条消息被处理两遍
+# （两条待办、两条回执）。所以升级 = 先卸旧的 + 再装新的，
+# 而这两步必须在**同一次 install** 里完成，中间那个窗口就够出一次重复。
+PRE_RENAME_LABELS=(com.carl.pdca.daemon com.carl.pdca.report com.carl.pdca.weekly
+                   com.carl.pdca.carryover com.carl.pdca.sync)
 
 # 固定用系统 python3：它只用标准库，不依赖任何虚拟环境。
 # （别的项目那边踩过"解释器链被清掉导致任务全失效"的坑，
@@ -104,8 +113,37 @@ render() {
   plutil -lint "$dst" >/dev/null || { echo "❌ plist 不合法：$dst" >&2; exit 1; }
 }
 
+# 改名前的旧标签清理（2026-10-07 加）。放在这里而不是塞进 cleanup_legacy：
+# 两者语义不同 —— 那个清的是"v1 的功能"，这个清的是"同一套功能换了个名字"。
+cleanup_pre_rename() {
+  local old=0
+  for label in "${PRE_RENAME_LABELS[@]}"; do
+    if [ -f "$AGENTS/$label.plist" ] \
+       || launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
+      if [ "$old" -eq 0 ]; then
+        echo "发现改名前的旧任务（标签前缀里带个人名，已改成 io.github.*）："
+        old=1
+      fi
+      launchctl bootout "gui/$(id -u)/$label" 2>/dev/null \
+        || launchctl unload "$AGENTS/$label.plist" 2>/dev/null || true
+      if rm -f "$AGENTS/$label.plist" 2>/dev/null; then
+        echo "   🗑️  已停止并清理 ${label}"
+      else
+        # ⚠️ 必须写 ${label}：紧跟其后的是**全角**（，bash 3.2 会把它的字节
+        # 当成变量名的一部分 → set -u 下直接报未绑定（README §六 第 13 条）。
+        # 这条是自检当场抓出来的，不是我想起来的。
+        echo "   ⏹  已停止 ${label}（文件删不掉，但不会再运行）"
+      fi
+    fi
+  done
+  [ "$old" -eq 1 ] && echo
+  return 0
+}
+
+
 do_install() {
   cleanup_legacy
+  cleanup_pre_rename
   preflight
   for label in "${LABELS[@]}"; do
     local src="$PROJECT/deploy/$label.plist"
@@ -243,7 +281,7 @@ verify_loaded() {
         | sed -n 's/^[[:space:]]*state = //p' | head -1)"
   pid="$(launchctl print "gui/$(id -u)/$label" 2>/dev/null \
         | sed -n 's/^[[:space:]]*pid = //p' | head -1)"
-  if [ "$label" = "com.carl.pdca.daemon" ]; then
+  if [ "$label" = "io.github.carlapple2025.pdca.daemon" ]; then
     if [ "$st" = "running" ] && [ -n "$pid" ]; then
       echo "✅ $label 已加载并确认在跑（pid ${pid}）"
       return 0

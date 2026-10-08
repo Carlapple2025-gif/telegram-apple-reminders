@@ -23,6 +23,27 @@
 
 ## 未发布 / 待定
 
+### 2026-10-07 launchd 标签去掉个人名（`com.carl.pdca.*` → `io.github.carlapple2025.pdca.*`）
+
+**为什么**：仓库要公开，标签前缀里的 `carl` 是最后剩下的个人痕迹 ——
+它出现在 5 个 plist、安装脚本、README 的表格、以及 17 处自检里。
+
+**为什么不是"改个字符串"那么简单**：标签是 launchd 认任务的**主键**。
+只装新的、不管旧的，结果就是**两套守护同时在跑**，而它们抢的是同一个
+Telegram offset —— 同一条消息被处理两遍（两条待办、两条回执）。
+所以 `install` 现在会：**先卸旧的、再装新的**，而这两步在同一次调用里完成
+（`cleanup_pre_rename()`，与清 v1 的 `cleanup_legacy()` 分开写 ——
+一个清的是"v1 的功能"，一个清的是"同一套功能换了个名字"，语义不同）。
+
+**已装过的机器**：跑一次 `bash deploy/install_launchd.sh install` 即可完成迁移，
+不需要手动 bootout；自检加了一条断言守着这个护栏（旧标签不在清理名单里就红）。
+
+⚠️ 这一步会**短暂停掉守护**（卸载到重新加载之间几秒）—— 与之前每次重启一样；
+期间你在 Telegram 发的消息不会丢（offset 存在本地，恢复后接着拉）。
+
+自检：**852 → 853 项**。
+
+
 ### 2026-10-07 待办改落**原生列表** + 时间写成**原生到期日** + `!`/`!!`（**2.0.0**）
 
 **这是一次 MAJOR** —— 用户一句话定的三件事，每一件都落在契约"要重学"的那一侧：
@@ -733,7 +754,7 @@ V8（`docs/USER-GUIDE.md` 仍是符号方案之前的版本）、V9（没有"处
 
 **为什么要改**：两个通道（Telegram / Bark）只能证明"送到了"，证明不了"跑了"。
 机器睡过 21:30、任务被清、脚本在推送前崩 —— 这三种在**本机**全都看不出来。
-实测证据：`launchctl print gui/501/com.carl.pdca.report` 显示
+实测证据：`launchctl print gui/501/io.github.carlapple2025.pdca.report` 显示
 `runs = 0 / last exit code = (never exited) / job state = uninitialized`
 （reload 后计数归零），而 `logs/` 又是可以随时清的。
 

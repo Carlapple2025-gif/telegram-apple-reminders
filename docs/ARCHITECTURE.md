@@ -312,9 +312,9 @@ pdca/
 │   └── selftest.py             自检
 │
 ├── deploy/                     ← **只放"装机器"要用的**（判断规则见 README）
-│   ├── com.carl.pdca.daemon.plist    常驻
-│   ├── com.carl.pdca.report.plist    21:30
-│   ├── com.carl.pdca.weekly.plist    周日 20:00 周报
+│   ├── io.github.carlapple2025.pdca.daemon.plist    常驻
+│   ├── io.github.carlapple2025.pdca.report.plist    21:30
+│   ├── io.github.carlapple2025.pdca.weekly.plist    周日 20:00 周报
 │   ├── install_launchd.sh
 │   ├── setup-v4.sh
 │   └── legacy/                 v1 的两个任务定义（安装时自动清理）

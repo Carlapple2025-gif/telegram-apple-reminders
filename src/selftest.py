@@ -802,7 +802,7 @@ check("plist 注释里没有 --（XML 不合法）", not _dash_comments,
 # 安装后的 plist（若已安装）也要能严格解析
 import pathlib as _plD  # noqa: E402
 _home_plists = sorted((_plD.Path.home() / "Library" / "LaunchAgents").glob(
-    "com.carl.pdca.*.plist"))
+    "io.github.carlapple2025.pdca.*.plist"))
 if _home_plists:
     _bad_home: list[str] = []
     for _f in _home_plists:
@@ -823,24 +823,24 @@ section("v4 的定时任务路线")
 #
 # v1 的三个任务（09:00 同步 / 21:30 日报 / 07:00 顺延）在 v4 都不需要：
 # 待办常驻提醒事项，没有"同步"和"顺延"这两个概念。
-_plists = {p.name for p in (ROOT / "deploy").glob("com.carl.pdca.*.plist")}
-for _need in ("com.carl.pdca.daemon.plist", "com.carl.pdca.report.plist",
-              "com.carl.pdca.weekly.plist"):
+_plists = {p.name for p in (ROOT / "deploy").glob("io.github.carlapple2025.pdca.*.plist")}
+for _need in ("io.github.carlapple2025.pdca.daemon.plist", "io.github.carlapple2025.pdca.report.plist",
+              "io.github.carlapple2025.pdca.weekly.plist"):
     check(f"存在 {_need}", _need in _plists)
 
 _install = (ROOT / "deploy" / "install_launchd.sh").read_text(encoding="utf-8")
-for _lbl in ("com.carl.pdca.daemon", "com.carl.pdca.report",
-             "com.carl.pdca.weekly"):
+for _lbl in ("io.github.carlapple2025.pdca.daemon", "io.github.carlapple2025.pdca.report",
+             "io.github.carlapple2025.pdca.weekly"):
     check(f"安装列表含 {_lbl}", _lbl in _install)
 
 # 守护必须 KeepAlive（否则退出后没人接消息）
-_dmn = (ROOT / "deploy" / "com.carl.pdca.daemon.plist").read_text(encoding="utf-8")
+_dmn = (ROOT / "deploy" / "io.github.carlapple2025.pdca.daemon.plist").read_text(encoding="utf-8")
 check("守护任务设了 KeepAlive", "<key>KeepAlive</key>" in _dmn)
 check("守护任务有重启节流", "ThrottleInterval" in _dmn)
 check("守护指向 daemon.py", "src/daemon.py" in _dmn)
 
 # 日报指向新实现，且不带 v1 的 --refresh/--sync（v4 日报是纯只读）
-_rep = (ROOT / "deploy" / "com.carl.pdca.report.plist").read_text(encoding="utf-8")
+_rep = (ROOT / "deploy" / "io.github.carlapple2025.pdca.report.plist").read_text(encoding="utf-8")
 check("日报指向 report.py", "src/report.py" in _rep)
 check("v4 日报不带 v1 的 --refresh", "--refresh" not in _rep)
 check("v4 日报不带 v1 的 --sync", "--sync" not in _rep)
@@ -3313,7 +3313,7 @@ check("异常退出返回非 0", "else 1" in _dm_src3)
 # plist 的 KeepAlive 要能覆盖"崩溃即重启"的语义。
 # <true/> 的语义是"非正常退出就重启"，进程成功退出就不管了 ——
 # 用字典写法明确表达更稳妥。
-_daemon_plist = (ROOT / "deploy" / "com.carl.pdca.daemon.plist").read_text(
+_daemon_plist = (ROOT / "deploy" / "io.github.carlapple2025.pdca.daemon.plist").read_text(
     encoding="utf-8")
 check("守护 plist 用显式 KeepAlive 条件",
       "SuccessfulExit" in _daemon_plist,
@@ -3340,7 +3340,7 @@ check("restart 检查前先等待（避开竞态）", "sleep 3" in _inst3)
 # 对日报断言 running 会产生一条永远失败的假告警。
 check("存活检查区分常驻与定时任务",
       "verify_loaded" in _inst3
-      and 'if [ "$label" = "com.carl.pdca.daemon" ]; then' in _inst3)
+      and 'if [ "$label" = "io.github.carlapple2025.pdca.daemon" ]; then' in _inst3)
 # 存活判据必须看 state/pid，而不是"print 能查到"就算过 ——
 # SIGTERMed 的任务照样能被 print 查到，那正是当初误报成功的原因。
 check("存活判据不是只看'能查到'",
@@ -4041,7 +4041,7 @@ finally:
 
 # 计划时间必须与 plist 一致 —— 否则"迟到"判断会照着错的时间算，
 # 而这类不一致**不会报错**，只会让你看到一句错的告警。
-_plist_rep = (ROOT / "deploy" / "com.carl.pdca.report.plist").read_text(
+_plist_rep = (ROOT / "deploy" / "io.github.carlapple2025.pdca.report.plist").read_text(
     encoding="utf-8")
 check("report 的计划时间与 plist 一致",
       f"<key>Hour</key>\n\t\t<integer>{_rp.SCHEDULE_HOUR}</integer>" in _plist_rep
@@ -4050,7 +4050,7 @@ check("report 的计划时间与 plist 一致",
 
 # 周报的计划时间同样要与它自己的 plist 一致 —— 而且是**周日**
 # （Weekday 0 = 周日，launchd 的约定）。
-_plist_wk = (ROOT / "deploy" / "com.carl.pdca.weekly.plist").read_text(
+_plist_wk = (ROOT / "deploy" / "io.github.carlapple2025.pdca.weekly.plist").read_text(
     encoding="utf-8")
 _wk_h, _wk_m = _rp.SCHEDULES["weekly"]
 check("周报的计划时间与 plist 一致",
@@ -4349,18 +4349,25 @@ _inst = _inst_path.read_text(encoding="utf-8")
 # 所以**加任务时必须一起改这里** —— 它就是"这是第几个任务"的记录点
 # （与"命令条数"那条断言同一个用法：加东西要是一次有意的决定）。
 check("安装脚本只装 v4 的三个任务（daemon / report / weekly）",
-      "LABELS=(com.carl.pdca.daemon com.carl.pdca.report"
-      " com.carl.pdca.weekly)" in _inst)
+      "LABELS=(io.github.carlapple2025.pdca.daemon io.github.carlapple2025.pdca.report"
+      " io.github.carlapple2025.pdca.weekly)" in _inst)
 # 安装脚本**不安装** v1 任务，但会**清理**它们 ——
 # 实测踩到：换架构时只装新的、不管旧的，旧任务会继续按老逻辑动数据
 # （v1 的 report 会在 21:30 发一份基于旧留档的误导日报）。
 check("安装列表只含 v4 三个任务",
-      "LABELS=(com.carl.pdca.daemon com.carl.pdca.report"
-      " com.carl.pdca.weekly)" in _inst)
+      "LABELS=(io.github.carlapple2025.pdca.daemon io.github.carlapple2025.pdca.report"
+      " io.github.carlapple2025.pdca.weekly)" in _inst)
 check("安装脚本会清理 v1 遗留任务", "cleanup_legacy" in _inst
       and "LEGACY_LABELS" in _inst)
 check("v1 任务被标为遗留而非安装",
-      "LEGACY_LABELS=(com.carl.pdca.carryover com.carl.pdca.sync)" in _inst)
+      "LEGACY_LABELS=(io.github.carlapple2025.pdca.carryover io.github.carlapple2025.pdca.sync)" in _inst)
+# 2026-10-07 改了标签前缀（去掉个人名）。这条守的是**迁移**里唯一危险的坑：
+# 只装新的、不管旧的 → 新旧两套守护同时跑 → 抢同一个 Telegram offset →
+# 同一条消息被处理两遍。所以旧标签必须在清理名单里，且 install 要调它。
+check("安装脚本会卸掉改名前的旧标签（防两套守护同时跑）",
+      "cleanup_pre_rename" in _inst
+      and "PRE_RENAME_LABELS=(com.carl.pdca.daemon" in _inst
+      and "  cleanup_legacy\n  cleanup_pre_rename\n" in _inst)
 
 # v1 的 test 会跑 daily_report/carry_over —— v4 必须换成新入口，
 # 否则"验证安装"验证的是已经不用了的代码

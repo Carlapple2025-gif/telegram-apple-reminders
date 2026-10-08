@@ -21,7 +21,7 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>com.carl.pdca.weekly</string>
+	<string>io.github.carlapple2025.pdca.weekly</string>
 
 	<key>ProgramArguments</key>
 	<array>

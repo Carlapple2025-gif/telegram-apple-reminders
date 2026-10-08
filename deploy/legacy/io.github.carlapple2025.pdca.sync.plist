@@ -17,7 +17,7 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>com.carl.pdca.sync</string>
+	<string>io.github.carlapple2025.pdca.sync</string>
 
 	<key>ProgramArguments</key>
 	<array>

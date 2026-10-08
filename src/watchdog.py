@@ -45,7 +45,7 @@ from typing import Callable
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# 计划的日报时间（与 deploy/com.carl.pdca.report.plist、report.py 一致）
+# 计划的日报时间（与 deploy/io.github.carlapple2025.pdca.report.plist、report.py 一致）
 SCHEDULE_HHMM = "21:30"
 
 # 到几点还没送到才算"漏了"。

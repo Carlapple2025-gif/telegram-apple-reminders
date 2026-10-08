@@ -232,12 +232,16 @@ python3 src/telegram.py menu --set         # 把 commands.MENU 推上去
 
 | 任务 | 时间 | 是否写数据 |
 |---|---|---|
-| `com.carl.pdca.daemon` | 常驻（KeepAlive） | ✅ 唯一写入者 |
-| `com.carl.pdca.report` | 每天 21:30 | ❌ **只读** |
-| `com.carl.pdca.weekly` | 周日 20:00 | ❌ **只读**（周报：完成 / 提交 / 连续天数） |
+| `io.github.carlapple2025.pdca.daemon` | 常驻（KeepAlive） | ✅ 唯一写入者 |
+| `io.github.carlapple2025.pdca.report` | 每天 21:30 | ❌ **只读** |
+| `io.github.carlapple2025.pdca.weekly` | 周日 20:00 | ❌ **只读**（周报：完成 / 提交 / 连续天数） |
 
-v1 的 `com.carl.pdca.sync` / `com.carl.pdca.carryover` 会在安装时被自动清理 ——
+v1 的 `…pdca.sync` / `…pdca.carryover` 会在安装时被自动清理 ——
 它们指向已废弃的脚本，留着会"两套系统同时在跑"。
+
+**2026-10-07 改了标签前缀**（原来带个人名，现统一成 `io.github.carlapple2025.pdca.*`）。
+`install` 会先卸掉**改名前的旧标签**再装新的 —— 这一步不能省：
+两套守护会抢同一个 Telegram offset，同一条消息被处理两遍。
 
 ### 真实环境自检
 
@@ -330,9 +334,9 @@ pdca/
 ├── deploy/                    ← **只放"装机器"要用的东西**
 │   ├── setup-v4.sh            一键初始化（干跑 / --apply）
 │   ├── install_launchd.sh     任务管理（install/status/test/restart/doctor）
-│   ├── com.carl.pdca.daemon.plist    常驻收件守护
-│   ├── com.carl.pdca.report.plist    21:30 日报
-│   ├── com.carl.pdca.weekly.plist    周日 20:00 周报
+│   ├── io.github.carlapple2025.pdca.daemon.plist    常驻收件守护
+│   ├── io.github.carlapple2025.pdca.report.plist    21:30 日报
+│   ├── io.github.carlapple2025.pdca.weekly.plist    周日 20:00 周报
 │   └── legacy/                v1 的两个定时任务定义（安装时会自动清理，
 │                              留着是为了看清 v1 曾经装了什么）
 │

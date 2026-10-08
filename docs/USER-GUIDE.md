@@ -244,8 +244,8 @@ cd /path/to/telegram-apple-reminders    # 换成你 clone 的位置
 bash deploy/install_launchd.sh status      # 要修就：bash deploy/install_launchd.sh restart
 ```
 
-看 `com.carl.pdca.daemon` 那一段，要有 `pid = 数字`（只有一行 `state` 不算数）。
-`com.carl.pdca.report` 平时不跑是正常的 —— 它是定时任务。
+看 `io.github.carlapple2025.pdca.daemon` 那一段，要有 `pid = 数字`（只有一行 `state` 不算数）。
+`io.github.carlapple2025.pdca.report` 平时不跑是正常的 —— 它是定时任务。
 
 > ⚠️ 实测踩到过：`restart` 在**受限的执行环境**里会
 > `Bootstrap failed: 5: Input/output error` —— bootout 成功、bootstrap 失败，

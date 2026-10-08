@@ -138,7 +138,7 @@
 | **D** | `notify.py:167-174`（if/elif）+ `:160,164`（默认列表） | 通道名 → 实现的映射写死在 if/elif 里；默认 `["telegram","bark"]` **两处重复**（160 是抑制分支、164 是真发分支） | 加第三条通道要改 4 处 + 3 个外部字面量（`watchdog.py:150`、`report.py:604`、`notify.py:280`）；漏改抑制分支那处 = 抑制模式下少报一个通道 |
 | **E** | `commands.py:53`（`ALIASES`）、`:64`（`USAGE`）、`:75-77`（`MENU`）+ `daemon.py:552` | 命令词汇写了**三份手写表**：8 个别名 / 一句 USAGE / 菜单一项。`daemon.py:384` 按字面分流 | 加第二条命令要同步 3 张表 + 自检的形状断言。**⚠️ 但这一处 2026-10-05 已经改好了一半**：`MENU` 是单一来源，由 `daemon.py:552` 推给 Telegram（`set_my_commands`），而不是在 `telegram.py` 里另写一份 —— 这正是"表 + 推送"的正确形态，应当照抄到别处 |
 | **F** | `intake.py:84-86, 340` + `journal.py:108-111` | 事件名**定义了两份**（`journal.EV_TODO_ADDED = "todo_added"` 与 intake 里的裸字面量）；且 `_LOG_FUNCS.get(event)` 取不到时**静默 `return`** | 在单体内这是防御；在注册表结构里这是**新功能忘了登记 → 一条记录都不写、而且没人知道**。正是本项目最忌讳的静默失效 |
-| **G** | `report.py:53-54`、`watchdog.py:49`、`deploy/com.carl.pdca.report.plist:4` | 计划时间 `21:30` **三处手工同步**（代码两处 + plist 一处） | 改一次时间要记得改三处；漏一处 = 看门狗按旧时间判断"没送到" |
+| **G** | `report.py:53-54`、`watchdog.py:49`、`deploy/io.github.carlapple2025.pdca.report.plist:4` | 计划时间 `21:30` **三处手工同步**（代码两处 + plist 一处） | 改一次时间要记得改三处；漏一处 = 看门狗按旧时间判断"没送到" |
 | **H** | `report.py:585-589`（`_heartbeat_summary`） | 心跳摘要**又硬编码了一遍四个品类计数**（完成/未完成/明日日程/备忘/失败） | 加品类要改的**第 3 个**地方（`ReportData`、`build_report`、心跳摘要） |
 | **I** | `config.json` 全 13 行 | **一个平台级配置项都没有** —— 全是三个 App 的落点。通道在 `.env`、计划时间在代码、符号表在 `routes.py` | 平台没有"配置面"：关一个功能、换一个通道、改一次计划时间，都要改代码 |
 | **J** | `selftest.py:674-676`、`:3145-3146`、`:1195-1196`、`:1944` | 新增一个模块要**手工登记 4 处名单**，还要手写一节断言；而 `:674` 那张"逐模块 import 检查"名单**是 v1 的**（`journal`/`memo`/`applecal`/`whens`/`kinds`/`routes`/`intake`/`daemon`/`report` 十个 v4 模块**一个都不在里面**） | 登记点越多，"忘了登记"越容易 —— 而漏登记的后果是**这条新功能完全没有防线**（顺手该修的就是 `:674` 这张名单） |

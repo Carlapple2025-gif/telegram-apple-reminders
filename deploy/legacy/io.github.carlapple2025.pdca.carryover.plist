@@ -15,7 +15,7 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>com.carl.pdca.carryover</string>
+	<string>io.github.carlapple2025.pdca.carryover</string>
 
 	<key>ProgramArguments</key>
 	<array>
