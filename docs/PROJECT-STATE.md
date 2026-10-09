@@ -197,6 +197,7 @@ journal 是**追加不改**的传感器读数，所以这些记录会永久保�
 | [`KERNEL-CONTRACT.md`](KERNEL-CONTRACT.md) | **契约（机器可核对）** | 动内核 / 加功能 / 加版本号之前 —— **必读** |
 | [`PLATFORM-BOUNDARY.md`](PLATFORM-BOUNDARY.md) | **提案，未裁决** | 想知道"平台化还差哪几步"（§六 第 4–8 步）|
 | [`APPLE-FACTS.md`](APPLE-FACTS.md) | **平台事实 + 证据（可复核）** | 想问"Apple 这边能不能做"时 —— 动日历 / 提醒事项之前 |
+| [`CADENCE.md`](CADENCE.md) | **设计已定（2026-10-10），未实施** | 讨论"东西该住在哪个 App、按什么节奏看"时 —— 动载体 / 改日报之前 |
 | [`../CHANGELOG.md`](../CHANGELOG.md) | 行为变化与架构决定 | 想知道"什么时候变的、为什么" |
 | [`PROJECT-STATE.md`](PROJECT-STATE.md) | 本文，接续点 | 新会话开始时 |
 | [`USER-GUIDE.md`](USER-GUIDE.md) | 使用者视角 | 忘了怎么用 |
