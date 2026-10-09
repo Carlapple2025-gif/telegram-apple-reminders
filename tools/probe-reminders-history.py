@@ -117,11 +117,15 @@ if err or not out:
 name, n_all, n_open, n_done = (out.split("\t") + ["", "", "", ""])[:4]
 print(f"   列表 = {name!r} ｜ 总数 {n_all} ｜ 未完成 {n_open} ｜ 已完成 {n_done}")
 
-# ── ② 已完成样本（只取 3 条：每条 ~1.4 秒，取多了纯浪费）
+# ── ② **最近**完成的样本（只取 3 条：每条 ~1 秒，取多了纯浪费）
+#    2026-10-10 改：原来取的是"最老的几条"（repeat 从头开始），参考价值低 ——
+#    现在只在窗口内取，看的就是最近发生了什么。
 src_done = SETUP + (
+    '  set cutoff to (current date) - 14 * days\n'
     '  set out to ""\n'
     '  set k to 0\n'
-    '  repeat with r in (reminders in theList whose completed is true)\n'
+    '  repeat with r in (reminders in theList whose completed is true '
+    'and completion date ≥ cutoff)\n'
     '    set k to k + 1\n'
     '    if k > 3 then exit repeat\n'
     '    set cd to ""\n'
