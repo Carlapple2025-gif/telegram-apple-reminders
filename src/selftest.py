@@ -1320,7 +1320,7 @@ check("KERNEL-CONTRACT 的版本与 VERSION 一致",
 # 名单式检查漏登记是没有后果的，划分式检查不会。
 _KERNEL = {"telegram", "journal", "whens", "kinds", "parse", "routes", "intake",
            "notify", "reminders", "applecal", "memo", "daemon"}
-_FEATURE = {"report", "commands", "watchdog"}
+_FEATURE = {"report", "commands", "watchdog", "habits"}
 _LEGACY = {"carry_over", "cleanup", "cleanup_reminders", "completion", "daily_report",
            "notes", "probe_reminders", "push_tasks", "read_day", "reconcile", "sync"}
 _TOOLING = {"selftest"}
@@ -1361,6 +1361,7 @@ _WHITELIST = {
     ("commands", "report"):    "读函数暂住日报；区块注册表那一步归位到内核读层",
     ("daemon", "commands"):    "通道层字面分流；命令注册表那一步消除",
     ("daemon", "watchdog"):    "降级加载（形态是好的）；等插件自注册",
+    ("daemon", "habits"):      "同 watchdog 形态（降级加载）；等插件自注册",
     ("telegram", "commands"):  "CLI 推 / 菜单时去取命令表；应改成参数传入",
 }
 
@@ -4726,6 +4727,118 @@ finally:
         sys.modules.pop("applecal", None)
     else:
         sys.modules["applecal"] = _sv_applecal_mod
+
+section("v4 习惯留档（2026-10-11：把完成记录抄进 journal）")
+
+# 为什么需要它：提醒事项的完成历史会被"清除已完成"清掉，而读 Apple 逐条明细
+# 实测 ~1 s/条（APPLE-FACTS §2.5）—— 所以只能"每晚读窗口 + 抄进 journal"。
+_rm_h = sys.modules.get("reminders") or _load(SRC / "reminders.py")
+_hab_h = _load(SRC / "habits.py")
+
+# ① 读脚本必须用原生 whose 窗口筛（而不是 all_reminders 全量读回 Python 筛）
+_cap_h: list[str] = []
+_sv_run_h = _rm_h.run
+try:
+    _rm_h.run = lambda src, **kw: (_cap_h.append(src), "")[1]
+    _rm_h.Reminders({"reminders_list": "习惯"}).completed_since(3)
+finally:
+    _rm_h.run = _sv_run_h
+_h_src = _cap_h[-1] if _cap_h else ""
+check("习惯读取用原生 whose 窗口筛（不读全量）",
+      "whose completed is true" in _h_src
+      and "is greater than or equal to cutoff" in _h_src, _h_src[:160])
+check("习惯读取的窗口是参数化的（不是写死的天数）",
+      "- 3 * days" in _h_src, _h_src[:160])
+_h_proc = _sp.run(["/usr/bin/osacompile", "-e", _h_src, "-o", "/tmp/_h.scpt"],
+                    capture_output=True, text=True)
+check("习惯读取脚本真的能编译（不需要授权）",
+      _h_proc.returncode == 0, (_h_proc.stderr or "")[:160])
+
+# ② 解析：名字里带换行也不能错位（id 固定首行、完成时刻固定末行）
+try:
+    _rm_h.run = lambda src, **kw: ("RID-1\n英语·正常\n2026,10,11,20,5\n----\n"
+                                   "RID-2\n跑\n步\n2026,10,11,7,0\n----\n")
+    _parsed_h = _rm_h.Reminders({"reminders_list": "习惯"}).completed_since(3)
+finally:
+    _rm_h.run = _sv_run_h
+check("习惯读取能解析出 id / 名字 / 完成时刻", len(_parsed_h) == 2, str(len(_parsed_h)))
+check("名字里的换行不会被拆错（多行都算名字）",
+      len(_parsed_h) == 2 and _parsed_h[1].name == "跑\n步",
+      _parsed_h[1].name if len(_parsed_h) > 1 else "—")
+check("完成时刻解析正确",
+      bool(_parsed_h) and _parsed_h[0].completed_at is not None
+      and _parsed_h[0].completed_at.hour == 20, str(_parsed_h[0].completed_at))
+
+# ③ 该不该扫（纯函数，不碰 Apple 也不碰文件）
+check("还没到 21:00 不扫",
+      _hab_h.should_scan(_dt2.datetime(2026, 10, 11, 20, 0),
+                         list_name="习惯", scanned_today=False)[0] is False)
+check("过了 21:00 且今天没扫过 → 扫",
+      _hab_h.should_scan(_dt2.datetime(2026, 10, 11, 21, 30),
+                         list_name="习惯", scanned_today=False)[0] is True)
+check("今天扫过就不再扫（每天最多一次）",
+      _hab_h.should_scan(_dt2.datetime(2026, 10, 11, 22, 0),
+                         list_name="习惯", scanned_today=True)[0] is False)
+check("没配置列表就不扫（未启用不是故障）",
+      _hab_h.should_scan(_dt2.datetime(2026, 10, 11, 22, 0),
+                         list_name="", scanned_today=False)[0] is False)
+
+# ④ 判重：同一次发生绝不写两条（窗口重叠、重跑、补醒都靠它）
+_h_dir = _fresh_journal()
+_sv_jd_h = _jm.JOURNAL_DIR
+_sv_rm_mod = sys.modules.get("reminders")
+try:
+    _jm.JOURNAL_DIR = _h_dir
+
+    class _FakeRem:
+        def __init__(self, cfg=None):
+            pass
+
+        def completed_since(self, days):
+            return [_rm_h.Reminder(id="H1", name="英语", completed=True, body="",
+                                   due="", completed_at=_dt2.datetime(2026, 10, 11, 20, 5)),
+                    _rm_h.Reminder(id="H2", name="跑步", completed=True, body="",
+                                   due="", completed_at=_dt2.datetime(2026, 10, 11, 7, 0))]
+
+    sys.modules["reminders"] = type("_m", (), {"Reminders": _FakeRem})
+    _h1 = _hab_h.scan(list_name="习惯", days=3)
+    check("习惯扫描：第一次两条都记下", _h1 == {"found": 2, "added": 2, "skipped": 0}, str(_h1))
+    _h2 = _hab_h.scan(list_name="习惯", days=3)
+    check("习惯扫描：重跑不写重（按 id 判重）",
+          _h2 == {"found": 2, "added": 0, "skipped": 2}, str(_h2))
+    _lines_h = [_json2.loads(x) for p in _h_dir.glob("*.jsonl")
+                for x in p.read_text(encoding="utf-8").splitlines() if x.strip()]
+    check("journal 里恰好两条 habit_done（没写重）",
+          sum(1 for x in _lines_h if x.get("event") == "habit_done") == 2,
+          str([x.get("event") for x in _lines_h]))
+    check("每条带 habit_id / name / done_at",
+          all(x.get("habit_id") and x.get("name") and x.get("done_at")
+              for x in _lines_h if x.get("event") == "habit_done"),
+          str([x for x in _lines_h if x.get("event") == "habit_done"]))
+    check("扫描本身也留一条读数（今天扫过没有靠它）",
+          sum(1 for x in _lines_h if x.get("event") == "habit_scanned") == 2,
+          str([x.get("event") for x in _lines_h]))
+    check("habit_scanned_on 能读出'今天扫过'",
+          _jm.habit_scanned_on(_dt2.date.today().isoformat()) is True)
+finally:
+    _jm.JOURNAL_DIR = _sv_jd_h
+    if _sv_rm_mod is None:
+        sys.modules.pop("reminders", None)
+    else:
+        sys.modules["reminders"] = _sv_rm_mod
+    _sh2.rmtree(_h_dir, ignore_errors=True)
+
+# ⑤ 守护里真的挂了它（而且和看门狗同一套降级写法）
+_dm_src_h = (SRC / "daemon.py").read_text(encoding="utf-8")
+check("守护循环里挂了习惯留档", "_habits.tick()" in _dm_src_h)
+check("习惯留档导入失败只降级、不带停收件",
+      "import habits as _habits" in _dm_src_h
+      and "习惯留档不可用（不影响收件）" in _dm_src_h)
+
+# ⑥ 读的 key 与文档一致（改 key 忘了改代码 / 反过来，都会被这条抓到）
+_hab_src_h = (SRC / "habits.py").read_text(encoding="utf-8")
+check("habits.py 读的配置键是 habits_list / habits_window_days",
+      '"habits_list"' in _hab_src_h and '"habits_window_days"' in _hab_src_h)
 
 
 # ── 汇总

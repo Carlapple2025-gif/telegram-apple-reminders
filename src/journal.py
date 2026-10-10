@@ -114,6 +114,8 @@ EV_OBSERVED = "observed"      # 一次快照观察的结果
 EV_ERROR = "error"            # 处理失败（供排查）
 EV_DIGEST_PUSHED = "digest_pushed"   # 日报投递结果（含每通道成败与心跳结果）
 EV_DIGEST_MISSING = "digest_missing"  # 到点没送到 → 看门狗发过一次告警
+EV_HABIT_DONE = "habit_done"          # 一条习惯完成记录（一次发生 = 一条，按 id 判重）
+EV_HABIT_SCANNED = "habit_scanned"    # 一次习惯扫描（每天最多一条，含读到/新增计数）
 
 # 会用到的日期键（某些事件跨天出现，需要单独记）
 DATE_KEY = "for_date"
@@ -232,6 +234,48 @@ def log_memo(text: str, memo_id: str, ok: bool = True, detail: str = "",
 def log_memo_cleared(memo_id: str, text: str = "") -> dict:
     """记下"快照里发现这条不在了"（即你已删除）。此后永不再提醒。"""
     return append(EV_MEMO_CLEARED, memo_id=memo_id, text=text)
+
+
+def log_habit_done(habit_id: str, name: str, done_at: str = "",
+                   list_name: str = "") -> dict:
+    """
+    记下"某个习惯完成了某一次"。
+
+    **一条完成记录 = 一条事件**；`habit_id` 是 Apple 给那一次发生的 id，
+    它是判重的**唯一凭据**（读取窗口会重叠，重跑绝不能写重）。
+
+    为什么还要 `done_at`：完成时刻是"你做事的时间"，
+    而事件的 `at` 是"系统看到它的时间"（每晚扫一次，可能晚几小时）。
+    **统计一律用 done_at**，不用 at。
+    """
+    return append(EV_HABIT_DONE, habit_id=habit_id, name=name,
+                  done_at=done_at, list_name=list_name)
+
+
+def log_habit_scanned(*, list_name: str, found: int, added: int,
+                      skipped: int = 0, detail: str = "") -> dict:
+    """
+    记一次扫描（**每天最多一条** —— 它同时就是"今天扫过没有"的读数）。
+
+    为什么无事也要记：不记的话，"今天没扫"和"扫了但一条都没完成"
+    在 journal 里长得一模一样 ✗（同 digest_pushed 与 digest_missing 的分工）。
+    """
+    return append(EV_HABIT_SCANNED, list_name=list_name, found=found,
+                  added=added, skipped=skipped, detail=detail)
+
+
+def habit_ids(days: int = 7) -> set[str]:
+    """最近若干天 journal 里出现过的 habit_id（判重用）。"""
+    out: set[str] = set()
+    for rec in read_range(days):
+        if rec.get("event") == EV_HABIT_DONE and rec.get("habit_id"):
+            out.add(str(rec["habit_id"]))
+    return out
+
+
+def habit_scanned_on(day: str) -> bool:
+    """那一天扫过了没有。**不新增状态**：从 journal 的读数里看（同 delivered_on）。"""
+    return any(r.get("event") == EV_HABIT_SCANNED for r in read_day(day))
 
 
 def log_observed(kind: str, present: int = 0, cleared: list | None = None,

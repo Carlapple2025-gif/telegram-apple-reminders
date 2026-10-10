@@ -312,6 +312,66 @@ class Reminders:
                 if r.completed and r.completed_at is not None
                 and r.completed_at.date() == day]
 
+    def completed_since(self, days: int = 3) -> list[Reminder]:
+        """
+        **从 N 天前到现在**完成的条目（Apple 服务端 `whose` 过滤）。
+
+        与 `completed_on()` 的差别是**代价**，这条是实测出来的：
+
+        | 读法 | 7 条列表上的实测 |
+        |---|---|
+        | `completed_on()` → `all_reminders()` | 每条 4 次属性读取，~1 s/条 |
+        | **`completed_since()`** → 原生 `whose` 先筛 | 窗口筛 **595 ms**（命中 2 条）|
+
+        攒了 100 条历史时，前者就是 100 秒 —— 足够拖垮 21:30 的日报。
+        所以**留档 / 统计一律用这条**；`completed_on()` 留给"确实全都要"的场合。
+
+        ⚠️ 写全 `is greater than or equal to`，不简写 `>=` —— 见
+        `yesterday_done_count()` 的说明（缺运算符的 `whose` 会编译失败）。
+        实测依据：tools/probe-reminders-history.py（2026-10-10）。
+        """
+        out = run(
+            f'set cutoff to (current date) - {int(days)} * days\n'
+            'tell application "Reminders"\n'
+            f'  set L to list {lit(self.list_name)}\n'
+            '  set out to ""\n'
+            '  repeat with r in (every reminder of L whose completed is true '
+            'and completion date is greater than or equal to cutoff)\n'
+            '    set out to out & (id of r) & linefeed\n'
+            '    set out to out & (name of r) & linefeed\n'
+            '    set cd to (completion date of r)\n'
+            '    if cd is missing value then\n'
+            '      set out to out & "none" & linefeed\n'
+            '    else\n'
+            '      set out to out & (year of cd as integer) & "," & '
+            '(month of cd as integer) & "," & (day of cd) & "," & '
+            '(hours of cd) & "," & (minutes of cd) & linefeed\n'
+            '    end if\n'
+            '    set out to out & "----" & linefeed\n'
+            '  end repeat\n'
+            '  return out\n'
+            'end tell'
+        )
+        items: list[Reminder] = []
+        chunk: list[str] = []
+        for line in out.splitlines():
+            if line.strip() == "----":
+                # 名字里可能带换行 → 中间几行都算名字（比 all_reminders 的
+                # "取 chunk[2]" 更稳；id 固定首行、完成时刻固定末行）
+                if len(chunk) >= 3:
+                    items.append(Reminder(
+                        id=chunk[0],
+                        name="\n".join(chunk[1:-1]),
+                        completed=True,
+                        body="",
+                        due="",
+                        completed_at=_parse_completion(chunk[-1]),
+                    ))
+                chunk = []
+            else:
+                chunk.append(line)
+        return items
+
     def open_reminders(self) -> list[Reminder]:
         return [r for r in self.all_reminders() if not r.completed]
 

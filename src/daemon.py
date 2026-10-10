@@ -582,6 +582,17 @@ def main() -> int:
             _log(f"看门狗不可用（不影响收件）：{type(e).__name__}: "
                  f"{_trunc(str(e))}")
 
+    # 习惯留档：每晚把提醒事项里的完成记录抄进 journal（2026-10-11 加）。
+    # 写法与看门狗完全一致（循环外导一次、失败降级、绝不影响收件）——
+    # 见 src/habits.py 顶部：为什么不新增定时任务、为什么由守护来写。
+    _habits = None
+    if not _OFFLINE:
+        try:
+            import habits as _habits
+        except Exception as e:  # noqa: BLE001 —— 故意的：降级而不是崩
+            _log(f"习惯留档不可用（不影响收件）：{type(e).__name__}: "
+                 f"{_trunc(str(e))}")
+
     _consecutive_failures = 0
     while _running:
         # 主循环这道兜底是**最后一道**（run_once 内部已各自兜住网络错与单条消息错）：
@@ -601,6 +612,10 @@ def main() -> int:
             # "装了没生效"的可能（本项目在 launchd 上踩过两次）。
             if _watchdog is not None:
                 _watchdog.tick()
+            # 习惯留档：21:00 之后、今天还没扫过，就读一次提醒事项的完成窗口
+            # （每天最多一次 + 按 id 判重 + 内部吞异常 —— 见 habits.py）。
+            if _habits is not None:
+                _habits.tick()
         except (OSError, http.client.HTTPException) as e:
             _consecutive_failures += 1
             _log(f"循环异常（第 {_consecutive_failures} 次，继续运行）："
