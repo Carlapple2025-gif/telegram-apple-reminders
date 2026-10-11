@@ -4840,6 +4840,61 @@ _hab_src_h = (SRC / "habits.py").read_text(encoding="utf-8")
 check("habits.py 读的配置键是 habits_list / habits_window_days",
       '"habits_list"' in _hab_src_h and '"habits_window_days"' in _hab_src_h)
 
+section("v4 裸时刻补日期（2026-10-11：下午3点不再只进备注）")
+
+# 起因：用户发「下午3点生成第一个视频」→ 提醒事项里只在「全部」出现，
+# 「已编排」「今日」都没有。根因是解析器算出了今天 15:00，
+# 但 has_date=False → 不写日期字段、只把时刻塞进备注，
+# 而备注被渲染成名字下面的第二行、长得跟到期日一样 ✗。
+_wh_m = sys.modules.get("whens") or _load(SRC / "whens.py")
+_rt_m = sys.modules.get("routes") or _load(SRC / "routes.py")
+_it_m = sys.modules.get("intake") or _load(SRC / "intake.py")
+
+_NOW = _dt2.datetime(2026, 10, 11, 10, 0)      # 上午 10 点：用来固定"已过 / 没到"
+
+
+def _prom(text, now=_NOW):
+    w = _wh_m.parse_when(text)
+    return _wh_m.promote_bare_time(w, now=now) if w else None
+
+
+_p1 = _prom("下午3点生成视频")
+check("裸时刻·还没到 → 今天，且标为「补的」",
+      _p1 is not None and _p1.start == _dt2.datetime(2026, 10, 11, 15, 0)
+      and _p1.has_date is True and _p1.date_inferred is True,
+      str(_p1.start) if _p1 else "None")
+_p2 = _prom("上午9点开会")
+check("裸时刻·已经过了 → 明天（实测里上午 9 点正是这种情况）",
+      _p2 is not None and _p2.start == _dt2.datetime(2026, 10, 12, 9, 0),
+      str(_p2.start) if _p2 else "None")
+_p3 = _prom("明天下午3点生成视频")
+check("说了日子的 → 原样不动、**不标**补的",
+      _p3 is not None and _p3.start == _dt2.datetime(2026, 10, 12, 15, 0)
+      and _p3.date_inferred is False, str(_p3.start) if _p3 else "None")
+check("没有时间的句子 → 解析不出就是 None（不硬补）",
+      _wh_m.parse_when("交电费") is None)
+check("全天 / 无时刻的 When 不被改动",
+      _wh_m.promote_bare_time(
+          _wh_m.When(start=_dt2.datetime(2026, 10, 11, 9, 0),
+                     end=_dt2.datetime(2026, 10, 11, 9, 0),
+                     all_day=True, has_date=True), now=_NOW).date_inferred is False)
+
+# 路由层：**写入端与回执必须看到同一个 when**，否则回执会说"只写进备注" ✗
+_it_title = _rt_m.route("下午3点生成第一个视频")
+check("路由层给待办补上了日期",
+      _it_title.when is not None and _it_title.when.has_date is True
+      and _it_title.when.date_inferred is True, str(_it_title.when))
+_rp_txt = _it_m._reply_ok(_it_title, "x")
+check("回执说出「日子是补的」（不悄悄替你决定）",
+      "补成" in _rp_txt and "10月11日" in _rp_txt, _rp_txt)
+check("回执同时说清会响", "到点提醒" in _rp_txt, _rp_txt)
+
+# ⚠️ 范围只到待办：事件那条路**没动**（一次只改一件事）
+_ev_t = _rt_m.route("@下午3点 开会")
+check("事件那条路没被动（不补日期、不标 inferred）",
+      _ev_t.when is not None and _ev_t.when.date_inferred is False,
+      str(_ev_t.when))
+
 
 # ── 汇总
 

@@ -33,6 +33,7 @@ AppleScript 的日期字面量受**系统区域设置**影响，直接拼字符�
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import re
 from dataclasses import dataclass
@@ -188,6 +189,9 @@ class When:
     has_time: bool = False      # 说了具体时刻吗
     date_text: str = ""         # 命中的原文（便于回显给用户确认）
     time_text: str = ""
+    # 这个日期是**按规则推出来**的（原来只说了一个时刻，见 promote_bare_time）。
+    # 为什么要单独记：回执必须说出来 —— 那是"明说的规则"，不是"悄悄替你决定"。
+    date_inferred: bool = False
 
 
 def parse_when(text: str, base: dt.date | None = None,
@@ -249,6 +253,47 @@ def parse_when(text: str, base: dt.date | None = None,
         has_date=has_date, has_time=has_time,
         date_text=date_part[1] if date_part else "",
         time_text=time_text,
+    )
+
+
+def promote_bare_time(w: When, now: dt.datetime | None = None) -> When:
+    """
+    把"只有时刻、没有日期"补成一个**明确的日子**（2026-10-11 加）。
+
+    规则（**明说的**，不是猜意图）：
+
+        · 该时刻**还没到** → 今天
+        · 该时刻**已经过了** → 明天
+
+    ## 为什么要它（实测的代价）
+
+    用户发"下午3点生成第一个视频"：解析器**算出了**今天 15:00，
+    但 `has_date=False` → 写入端**不写日期字段**，只把时刻塞进备注。结果：
+
+      · 提醒事项的「已编排」「今日」**都不收它**（它们只看日期字段）；
+      · 而备注被渲染成名字下面的**第二行**、长得跟到期日一模一样 ✗
+        → 用户以为设好了，实际什么都没设。
+
+    与日历 App 的行为一致。**改的只是"哪一天"这个基准**，
+    没有改变"哪一类"（那是符号表的事，不动）。
+
+    ⚠️ 不要把它塞进 `parse_when()`：那里 `has_date=False` 是**另一个功能的判据**
+    （`is_bare_time()` 用"整句只是时间"来认出"用户在补上一条的时间"）。
+    这条规则的适用范围是**待办的落点**，所以由 routes 层调用。
+    """
+    if w.has_date or not w.has_time:
+        return w
+    now = now or dt.datetime.now()
+    day = w.start.date()
+    if w.start <= now:
+        day = day + dt.timedelta(days=1)
+    shift = day - w.start.date()
+    return dataclasses.replace(
+        w,
+        start=w.start + shift,
+        end=(w.end + shift) if w.end else w.end,
+        has_date=True,
+        date_inferred=True,
     )
 
 

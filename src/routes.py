@@ -146,6 +146,12 @@ def route(text: str, base: dt.date | None = None) -> Item:
     when = None
     if kind is Kind.TODO:
         when = whens.parse_when(body, base)
+        # 裸时刻补日期（2026-10-11）："下午3点生成视频"要落成**今天 15:00 的到期日**，
+        # 而不是"没有日期 + 备注里一行看起来像日期的东西"（那正是用户被误导的地方）。
+        # 放在路由层而不是写入端：**写入端与回执必须看到同一个 when** ——
+        # 否则回执还会说"只写进备注"，而那句话已经不成立了 ✗。
+        if when is not None:
+            when = whens.promote_bare_time(when)
         stripped = whens.strip_time_phrases(body)
         if stripped:
             body = whens.clean_text(stripped)

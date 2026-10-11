@@ -180,8 +180,13 @@ def _reply_ok(it: Item, ref_id: str) -> str:
         # 待办的时间现在**多会落成原生到期日**（2026-10-07 起）——
         # 回执必须说清它落成了什么、会不会弹（"写进去了"≠"会响"）。
         _w = whens.format_when(it.when, all_day_note=False)
-        if not it.when.has_date:
-            # 只有时刻、没有日期 → 落不成日期，仍写进备注
+        if getattr(it.when, "date_inferred", False):
+            # 原来只说了一个时刻，日子是**按规则补**的（今天 / 已过则明天）。
+            # 必须说出来：这条规则的立场是"明说"，不是"悄悄替你决定"。
+            detail.append(f"{_w}（没写日子 → 补成 "
+                          f"{it.when.start.month}月{it.when.start.day}日 · 到点提醒）")
+        elif not it.when.has_date:
+            # 既没日期也没时刻之外的情况：落不成日期，仍写进备注
             detail.append(f"{_w}（只写进备注，不会到期提醒）")
         elif it.when.all_day:
             detail.append(f"{_w}（全天 · 不弹提醒）")
