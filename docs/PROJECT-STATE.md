@@ -205,6 +205,7 @@ journal 是**追加不改**的传感器读数，所以这些记录会永久保�
 | [`ORIENTATION-ROOTCAUSE.md`](ORIENTATION-ROOTCAUSE.md) | 照片方向排查 | 照片路线相关（与 v4 无关）|
 | [`archive/ARCHITECTURE-v1-notes-carousel.md`](archive/ARCHITECTURE-v1-notes-carousel.md) | 被推翻的 v1 | 理解"为什么推翻 v1" |
 | [`../README.md`](../README.md) | 运维 / 开发者视角 | 跑命令、排查故障 |
+| [`../.dsh/skills/`](../.dsh/skills/) | **平台知识（给 agent 加载，非项目组成）** | 动手写 AppleScript / launchd 之前 —— 让 agent 先加载它 |
 
 ---
 

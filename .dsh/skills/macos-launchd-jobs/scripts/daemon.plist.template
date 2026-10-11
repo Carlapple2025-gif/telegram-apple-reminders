@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  常驻守护模板。替换 __LABEL__ / __PROGRAM__ / __WORKDIR__ 三处即可。
+
+  ⚠️ 注释里不要写连续两个连字符（XML 不允许，launchd 会拒绝加载，
+     而 plutil -lint 会放过它）。要写"破折号参数"就写成 — 或加空格。
+  ⚠️ KeepAlive 用字典写法，不要用 <true/> —— 理由见 SKILL.md 第三节第 1 条。
+  ⚠️ 解释器请用系统自带的（如 /usr/bin/python3）并只依赖标准库：
+     解释器链被清掉 / venv 被删都会让任务某天静默失效。
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>__LABEL__</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>__PROGRAM__</string>
+	</array>
+
+	<key>WorkingDirectory</key>
+	<string>__WORKDIR__</string>
+
+	<!-- 崩溃就重启。字典写法语义无歧义：SuccessfulExit=false 表示
+	     "正常退出不算完成，仍要拉起"。 -->
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+
+	<!-- 异常退出后至少等 10 秒再重启，避免疯狂循环 -->
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+
+	<key>StandardOutPath</key>
+	<string>__WORKDIR__/logs/__LABEL__.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>__WORKDIR__/logs/__LABEL__.err.log</string>
+
+	<key>ProcessType</key>
+	<string>Background</string>
+</dict>
+</plist>

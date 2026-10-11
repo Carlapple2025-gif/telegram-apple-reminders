@@ -360,6 +360,28 @@ pdca/
     └── ORIENTATION-ROOTCAUSE.md  照片方向问题排查（与 v4 无关，同属踩坑记录）
 ```
 
+> `.dsh/skills/` 也在这个仓库里（见下），但**它不是项目的组成部分** ——
+> 是给 agent 加载的**平台知识**，与 `src/` 的运行时代码无关。
+
+### `.dsh/skills/` —— 攒下来的平台知识，给 agent 看的
+
+**踩过的坑有两种下场**：写进本文当"坑记录"（给人看），或者做成一个 **skill**
+（给 agent 加载）。后者能在下一次动手之前就拦住它。
+
+| skill | 固化的是 | 判据来源 |
+|---|---|---|
+| `apple-app-automation` | 三个 App 的脚本接口**能做什么、代价多少**（含 5 条硬约束）+ 只读探针 | [`docs/APPLE-FACTS.md`](docs/APPLE-FACTS.md) |
+| `macos-launchd-jobs` | launchd 任务**四条假成功**的判据与验证顺序 | 本文 §六 坑 9–12 |
+
+**位置不是随便放的**：DSH 按 rank 扫技能根，`<projectRoot>/.dsh/skills/` 是 rank 100
+（自动发现），而**嵌套的 `**/SKILL.md` 不会被发现** —— 所以是 `.dsh/skills/<名字>/SKILL.md`，
+不是 `skills/<名字>/`。`projectRoot` = 最近的含 `.git` 的祖先，本仓库里就是 `pdca/` 自己。
+
+**这两个 skill 里不写项目专属的设计决定**（谁是唯一写入者、几点跑任务、符号怎么声明）——
+那些留在 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) 与
+[`docs/KERNEL-CONTRACT.md`](docs/KERNEL-CONTRACT.md)。
+分界线一句话：**"换成另一个项目还成立吗？"** 成立的是平台约束，不成立的是设计决定。
+
 ### 判断"某个文件属于哪"的规则
 
 | 目录 | 只放什么 | 判断方法 |
@@ -369,6 +391,7 @@ pdca/
 | `src/` | 运行时模块 | "守护/日报运行时会 import 它吗？" |
 | `*/legacy/` | v1 的、v4 不调用的 | "从 deploy 入口算 import 可达性，到不了吗？" |
 | `docs/archive/` | 被推翻的设计 | "它描述的是已经不做的事吗？" |
+| `.dsh/skills/` | **平台约束**（换项目也成立的） | "换成另一个项目还成立吗？" |
 
 **归档不等于可以忘掉**：自检的静态扫描（全角陷阱、`whose is`）
 **覆盖 legacy 目录** —— 否则"挪到 legacy"就成了让检查失效的捷径。
