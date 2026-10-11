@@ -43,6 +43,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -133,6 +134,137 @@ def scan(*, list_name: str, days: int) -> dict:
     journal.log_habit_scanned(list_name=list_name, found=len(found),
                               added=added, skipped=skipped)
     return {"found": len(found), "added": added, "skipped": skipped}
+
+
+@dataclass(frozen=True)
+class HabitWeek:
+    """
+    一个习惯**这一周**的状态。日报只读它渲染 —— 统计不散进渲染里。
+
+    `in_list` 回答的是"标准表里的这个名字，习惯列表里还有吗"：
+    改名之后标准会**永远**显示 0/N，那是**假的差异** —— 比不报更糟
+    （用户会以为系统坏了，或者以为自己在偷懒）。
+    """
+    name: str
+    target: int
+    done: int
+    streak: int
+    in_list: bool = True
+
+    @property
+    def gap(self) -> int:
+        return max(0, self.target - self.done)
+
+    @property
+    def met(self) -> bool:
+        return self.done >= self.target
+
+
+def standards() -> dict[str, int]:
+    """
+    `config.json` 的 `habits_standards`：习惯名 → **每周目标次数**。
+
+    为什么标准必须由人声明（不能从 Apple 推）：AppleScript 读不出重复规则，
+    而且没打钩的重复条目**不会前滚**（APPLE-FACTS §2.5）—— 于是"这周该做几次"
+    **推不出来**。与 `calendar_name` 同一个模式：机器执行，改动是人工动作。
+
+    **空 = 没声明 → 日报那一段不出现**（不猜，也不拿默认值糊上去）。
+    """
+    try:
+        cfg = json.loads(CONFIG.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 —— 配置坏了不该让日报整份失败
+        return {}
+    raw = cfg.get("habits_standards")
+    out: dict[str, int] = {}
+    if isinstance(raw, dict):
+        for key, val in raw.items():
+            try:
+                n = int(val)
+            except (TypeError, ValueError):
+                continue
+            if str(key).strip() and n > 0:
+                out[str(key).strip()] = n
+    return out
+
+
+def week_start(day: dt.date) -> dt.date:
+    """本周一（`date.weekday()` 周一 = 0）。"""
+    return day - dt.timedelta(days=day.weekday())
+
+
+def _iso(s: str) -> dt.datetime | None:
+    try:
+        return dt.datetime.fromisoformat(s)
+    except (TypeError, ValueError):
+        return None
+
+
+def _streak(days: set[dt.date], today: dt.date) -> int:
+    """连续有完成的天数。**今天没做不算断**（从昨天往前数）—— 同周报口径。"""
+    if not days:
+        return 0
+    cur = today if today in days else today - dt.timedelta(days=1)
+    n = 0
+    while cur in days:
+        n += 1
+        cur -= dt.timedelta(days=1)
+    return n
+
+
+def week_status(now: dt.datetime, *, list_name: str, targets: dict[str, int],
+                window_days: int = WINDOW_DAYS) -> list[HabitWeek]:
+    """
+    本周每个习惯：完成次数 / 目标 / 连续天数。
+
+    两处来源，按 **habit_id 精确判重**（两边都带 id，所以判重不是猜的）：
+
+      · journal 留档 —— 周一 → 今天（不受窗口限制，跨重启）
+      · Apple 最近窗口 —— 补**扫描点（21:00）之后**打的钩
+
+    为什么必须并上第二处：扫描在 21:00，日报在 21:30。只读留档会把
+    21:05 刚打完的钩报成"还差一次" —— 那是**假的差异**，比不报更糟 ✗。
+
+    `open_reminders()` 那一次读只用来判"标准里写了、列表里却没有"；
+    它失败**不致命**（降级为"不判 missing"），所以单独吞掉。
+    """
+    import journal
+    import reminders
+
+    start = week_start(now.date())
+    span = (now.date() - start).days + 2      # 多两天：覆盖"晚一天才扫到"的
+
+    names_of: dict[str, str] = {}
+    days_with: dict[str, set[dt.date]] = {}
+
+    def _add(hid: str, name: str, when: dt.datetime | None) -> None:
+        if not hid or not name:
+            return
+        names_of.setdefault(hid, name)
+        if when is not None:
+            days_with.setdefault(name, set()).add(when.date())
+
+    for rec in journal.habit_records(days=span):
+        _add(str(rec.get("habit_id") or ""), str(rec.get("name") or ""),
+             _iso(str(rec.get("done_at") or rec.get("at") or "")))
+
+    rem = reminders.Reminders({"reminders_list": list_name})
+    for r in rem.completed_since(window_days):     # 读失败 → 交给上层报 SourceError
+        _add(r.id, r.name, r.completed_at)
+
+    try:
+        present = {r.name for r in rem.open_reminders()}
+    except Exception:  # noqa: BLE001 —— 附加检查，读不到就不判 missing
+        present = set()
+
+    out: list[HabitWeek] = []
+    for name, target in targets.items():
+        done = sum(1 for hid, nm in names_of.items() if nm == name)
+        out.append(HabitWeek(name=name, target=target, done=done,
+                             streak=_streak(days_with.get(name, set()), now.date()),
+                             in_list=(name in present) or done > 0))
+    # 未达成的、差得多的排前面；达成的沉底（日报要让人先看见欠账）
+    out.sort(key=lambda h: (h.met, -h.gap, h.name))
+    return out
 
 
 def tick(now: dt.datetime | None = None) -> None:

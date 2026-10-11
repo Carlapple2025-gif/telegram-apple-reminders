@@ -86,6 +86,7 @@ SRC_CALENDAR = "日历"
 SRC_MEMOS = "备忘台账"
 SRC_CHANNELS = "通道读数"
 SRC_LEDGER = "台账"          # journal 的读数（周报要数"本周记下了什么"）
+SRC_HABITS = "习惯标准"      # 习惯列表的完成读数（"标准 vs 实际"那一段）
 
 
 @dataclass(frozen=True)
@@ -176,6 +177,10 @@ class ReportData:
     digest: str = "daily"
     # 周报的 payload（日报为 None）。周报的区块读它；日报的区块不看它。
     week: WeekData | None = None
+    # 本周"标准 vs 实际"（habits.HabitWeek 的列表）。**空 = 没声明标准**
+    # → 那一段不出现（不猜）。读失败则进 errors（SRC_HABITS）而这里是空的 ——
+    # 两种"空"必须分得清，否则"没声明"和"读不到"会看起来一样。
+    habits: list = field(default_factory=list)
 
     @property
     def done(self) -> list[Todo]:
@@ -206,6 +211,11 @@ class ReportData:
 #      判断"该不该出现"是区块自己的事，`build_report` 不替任何区块判断。
 #   ② 区块只许读 `ReportData`，不许读模块常量来做判断
 #      —— `memo_nag_days` 就是因为这条从常量搬进了 data（见 ReportData 的注释）。
+#   ③ **区块结尾要留一个空行**（返回的最后一项是 `""`）。
+#      这条一直存在但没写下来：2026-10-11 加「标准 vs 实际」时漏了它，
+#      渲染出来两段直接撞在一起（`…连续 4 天` 紧贴 `✅ 今日完成 1 件`）。
+#      渲染不报错、自检也不会红 —— 只能靠**看一眼真渲染**发现，
+#      所以它同时是"每加一段就真跑一次渲染"的理由。
 
 @dataclass(frozen=True)
 class Block:
@@ -380,6 +390,82 @@ def _blk_digest_gap(data: ReportData) -> list[str]:
 # 周报是**同一份渲染管线、另一套区块**：这正是区块注册表存在的理由
 # （见本文件顶部那段说明）。它读 `data.week`，日报的区块不看那个字段。
 
+MAX_HABIT_ROWS = 6
+
+
+def _read_habits(today: dt.date) -> list:
+    """
+    读"本周标准 vs 实际"。**没声明标准就返回空** —— 那一段不出现。
+
+    ⚠️ 这里 import habits 是一条**登记过的越界边**（功能→功能），
+    白名单见 selftest 的 _WHITELIST：统计暂住习惯模块，
+    消除时机与 watchdog / habits 相同 —— **插件自注册**那一步。
+    """
+    import habits
+
+    targets = habits.standards()
+    if not targets:
+        return []
+    list_name, window = habits.config()
+    if not list_name:
+        return []          # 没配习惯列表 = 这条功能没开（不是故障，同 habits.config）
+    return habits.week_status(dt.datetime.now(), list_name=list_name,
+                              targets=targets, window_days=window)
+
+
+def _blk_habits(data: ReportData) -> list[str]:
+    """
+    🎯 标准 vs 实际（本周）—— 日报里**唯一**做"对照"的一段。
+
+    别处都是实际值（快照），只有这里同时有标准与完成数：
+    **差异才是 C（Check）的本体**，没有它就只是汇总（CADENCE §一）。
+    """
+    if not data.habits:
+        return []
+    lines = ["🎯 标准 vs 实际（本周）"]
+    for h in data.habits[:MAX_HABIT_ROWS]:
+        if not getattr(h, "in_list", True):
+            lines.append(f"　⚠️ {h.name}　标准里写了，习惯列表里找不到同名条目")
+            continue
+        head = f"　{'✅' if h.met else '⚠️'} {h.name}　{h.done}/{h.target}"
+        extra: list[str] = []
+        if h.gap:
+            extra.append(f"还差 {h.gap} 次")
+        if h.streak:
+            extra.append(f"连续 {h.streak} 天")
+        lines.append(head + ("　" + "　".join(extra) if extra else ""))
+    lines.append("")          # 区块结尾留空行：与其余区块一致（否则会撞下一段）
+    return lines
+
+
+def _blk_decision(data: ReportData) -> list[str]:
+    """
+    ❓ 今天需要你决定 —— **最多 1 件**（CADENCE §七）。
+
+    选谁：先看"标准里写了、列表里却没有"的（多半是改名了 → 假的差异）；
+    再看**本周已不可能达成**的（还差次数 > 剩余天数）——
+    对应 CADENCE §六 规则 4：连续失败 = 标准定错了，**降一档**，而不是自责。
+
+    为什么最多 1 件：同屏 10 个决定 = 0 个决定；一次只改一件事（规则 3）。
+    """
+    if not data.habits:
+        return []
+    stale = [h for h in data.habits if not getattr(h, "in_list", True)]
+    if stale:
+        h = stale[0]
+        return [f"❓ 需要你决定：{h.name} —— 习惯列表里找不到它（改名了？）"
+                f"　→ 改名 / 从标准里删掉",
+                ""]
+    left = 7 - data.date.weekday()      # 含今天还剩几天（周一 → 7）
+    hard = [h for h in data.habits if h.gap > left]
+    if not hard:
+        return []
+    h = max(hard, key=lambda x: x.gap)
+    return [f"❓ 需要你决定：{h.name} 本周 {h.done}/{h.target}"
+            f" —— 保持 / 降一档 / 删掉",
+            ""]
+
+
 def _blk_week_header(data: ReportData) -> list[str]:
     w = data.week
     if w is None:
@@ -454,6 +540,11 @@ def _blk_week_caveat(data: ReportData) -> list[str]:
 BLOCKS: tuple[Block, ...] = (
     Block("generated_at", _blk_generated_at, digests=("daily", "weekly"),
           note="数据截止时刻 + 迟到/早到说明（按各自的计划时间）"),
+    # 「标准 vs 实际」放在最前：日报的**唯一**对照段（CADENCE §七 的排法）。
+    # heartbeat 留空是**有意的**：心跳摘要是发给第三方的（见 _heartbeat_summary），
+    # 习惯名与达成率属于私人数据，不外发。
+    Block("habits", _blk_habits,
+          note="空 = 没声明标准或读失败（两者由 errors 区分）"),
     Block("done", _blk_done, heartbeat="完成",
           count=lambda d: len(d.done),
           note="按 Apple 原生完成时刻筛过"),
@@ -482,6 +573,8 @@ BLOCKS: tuple[Block, ...] = (
     Block("week_caveat", _blk_week_caveat, digests=("weekly",),
           note="口径：完成数只是下限，必须说出来"),
     # ── 两份产物共用
+    Block("decision", _blk_decision,
+          note="每天最多 1 件（CADENCE §七）；无候选则整段省略"),
     Block("errors", _blk_errors, digests=("daily", "weekly"),
           note="读不到 ≠ 没有"),
     Block("channel_warnings", _blk_channel_warnings),
@@ -656,7 +749,13 @@ def collect(date: dt.date | None = None,
     except Exception as e:  # noqa: BLE001
         data.errors.append(SourceError(SRC_MEMOS, str(e)))
 
-    # ④ 投递读数（同样来自 journal：通道健康 + 上次投递是哪天）
+    # ④ 习惯：本周"标准 vs 实际"（留档 + 最近窗口，见 habits.week_status）
+    try:
+        data.habits = _read_habits(today)
+    except Exception as e:  # noqa: BLE001
+        data.errors.append(SourceError(SRC_HABITS, str(e)))
+
+    # ⑤ 投递读数（同样来自 journal：通道健康 + 上次投递是哪天）
     try:
         data.channel_warnings = _channel_warnings()
         data.digest_gap_note = _digest_gap_note(today)

@@ -273,6 +273,21 @@ def habit_ids(days: int = 7) -> set[str]:
     return out
 
 
+def habit_records(days: int = 8, end: str | None = None) -> list[dict]:
+    """
+    最近若干天的**习惯完成记录**（留档）。
+
+    只做"取出来"，不做统计 —— 本模块不认识"周 / 目标 / 连续"这些概念，
+    那些在 `habits.py`。分工理由同别的读函数：台账只管**如实记下**，
+    解释留给上层（哪天解释变了，台账不用动）。
+    """
+    out: list[dict] = []
+    for rec in read_range(days, end):
+        if rec.get("event") == EV_HABIT_DONE and rec.get("habit_id"):
+            out.append(rec)
+    return out
+
+
 def habit_scanned_on(day: str) -> bool:
     """那一天扫过了没有。**不新增状态**：从 journal 的读数里看（同 delivered_on）。"""
     return any(r.get("event") == EV_HABIT_SCANNED for r in read_day(day))

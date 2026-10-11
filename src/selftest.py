@@ -1362,6 +1362,7 @@ _WHITELIST = {
     ("daemon", "commands"):    "通道层字面分流；命令注册表那一步消除",
     ("daemon", "watchdog"):    "降级加载（形态是好的）；等插件自注册",
     ("daemon", "habits"):      "同 watchdog 形态（降级加载）；等插件自注册",
+    ("report", "habits"):      "习惯统计暂住习惯模块（读层未归位，同 commands→report）；等插件自注册",
     ("telegram", "commands"):  "CLI 推 / 菜单时去取命令表；应改成参数传入",
 }
 
@@ -3664,8 +3665,14 @@ check("产物名写错时页脚也抛异常", _bad_footer)
 # ⚠️ 2026-10-05 加周报后，判据必须**按产物分别做**：
 # 日报的区块与周报的区块读的是同一份 data 的不同字段，
 # 拿日报的 data 去逼周报的区块出现，只会得到一堆假红。
+# 习惯那两段（标准 vs 实际 / 一个决定）要能在这份夹具里点亮：
+# 一份达成的、一份没达成的、一份"标准里写了但列表里没有"的（改名场景）。
+_hab_mod = sys.modules.get("habits") or _load(SRC / "habits.py")
 _rich = _rp.ReportData(
     date=_RD,
+    habits=[_hab_mod.HabitWeek("英语", 5, 3, 4),
+            _hab_mod.HabitWeek("力量训练", 3, 3, 2),
+            _hab_mod.HabitWeek("冥想", 7, 0, 0, in_list=False)],
     todos=[_rp.Todo("做完的", True), _rp.Todo("没做完的", False)],
     events=[_rp.Event("周会", _dt2.datetime(2026, 10, 4, 14, 0))],
     memos=[_rp.Memo("一条备忘", _dt2.datetime(2026, 9, 20, 9, 0))],
@@ -3719,6 +3726,116 @@ check("每个区块渲染出 列表[str]（空列表=省略）", _shapes_ok)
 # 必须能点亮它自己的全部区块 —— 否则说明判据写错了，或那个区块根本是摆设。
 check("没有死区块（每份产物的互补 data 都能点亮自己的区块）", not _dead,
       f"这些区块在 rich 与 empty 下都为空：{_dead}")
+
+
+section("v4 日报的「标准 vs 实际」（习惯，阶段 3a）")
+
+# 这一段是日报里**唯一**做"对照"的地方：别处只有实际值（快照），
+# 只有这里同时有标准与完成数 —— **差异才是 C（Check）的本体**。
+_jn_m = sys.modules.get("journal") or _load(SRC / "journal.py")
+_rm_m = sys.modules.get("reminders") or _load(SRC / "reminders.py")
+_hab = sys.modules.get("habits") or _load(SRC / "habits.py")
+
+
+class _FakeReminders:
+    """只回放两份固定读数：最近窗口 / 还开着的条目。"""
+
+    live: list = []
+    open_names: set = set()
+
+    def __init__(self, *_a, **_k):
+        pass
+
+    def completed_since(self, _days):
+        return list(_FakeReminders.live)
+
+    def open_reminders(self):
+        return [_rm_m.Reminder(id=f"o{i}", name=n, completed=False, body="", due="")
+                for i, n in enumerate(sorted(_FakeReminders.open_names))]
+
+
+def _hrec(hid, name, when):
+    return {"event": "habit_done", "habit_id": hid, "name": name,
+            "done_at": when, "at": when}
+
+
+_sv_hj, _sv_hr = _jn_m.habit_records, _rm_m.Reminders
+_sv_cfg_h = _hab.CONFIG
+try:
+    # 留档里有 1 条；窗口里同一条又出现一次（同一 id）+ 一条**新**的
+    # —— 后者正是"21:00 扫完之后才打的钩"，不并进来就是**假的差异**。
+    _jn_m.habit_records = lambda days=8, end=None: [
+        _hrec("a1", "英语", "2026-10-11T08:36:00+08:00"),
+        _hrec("c1", "力量训练", "2026-10-09T19:00:00+08:00"),
+        _hrec("c2", "力量训练", "2026-10-10T19:00:00+08:00"),
+        _hrec("c3", "力量训练", "2026-10-11T19:00:00+08:00")]
+    _rm_m.Reminders = _FakeReminders
+    _FakeReminders.live = [
+        _rm_m.Reminder(id="a1", name="英语", completed=True, body="", due="",
+                       completed_at=_dt2.datetime(2026, 10, 11, 8, 36)),
+        _rm_m.Reminder(id="b1", name="英语", completed=True, body="", due="",
+                       completed_at=_dt2.datetime(2026, 10, 11, 20, 31))]
+    _FakeReminders.open_names = {"英语", "力量训练"}
+    _ws = _hab.week_status(_dt2.datetime(2026, 10, 11, 21, 30), list_name="习惯",
+                           targets={"英语": 5, "力量训练": 3})
+    _by = {h.name: h for h in _ws}
+    check("习惯：留档与窗口按 id 判重（同一 id 只算一次）",
+          _by["英语"].done == 2, str(_by["英语"].done))
+    check("习惯：扫描点之后打的钩也算进本周",
+          _by["英语"].streak >= 1, str(_by["英语"].streak))
+    check("习惯：未达成的算得出还差几次、达成的认得出",
+          _by["英语"].gap == 3 and _by["力量训练"].met,
+          f"英语 gap={_by['英语'].gap} met={_by['英语'].met}；"
+          f"力量训练 gap={_by['力量训练'].gap} met={_by['力量训练'].met}")
+    check("习惯：达成的沉底（先看见欠账）",
+          [h.name for h in _ws] == ["英语", "力量训练"],
+          str([(h.name, h.met, h.gap) for h in _ws]))
+
+    # 标准表的解析：读得出数字、丢掉非数字与 0（不拿默认值糊上去）
+    _cfg_tmp = _P2(_tf2.mkdtemp()) / "c.json"
+    _cfg_tmp.write_text('{"habits_standards": {"英语": 5, "坏的": "x", "零": 0}}',
+                        encoding="utf-8")
+    _hab.CONFIG = _cfg_tmp
+    check("标准表：非数字与 0 被丢掉（不猜、不糊）",
+          _hab.standards() == {"英语": 5}, str(_hab.standards()))
+
+    # 日报渲染
+    _d_hab = _rp.ReportData(
+        date=_dt2.date(2026, 10, 11),
+        habits=[_hab.HabitWeek("英语", 5, 2, 1),
+                _hab.HabitWeek("力量训练", 3, 3, 2),
+                _hab.HabitWeek("冥想", 7, 0, 0, in_list=False)])
+    _hab_lines = _rp._blk_habits(_d_hab)
+    check("习惯段：达成的 ✅、未达成的 ⚠️ 并写出还差几次",
+          any("✅ 力量训练" in x for x in _hab_lines)
+          and any("⚠️ 英语" in x and "还差 3 次" in x for x in _hab_lines),
+          " / ".join(_hab_lines))
+    check("习惯段：标准里有、列表里没有的名字如实说出来（不假装 0 次）",
+          any("冥想" in x and "找不到" in x for x in _hab_lines),
+          " / ".join(_hab_lines))
+
+    # ❓ 每天一个决定
+    _dec_sun = _rp._blk_decision(_rp.ReportData(
+        date=_dt2.date(2026, 10, 11),
+        habits=[_hab.HabitWeek("英语", 5, 2, 1)]))
+    _dec_msg = [x for x in _dec_sun if x.strip()]      # 去掉结尾那个空行
+    check("决定段：本周已不可能达成 → 给出「保持/降一档/删掉」",
+          len(_dec_msg) == 1 and "保持" in _dec_msg[0] and "删掉" in _dec_msg[0],
+          str(_dec_sun))
+    check("决定段：还追得上就不催（一次只改一件事）",
+          _rp._blk_decision(_rp.ReportData(
+              date=_dt2.date(2026, 10, 5),
+              habits=[_hab.HabitWeek("英语", 5, 2, 1)])) == [])
+    check("决定段：最多 1 件",
+          len([x for x in _rp._blk_decision(_d_hab) if x.strip()]) <= 1,
+          str(_rp._blk_decision(_d_hab)))
+    _d_none = _rp.ReportData(date=_dt2.date(2026, 10, 11))
+    check("没声明标准时两段都不出现（不猜，也不拿默认值）",
+          _rp._blk_habits(_d_none) == [] and _rp._blk_decision(_d_none) == [])
+finally:
+    _jn_m.habit_records, _rm_m.Reminders = _sv_hj, _sv_hr
+    _hab.CONFIG = _sv_cfg_h
+    _FakeReminders.live, _FakeReminders.open_names = [], set()
 
 # 每个区块都必须属于**至少一份**产物 —— 否则它会永远不渲染（注册了但没人要）
 _orphan = [_b.id for _b in _rp.BLOCKS
