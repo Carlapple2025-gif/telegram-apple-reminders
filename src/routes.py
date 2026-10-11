@@ -151,7 +151,12 @@ def route(text: str, base: dt.date | None = None) -> Item:
         # 放在路由层而不是写入端：**写入端与回执必须看到同一个 when** ——
         # 否则回执还会说"只写进备注"，而那句话已经不成立了 ✗。
         if when is not None:
-            when = whens.promote_bare_time(when)
+            # `now=_now(base)` **必须传**（2026-10-11 补）：不传就用 `datetime.now()`，
+            # 于是 `base` 只钉住了**日期分量**，"今天还是明天"仍随运行时刻变 ——
+            # 那个 seam 的 docstring 承诺的"已过 / 没到在测试里是确定的"就落空了
+            # （实测：base=10-11，伪装成 10:00 得 10-11、伪装成 18:40 得 10-12）。
+            # 生产侧 base=None，`_now(None)` 就是 `datetime.now()` —— 与不传时行为一致。
+            when = whens.promote_bare_time(when, now=_now(base))
         stripped = whens.strip_time_phrases(body)
         if stripped:
             body = whens.clean_text(stripped)
