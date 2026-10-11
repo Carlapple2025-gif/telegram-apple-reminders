@@ -4880,13 +4880,34 @@ check("全天 / 无时刻的 When 不被改动",
                      all_day=True, has_date=True), now=_NOW).date_inferred is False)
 
 # 路由层：**写入端与回执必须看到同一个 when**，否则回执会说"只写进备注" ✗
-_it_title = _rt_m.route("下午3点生成第一个视频")
+#
+# 2026-10-11 修掉一条**薛定谔的断言**：原来这里调 route() 时**不传 base**，
+# 断言里又硬编码了 `"10月11日" in _rp_txt` —— 于是它**只在 2026-10-11 当天
+# 15:00 之前**为真；钟点一过，"下午3点"按规则补成明天，此后每天必红
+# （实测：当天 18:40 跑就红，不是偶发 —— 一条永远红的断言会训练人忽略整份自检，
+#  同源前科见本文 2054 行那条从 10-04 起天天红的）。
+#
+# 现在断言的是**关系**：回执说的日子 == 写入端算出的日子 ——
+# 任何日期、任何钟点跑都成立，不会再腐烂。
+#
+# ⚠️ 为什么"传 base"不足以钉住它（实测出来的，别想当然）：
+# base 只把**日期分量**钉在基准日上（`parse_when(body, base)`，routes.py:148）；
+# 而待办这条路调 `promote_bare_time(when)` 时**没传 now**（routes.py:154）——
+# 事件那条路反倒传了 `_now(base)`（routes.py:263）。所以"今天还是明天"
+# 仍由**真实时钟**决定：拿 base=10-11 实测，伪装成 10:00 得 10-11、伪装成 18:40 得 10-12。
+# 那处该不该补上 `now=_now(base)`（生产侧 base=None 时行为不变）是**内核改动** ——
+# 按 §8.3 的约定留给会话上裁，不在这里顺手改。
+_DAY = _dt2.date(2026, 10, 11)
+_it_title = _rt_m.route("下午3点生成第一个视频", base=_DAY)
 check("路由层给待办补上了日期",
       _it_title.when is not None and _it_title.when.has_date is True
       and _it_title.when.date_inferred is True, str(_it_title.when))
 _rp_txt = _it_m._reply_ok(_it_title, "x")
+# 断言的是**关系**：回执说的日子 == 写入端算出的日子 ——
+# 这正是上面那句注释要守的不变量，而它任何时刻跑都成立（不再是某一天的字面量）。
+_d = f"{_it_title.when.start.month}月{_it_title.when.start.day}日"
 check("回执说出「日子是补的」（不悄悄替你决定）",
-      "补成" in _rp_txt and "10月11日" in _rp_txt, _rp_txt)
+      f"补成 {_d}" in _rp_txt, _rp_txt)
 check("回执同时说清会响", "到点提醒" in _rp_txt, _rp_txt)
 
 # ⚠️ 范围只到待办：事件那条路**没动**（一次只改一件事）
