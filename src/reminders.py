@@ -156,6 +156,17 @@ class Reminder:
     # 有了它，日报才能只报"今天完成的"，而不是把历史全倒出来。
     completed_at: dt.datetime | None = None
 
+    @property
+    def due_at(self) -> dt.datetime | None:
+        """
+        到期日（解析后的）。解析不出 = **没写日期**（None），不是"读不到"。
+
+        为什么做成属性而不是读的时候就代入：读路径有两条（all_reminders /
+        completed_on），而解析规则只有一份（`_parse_due`）—— 让两条路径
+        各自解析必然走样。这里只留一个入口。
+        """
+        return _parse_due(self.due)
+
 
 class Reminders:
     """
@@ -238,9 +249,14 @@ class Reminders:
 
     # ── 读
 
-    def all_reminders(self) -> list[Reminder]:
+    def all_reminders(self, with_due: bool = False) -> list[Reminder]:
         """
         列出该列表内全部条目。
+
+        `with_due=True` 时**多读一个属性**（`due date`，缺失时退回 `allday due date`）——
+        日报要用它算「计划未执行」（到期了没做、晚了几天）。
+        ⚠️ 代价是每条多一次属性读取（实测 ~0.3 s/条），所以**默认不开**：
+        看门狗、周报、习惯留档都不受影响，只有日报那条路开。
 
         输出格式：每条若干行（id / completed / name / body / 完成时刻），
         用「一行一个字段」而不是分隔符拼接 —— AppleScript 字面量里
@@ -270,7 +286,18 @@ class Reminders:
             '(month of cd as integer) & "," & (day of cd) & "," & '
             '(hours of cd) & "," & (minutes of cd) & linefeed\n'
             '    end if\n'
-            '    set out to out & "----" & linefeed\n'
+            # 到期日：只输出"年月日"（全天到期本来就只有日期）。
+            # 用整数分量、不用日期字符串 —— 理由同上（区域设置）。
+            + ('    set dd to (due date of r)\n'
+               '    if dd is missing value then set dd to (allday due date of r)\n'
+               '    if dd is missing value then\n'
+               '      set out to out & "none" & linefeed\n'
+               '    else\n'
+               '      set out to out & (year of dd as integer) & "," & '
+               '(month of dd as integer) & "," & (day of dd) & linefeed\n'
+               '    end if\n'
+               if with_due else '')
+            + '    set out to out & "----" & linefeed\n'
             '  end repeat\n'
             '  return out\n'
             'end tell'
@@ -285,7 +312,7 @@ class Reminders:
                         completed=chunk[1].strip().lower() == "true",
                         name=chunk[2],
                         body=(chunk[3] if len(chunk) > 3 else ""),
-                        due="",
+                        due=(chunk[5] if with_due and len(chunk) > 5 else ""),
                         completed_at=_parse_completion(
                             chunk[4] if len(chunk) > 4 else "none"),
                     ))

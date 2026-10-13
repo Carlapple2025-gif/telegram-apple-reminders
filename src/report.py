@@ -106,6 +106,10 @@ class Todo:
     name: str
     completed: bool
     completed_at: dt.datetime | None = None
+    # Apple 的条目 id：用来跟 journal 的台账对齐（"这件是哪天记下来的"）。
+    todo_id: str = ""
+    # 到期日（**只到天**）。None = 没定日期 —— 与"读不到"是两件事。
+    due: dt.date | None = None
 
 
 @dataclass
@@ -181,6 +185,9 @@ class ReportData:
     # → 那一段不出现（不猜）。读失败则进 errors（SRC_HABITS）而这里是空的 ——
     # 两种"空"必须分得清，否则"没声明"和"读不到"会看起来一样。
     habits: list = field(default_factory=list)
+    # **今天**的日程（行程分析用）。明日日程在 events 里 ——
+    # 两者是**同一次读取**切开的（见 collect：分两次读会多扫一遍重复事件）。
+    today_events: list[Event] = field(default_factory=list)
 
     @property
     def done(self) -> list[Todo]:
@@ -297,16 +304,52 @@ def _blk_done(data: ReportData) -> list[str]:
     return out
 
 
+def _missed_plan(data: ReportData) -> list[Todo]:
+    """
+    **计划未执行** = 到期了还没做的（到期日 < 今天）。
+
+    为什么用到期日当基准：它是"我说过什么时候做"的证据 —— 有基准才有对照，
+    没有基准就只是清点（CADENCE §一）。
+    """
+    return sorted([t for t in data.open_items if t.due and t.due < data.date],
+                  key=lambda t: t.due)
+
+
 def _blk_open_items(data: ReportData) -> list[str]:
-    """未完成段。空且**有**待办时改说「全部完成」——那是唯一该庆祝的时刻。"""
-    if data.open_items:
-        out = [f"⏳ 未完成 {len(data.open_items)} 件"]
-        out += [f"　{t.name}" for t in data.open_items]
-        out.append("")
-        return out
-    if data.todos:
-        return ["🎉 今天的待办全部完成了", ""]
-    return []
+    """
+    计划未执行段（2026-10-14 用户裁决：标题就叫「计划未执行」）。
+
+    ⚠️ 不把"所有未完成"倒出来 —— 那是清点，不是复盘。
+    没定日期的**不算未执行**（它们没承诺过时间），但也不能假装不存在：
+    单独一行报出数量（看不见 ≠ 没有）。还没到期的同理。
+    """
+    if not data.todos and not data.failed(SRC_REMINDERS):
+        return []
+    missed = _missed_plan(data)
+    no_date = [t for t in data.open_items if not t.due]
+    later = [t for t in data.open_items if t.due and t.due >= data.date]
+    out: list[str] = []
+    if missed:
+        out.append(f"📌 计划未执行（{len(missed)} 件）")
+        for t in missed:
+            late = (data.date - t.due).days          # type: ignore[operator]
+            out.append(f"　{t.name}　到期 {t.due.month}月{t.due.day}日"
+                       f"　晚了 {late} 天")
+    others: list[str] = []
+    if no_date:
+        others.append(f"没定日期 {len(no_date)} 件")
+    if later:
+        others.append(f"还没到期 {len(later)} 件")
+    if others:
+        out.append("　（另有 " + "、".join(others) + "）")
+    if not out:
+        # 判据是"**有**待办但一件没欠" —— 用 open_items 会永远为假（它这时是空的）
+        if data.todos:
+            out.append("🎉 今天的待办全部完成了")
+        else:
+            return []
+    out.append("")
+    return out
 
 
 def _blk_reminders_empty(data: ReportData) -> list[str]:
@@ -325,7 +368,7 @@ def _blk_reminders_empty(data: ReportData) -> list[str]:
 def _blk_events(data: ReportData) -> list[str]:
     if not data.events:
         return []
-    out = [f"📅 明日日程 {len(data.events)} 项"]
+    out = [f"📅 明天 {len(data.events)} 项"]
     for e in data.events:
         loc = f"　@{e.location}" if e.location else ""
         when = ("全天" if e.all_day
@@ -390,9 +433,6 @@ def _blk_digest_gap(data: ReportData) -> list[str]:
 # 周报是**同一份渲染管线、另一套区块**：这正是区块注册表存在的理由
 # （见本文件顶部那段说明）。它读 `data.week`，日报的区块不看那个字段。
 
-MAX_HABIT_ROWS = 6
-
-
 def _read_habits(today: dt.date) -> list:
     """
     读"本周标准 vs 实际"。**没声明标准就返回空** —— 那一段不出现。
@@ -409,8 +449,41 @@ def _read_habits(today: dt.date) -> list:
     list_name, window = habits.config()
     if not list_name:
         return []          # 没配习惯列表 = 这条功能没开（不是故障，同 habits.config）
-    return habits.week_status(dt.datetime.now(), list_name=list_name,
+    # 日期用**调用方给的**（collect 的 date），不自己取 now()：
+    # 手工补跑 `report.py 2026-10-05` 时块头写的是那一天，
+    # 而"本周"若按真实今天算，同一段里会出现两个不同的日期（审计第 8 条）。
+    # 时刻本身不影响"本周 / 连续天数"，只取日期。
+    now = dt.datetime.combine(today, dt.time(12, 0))
+    return habits.week_status(now, list_name=list_name,
                               targets=targets, window_days=window)
+
+
+def _pick_decision(data: ReportData):
+    """
+    挑**一件**该问的事（③ 问为什么、④ 问怎么做，问的是同一件）。
+
+    优先级（都是"与计划不一样"，只是来源不同）：
+      1. 标准里写了、习惯列表里却找不到的 —— 多半改名了 → **假的差异**，
+         比不做还糟（它会一直显示 0/N）；
+      2. 本周**已不可能达成**的习惯（还差 > 剩余天数）—— CADENCE §六 规则 4：
+         连续失败 = 标准定错了，降一档，而不是自责；
+      3. 最该处理的欠账（到期最久的那一件）—— 承诺那一侧的"计划未执行"。
+
+    返回 (kind, obj)：kind 是 "habit" / "todo" / None。
+    """
+    # ⚠️ 只有**确认**没有（in_list is False）才算"假的差异"。
+    # None = 这次没读到 —— 那是"不知道"，不是"没有"（审计第 5 条）。
+    stale = [h for h in data.habits if h.in_list is False]
+    if stale:
+        return "habit", stale[0]
+    left = 7 - data.date.weekday()
+    hard = [h for h in data.habits if h.gap > left]
+    if hard:
+        return "habit", max(hard, key=lambda x: x.gap)
+    missed = _missed_plan(data)
+    if missed:
+        return "todo", missed[0]        # 到期最早的 = 拖得最久的
+    return None, None
 
 
 def _blk_habits(data: ReportData) -> list[str]:
@@ -420,22 +493,25 @@ def _blk_habits(data: ReportData) -> list[str]:
     别处都是实际值（快照），只有这里同时有标准与完成数：
     **差异才是 C（Check）的本体**，没有它就只是汇总（CADENCE §一）。
     """
-    if not data.habits:
+    kind, obj = _pick_decision(data)
+    if kind is None:
         return []
-    lines = ["🎯 标准 vs 实际（本周）"]
-    for h in data.habits[:MAX_HABIT_ROWS]:
-        if not getattr(h, "in_list", True):
-            lines.append(f"　⚠️ {h.name}　标准里写了，习惯列表里找不到同名条目")
-            continue
-        head = f"　{'✅' if h.met else '⚠️'} {h.name}　{h.done}/{h.target}"
-        extra: list[str] = []
-        if h.gap:
-            extra.append(f"还差 {h.gap} 次")
-        if h.streak:
-            extra.append(f"连续 {h.streak} 天")
-        lines.append(head + ("　" + "　".join(extra) if extra else ""))
-    lines.append("")          # 区块结尾留空行：与其余区块一致（否则会撞下一段）
-    return lines
+    if kind == "todo":
+        late = (data.date - obj.due).days
+        return [f"　🔄 「{obj.name}」到期 {obj.due.month}月{obj.due.day}日、"
+                f"晚了 {late} 天 —— 是没时间、不想做，还是当时说大了？", ""]
+    if obj.in_list is False:
+        return [f"　🔄 {obj.name}：标准里写了它，习惯列表里却没有同名条目"
+                f" —— 是改名了吗？", ""]
+    left = 7 - data.date.weekday()
+    tail = f"，还剩 {left} 天" if left else "（今天是本周最后一天）"
+    out = [f"　🔄 {obj.name} 本周 {obj.done}/{obj.target}{tail}"
+           f" —— 是标准定高了，还是这几天有别的占着？"]
+    if any(h.in_list is None for h in data.habits):
+        # 读不到就说读不到 —— 不说的话，用户在"改名了吗"这一项上是瞎的
+        out.append("　（习惯列表这次没读到 —— “改名了吗”那一项没判）")
+    out.append("")
+    return out
 
 
 def _blk_decision(data: ReportData) -> list[str]:
@@ -448,22 +524,89 @@ def _blk_decision(data: ReportData) -> list[str]:
 
     为什么最多 1 件：同屏 10 个决定 = 0 个决定；一次只改一件事（规则 3）。
     """
-    if not data.habits:
-        return []
-    stale = [h for h in data.habits if not getattr(h, "in_list", True)]
-    if stale:
-        h = stale[0]
-        return [f"❓ 需要你决定：{h.name} —— 习惯列表里找不到它（改名了？）"
-                f"　→ 改名 / 从标准里删掉",
-                ""]
-    left = 7 - data.date.weekday()      # 含今天还剩几天（周一 → 7）
-    hard = [h for h in data.habits if h.gap > left]
-    if not hard:
-        return []
-    h = max(hard, key=lambda x: x.gap)
-    return [f"❓ 需要你决定：{h.name} 本周 {h.done}/{h.target}"
-            f" —— 保持 / 降一档 / 删掉",
+    kind, obj = _pick_decision(data)
+    if kind is None:
+        return ["④ 下次怎么做？",
+                "　（今天没有需要你决定的 —— 没有欠账，也没有断档）", ""]
+    if kind == "todo":
+        return ["④ 下次怎么做？",
+                f"　❓ 「{obj.name}」：今天做 / 改期 / 删掉", ""]
+    if obj.in_list is False:
+        return ["④ 下次怎么做？", f"　❓ {obj.name}：改名 / 从标准里删掉", ""]
+    return ["④ 下次怎么做？",
+            f"　❓ {obj.name} 本周 {obj.done}/{obj.target} —— 保持 / 降一档 / 删掉",
             ""]
+
+
+def _blk_summary(data: ReportData) -> list[str]:
+    """
+    总分总的**总①**：把两大板块各压成一句话（第三行）。
+
+    读失败的那一块**不许**出现在这里 —— "读不到"说成"0 件"是最糟的一种
+    静默错误（与 reminders_empty 同一条判据：精确匹配来源）。
+    """
+    parts: list[str] = []
+    if not data.failed(SRC_REMINDERS):
+        missed = _missed_plan(data)
+        if missed:
+            parts.append(f"待办 {len(missed)} 件未执行")
+        elif data.todos and not data.open_items:
+            parts.append("待办全部完成")
+    if data.events:
+        parts.append(f"明天 {len(data.events)} 项日程")
+    if not parts:
+        return []
+    return ["　·　".join(parts), ""]
+
+
+def _blk_todo_head(data: ReportData) -> list[str]:
+    """待办板块标题。板块里没内容就不留空标题。"""
+    if not (data.todos or data.done):
+        return []
+    return ["── 待办：计划与执行 ──", ""]
+
+
+def _blk_sched_head(data: ReportData) -> list[str]:
+    """日程板块标题。同上：没内容不留空标题。"""
+    if not (data.today_events or data.events):
+        return []
+    return ["── 日程：行程分析 ──", ""]
+
+
+def _blk_today_events(data: ReportData) -> list[str]:
+    """
+    今天的行程（行程分析：今天的时间被什么占了）。
+
+    带上结束时刻 —— "占了多久"才是行程分析要回答的，只给开始时刻不算。
+    """
+    evs = data.today_events
+    if not evs:
+        return []
+    now = dt.datetime.now()
+    passed = sum(1 for e in evs if e.end is not None and e.end <= now)
+    out = [f"📅 今天 {len(evs)} 项" + (f"（{passed} 项已过）" if passed else "")]
+    for e in evs:
+        if e.all_day:
+            when = "全天"
+        elif e.end is not None:
+            when = f"{e.start:%H:%M}–{e.end:%H:%M}"
+        else:
+            when = f"{e.start:%H:%M}"
+        rec = f"（{whens.rrule_text(e.recurrence)}）" if e.recurrence else ""
+        out.append(f"　{when} {e.summary}{rec}")
+    out.append("")
+    return out
+
+
+def _blk_aar(data: ReportData) -> list[str]:
+    """
+    总分总的**总②**（收尾）：AAR 的后两问。
+
+    ⚠️ **只列问题，不给答案**。第 3、4 问是"对经验下判断"，属于意义不确定性 ——
+    那是人的（三类交互：意义不可外包）。机器能做的是把问题**问准**：
+    ①② 在正文里（计划 / 实际），③④ 在这里。
+    """
+    return ["── 复盘（AAR）──", "", "③ 为什么不一样？（①② 就在上面两段里）", ""]
 
 
 def _blk_week_header(data: ReportData) -> list[str]:
@@ -540,24 +683,32 @@ def _blk_week_caveat(data: ReportData) -> list[str]:
 BLOCKS: tuple[Block, ...] = (
     Block("generated_at", _blk_generated_at, digests=("daily", "weekly"),
           note="数据截止时刻 + 迟到/早到说明（按各自的计划时间）"),
-    # 「标准 vs 实际」放在最前：日报的**唯一**对照段（CADENCE §七 的排法）。
-    # heartbeat 留空是**有意的**：心跳摘要是发给第三方的（见 _heartbeat_summary），
-    # 习惯名与达成率属于私人数据，不外发。
-    Block("habits", _blk_habits,
-          note="空 = 没声明标准或读失败（两者由 errors 区分）"),
+    # ── 日报：总分总（2026-10-14 用户定的结构）
+    #
+    #   总①（summary）→ 待办板块（计划与执行）→ 日程板块（行程分析）→ 总②（AAR）
+    #
+    # 两大板块各自带标题（板块空则标题也不出现）。
+    # heartbeat 一律**不挂**：心跳摘要是发给第三方的（见 _heartbeat_summary），
+    # 计划未执行/习惯达成率都属于私人数据，不外发。
+    Block("summary", _blk_summary, note="总①：两个板块各一句话"),
+    Block("todo_head", _blk_todo_head, note="待办板块标题；板块空则不出现"),
+    Block("open_items", _blk_open_items, heartbeat="待办未完成",
+          count=lambda d: len(d.open_items),
+          note="标题是「计划未执行」= 有到期日且已过；没定日期的只报数量"),
+    Block("reminders_empty", _blk_reminders_empty,
+          note="读失败时**不许**说'没有待办'"),
     Block("done", _blk_done, heartbeat="完成",
           count=lambda d: len(d.done),
           note="按 Apple 原生完成时刻筛过"),
-    Block("open_items", _blk_open_items, heartbeat="未完成",
-          count=lambda d: len(d.open_items),
-          note="空且有待办时改说「全部完成」"),
-    Block("reminders_empty", _blk_reminders_empty,
-          note="读失败时**不许**说'没有待办'"),
+    Block("sched_head", _blk_sched_head, note="日程板块标题；板块空则不出现"),
+    Block("today_events", _blk_today_events,
+          note="今天的行程（带结束时刻：占了多久才是行程分析）"),
     Block("events", _blk_events, heartbeat="明日日程",
           count=lambda d: len(d.events)),
-    Block("memos", _blk_memos, heartbeat="备忘",
-          count=lambda d: len(d.memos),
-          note="来自 journal 台账的差集；天数用 data.memo_nag_days"),
+    Block("aar", _blk_aar, note="总②：AAR 后两问，只问不答"),
+    Block("habits", _blk_habits, note="③ 的具体问题；无候选则省略整段"),
+    Block("decision", _blk_decision,
+          note="④ 每天最多 1 件；没有候选也保留这一问（AAR 的第 4 问不能缺席）"),
     # ── 以下是周报（digests=("weekly",)）
     Block("week_header", _blk_week_header, digests=("weekly",)),
     Block("week_completed", _blk_week_completed, digests=("weekly",),
@@ -573,8 +724,10 @@ BLOCKS: tuple[Block, ...] = (
     Block("week_caveat", _blk_week_caveat, digests=("weekly",),
           note="口径：完成数只是下限，必须说出来"),
     # ── 两份产物共用
-    Block("decision", _blk_decision,
-          note="每天最多 1 件（CADENCE §七）；无候选则整段省略"),
+    # 备忘：2026-10-14 从日报挪到**周报**（流水账按周看模式，日报不催）
+    Block("memos", _blk_memos, digests=("weekly",), heartbeat="备忘",
+          count=lambda d: len(d.memos),
+          note="来自 journal 台账的差集；天数用 memo_nag_days"),
     Block("errors", _blk_errors, digests=("daily", "weekly"),
           note="读不到 ≠ 没有"),
     Block("channel_warnings", _blk_channel_warnings),
@@ -737,17 +890,24 @@ def collect(date: dt.date | None = None,
     except Exception as e:  # noqa: BLE001
         data.errors.append(SourceError(SRC_REMINDERS, str(e)))
 
-    # ② 日历（明天的日程）
+    # ② 日历（**今天 + 明天，一次读**）
+    #
+    # 为什么要一次读两天：日程段要做"行程分析"（今天实际被什么占了 + 明天有什么），
+    # 而分两次读会**多扫一遍重复事件** —— 那份扫描是这条读取里唯一随事件总数
+    # 变慢的地方（见 read_events_between 的说明）。
     try:
-        data.events = _read_events(today + dt.timedelta(days=1))
+        _evs = read_events_between(today, today + dt.timedelta(days=2))
+        _tomorrow = today + dt.timedelta(days=1)
+        data.today_events = [e for e in _evs if e.start.date() == today]
+        data.events = [e for e in _evs if e.start.date() == _tomorrow]
     except Exception as e:  # noqa: BLE001
         data.errors.append(SourceError(SRC_CALENDAR, str(e)))
 
-    # ③ 备忘（从 journal 台账算，不读备忘录正文）
-    try:
-        data.memos = _read_stale_memos(today, memo_nag_days)
-    except Exception as e:  # noqa: BLE001
-        data.errors.append(SourceError(SRC_MEMOS, str(e)))
+    # ③ 备忘：**日报不读**
+    #
+    # 2026-10-14 用户裁决：备忘是**流水账**，不是承诺 —— 每天催一次只会生产
+    # 假内疚（它当时已经把 6 条堆在日报里了）。改由**周报**看一次模式。
+    # 所以这里连数据都不读：没有区块用它，读了就是白读。
 
     # ④ 习惯：本周"标准 vs 实际"（留档 + 最近窗口，见 habits.week_status）
     try:
@@ -869,6 +1029,12 @@ def collect_week(today: dt.date | None = None) -> ReportData:
     except Exception as e:  # noqa: BLE001
         data.errors.append(SourceError(SRC_LEDGER, str(e)))
 
+    # ③ 备忘（2026-10-14 从日报挪来：它是流水账，按**周**看一次模式才有意义）
+    try:
+        data.memos = _read_stale_memos(today, MEMO_NAG_DAYS)
+    except Exception as e:  # noqa: BLE001
+        data.errors.append(SourceError(SRC_MEMOS, str(e)))
+
     data.week = week
     return data
 
@@ -889,16 +1055,21 @@ def _read_todos(day: dt.date | None = None) -> list[Todo]:
     rem = reminders.Reminders()
     rem.verify_list()
     out: list[Todo] = []
-    for r in rem.all_reminders():
+    # with_due=True：日报要算「计划未执行」，必须知道每件的到期日。
+    # 这条路上的代价（~0.3 s/条）是**日报独有**的，已在 with_due 的注释里写明。
+    for r in rem.all_reminders(with_due=True):
         # 未完成项一律保留（它们没有"哪天完成的"这个问题）
         if r.completed and day is not None:
             # 没有完成时刻的已完成项：宁可漏报一条，也不要把它算进"今天完成"
             if r.completed_at is None or r.completed_at.date() != day:
                 continue
+        _due = r.due_at.date() if r.due_at else None
         out.append(Todo(
             name=r.name,
             completed=bool(r.completed),
             completed_at=r.completed_at,
+            todo_id=r.id or "",
+            due=_due,
         ))
     return out
 

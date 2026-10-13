@@ -149,7 +149,9 @@ class HabitWeek:
     target: int
     done: int
     streak: int
-    in_list: bool = True
+    # 三态：True = 列表里有；False = **确认**列表里没有（改了名 / 删了）；
+    # None = 这次没读到 —— 此时**不许**说"找不到"（读不到 ≠ 没有）。
+    in_list: bool | None = True
 
     @property
     def gap(self) -> int:
@@ -170,10 +172,11 @@ def standards() -> dict[str, int]:
 
     **空 = 没声明 → 日报那一段不出现**（不猜，也不拿默认值糊上去）。
     """
-    try:
-        cfg = json.loads(CONFIG.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001 —— 配置坏了不该让日报整份失败
-        return {}
+    # ⚠️ 配置坏了**要抛**，不能悄悄返回空 ——
+    # 返回空等于"没声明标准"：日报把那两段整段省略，而错误块里什么都没有，
+    # 那正是这个项目最怕的"看起来正常"（2026-10-14 审计实测）。
+    # 抛出去由 report.collect 接住 → 进 errors（SourceError(SRC_HABITS, …)）。
+    cfg = json.loads(CONFIG.read_text(encoding="utf-8"))
     raw = cfg.get("habits_standards")
     out: dict[str, int] = {}
     if isinstance(raw, dict):
@@ -263,8 +266,14 @@ def week_status(now: dt.datetime, *, list_name: str, targets: dict[str, int],
 
     try:
         present = {r.name for r in rem.open_reminders()}
-    except Exception:  # noqa: BLE001 —— 附加检查，读不到就不判 missing
+        list_known = True
+    except Exception:  # noqa: BLE001
+        # ⚠️ 读失败**不等于**"列表里没有这条"（KERNEL-CONTRACT §四：读不到 ≠ 没有）。
+        # 2026-10-14 审计实测：以前这里吞掉异常后 in_list 会算成 False，
+        # 于是日报**断言**"习惯列表里找不到同名条目（改名了？）"—— 那是编的。
+        # 现在改成三态：None = 这次没读到，"找不到"这个判断不成立。
         present = set()
+        list_known = False
 
     out: list[HabitWeek] = []
     for name, target in targets.items():
@@ -272,7 +281,8 @@ def week_status(now: dt.datetime, *, list_name: str, targets: dict[str, int],
                    if nm == name and hid in week_ids)
         out.append(HabitWeek(name=name, target=target, done=done,
                              streak=_streak(days_with.get(name, set()), now.date()),
-                             in_list=(name in present) or done > 0))
+                             in_list=((name in present) or done > 0) if list_known
+                             else None))
     # 未达成的、差得多的排前面；达成的沉底（日报要让人先看见欠账）
     out.sort(key=lambda h: (h.met, -h.gap, h.name))
     return out

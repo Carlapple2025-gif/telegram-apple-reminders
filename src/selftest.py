@@ -3517,35 +3517,46 @@ _RD = _dt2.date(2026, 10, 3)
 _t6, _b6 = _rp.build_report(_rp.ReportData(
     date=_RD,
     todos=[_rp.Todo("勘察表盖章", True), _rp.Todo("跟进竣工报验", False),
-           _rp.Todo("交电费", False)],
+           _rp.Todo("交电费", False, due=_dt2.date(2026, 10, 1))],
     events=[_rp.Event("项目周会", _dt2.datetime(2026, 10, 4, 14, 0), "会议室")],
-    memos=[_rp.Memo("荷载要按名称命名", _dt2.datetime(2026, 9, 28, 10, 0))],
 ))
 check("日报标题格式", _t6 == "📋 2026-10-03 复盘", _t6)
 check("日报含完成段", "✅ 今日完成 1 件" in _b6)
 check("日报列出完成项", "勘察表盖章" in _b6)
-check("日报含未完成段", "⏳ 未完成 2 件" in _b6)
-check("日报含明日日程", "📅 明日日程 1 项" in _b6 and "14:00" in _b6)
+# 2026-10-14：标题从「未完成」改成「计划未执行」——
+# 未完成是清点，计划未执行才是对照（有到期日 = 有基准）。
+check("日报含计划未执行段（带晚了几天）",
+      "📌 计划未执行（1 件）" in _b6 and "交电费" in _b6 and "晚了 2 天" in _b6)
+check("日报把没定日期的单独报数量（看不见 ≠ 没有）", "没定日期 1 件" in _b6)
+check("日报含明日日程", "📅 明天 1 项" in _b6 and "14:00" in _b6)
+check("日报有总分总的「总」与两个板块标题",
+      "待办 1 件未执行" in _b6 and "── 待办：计划与执行 ──" in _b6
+      and "── 日程：行程分析 ──" in _b6 and "复盘（AAR）" in _b6)
 check("日报含日程地点", "@会议室" in _b6)
-check("日报含备忘提醒", "📝 备忘放了 3 天以上" in _b6 and "荷载要按名称命名" in _b6)
+# 备忘：2026-10-14 从日报**挪到周报**（用户裁决：流水账按周看模式，日报不催）。
+# 日报里那 6 条堆着的备忘，就是这么来的 —— 每天催一次只生产假内疚。
+_t6m, _b6m = _rp.build_report(_rp.ReportData(
+    date=_RD, digest="weekly",
+    memos=[_rp.Memo("荷载要按名称命名", _dt2.datetime(2026, 9, 28, 10, 0))]))
+check("日报里不再有备忘段（挪走了）", "📝" not in _b6)
 # 这句话现在**是真的**（`_read_stale_memos` 做了只读快照差集）——
 # 曾经它是一句没实现的承诺：文案写着"删掉之后不再提醒"，
-# 而差集根本没接上，删掉备忘日报照旧天天提醒。断言翻回来的前提是
-# 那两处接线真的存在（见下面的"感知路径"一节）。
-check("日报说明如何消除备忘提醒", "删掉即可" in _b6)
+# 而差集根本没接上，删掉备忘日报照旧天天提醒。
+check("周报含备忘提醒", "📝 备忘放了 3 天以上" in _b6m and "荷载要按名称命名" in _b6m)
+check("周报说明如何消除备忘提醒", "删掉即可" in _b6m)
 
-# 多行备忘在日报里**只占一行**（2026-10-04 起备忘正文保留换行）
+# 多行备忘在正文里**只占一行**（2026-10-04 起备忘正文保留换行）
 _t6b, _b6b = _rp.build_report(_rp.ReportData(
-    date=_RD,
+    date=_RD, digest="weekly",
     memos=[_rp.Memo("国庆规划\n1. PDCA\n2. 文生视频", _dt2.datetime(2026, 10, 4, 9, 0))],
 ))
-check("日报：多行备忘只显示首行", "　国庆规划" in _b6b and "1. PDCA" not in _b6b, _b6b)
-check("日报：截断了就给个省略提示", "国庆规划　…" in _b6b, _b6b)
+check("周报：多行备忘只显示首行", "　国庆规划" in _b6b and "1. PDCA" not in _b6b, _b6b)
+check("周报：截断了就给个省略提示", "国庆规划　…" in _b6b, _b6b)
 
 # 全部完成 → 不该出现"未完成"段
 _t7, _b7 = _rp.build_report(_rp.ReportData(date=_RD, todos=[_rp.Todo("甲", True)]))
 check("全部完成有庆祝文案", "🎉" in _b7)
-check("全部完成无未完成段", "⏳" not in _b7)
+check("全部完成无计划未执行段", "📌" not in _b7)
 
 # 完全没有待办
 _t8, _b8 = _rp.build_report(_rp.ReportData(date=_RD))
@@ -3673,8 +3684,12 @@ _rich = _rp.ReportData(
     habits=[_hab_mod.HabitWeek("英语", 5, 3, 4),
             _hab_mod.HabitWeek("力量训练", 3, 3, 2),
             _hab_mod.HabitWeek("冥想", 7, 0, 0, in_list=False)],
-    todos=[_rp.Todo("做完的", True), _rp.Todo("没做完的", False)],
+    todos=[_rp.Todo("做完的", True),
+           # due 在 _RD（10-03）之前 → 落在「计划未执行」里（新区块要能点亮）
+           _rp.Todo("没做完的", False, due=_dt2.date(2026, 10, 1))],
     events=[_rp.Event("周会", _dt2.datetime(2026, 10, 4, 14, 0))],
+    today_events=[_rp.Event("今天的会", _dt2.datetime(2026, 10, 3, 10, 0),
+                            end=_dt2.datetime(2026, 10, 3, 11, 0))],
     memos=[_rp.Memo("一条备忘", _dt2.datetime(2026, 9, 20, 9, 0))],
     errors=[_rp.SourceError("日历", "超时")],
     generated_at=_dt2.datetime(2026, 10, 3, 21, 30),
@@ -3688,7 +3703,9 @@ _WEEK_RICH = _rp.WeekData(
     per_day=[(_dt2.date(2026, 9, 28) + _dt2.timedelta(days=i),
               n) for i, n in enumerate([1, 2, 0, 3, 1, 0, 0])], streak=5)
 _week_rich = _rp.ReportData(date=_RD, digest="weekly", week=_WEEK_RICH,
-                            generated_at=_dt2.datetime(2026, 10, 4, 20, 0))
+                            generated_at=_dt2.datetime(2026, 10, 4, 20, 0),
+                            memos=[_rp.Memo("一条备忘",
+                                            _dt2.datetime(2026, 9, 20, 9, 0))])
 _week_empty = _rp.ReportData(date=_RD, digest="weekly",
                              week=_rp.WeekData(start=_dt2.date(2026, 9, 28),
                                                end=_dt2.date(2026, 10, 4),
@@ -3823,39 +3840,42 @@ try:
     check("标准表：非数字与 0 被丢掉（不猜、不糊）",
           _hab.standards() == {"英语": 5}, str(_hab.standards()))
 
-    # 日报渲染
+    # ③ 只问一句（2026-10-14 用户裁决：达成率没必要 —— 把表换成问）
     _d_hab = _rp.ReportData(
-        date=_dt2.date(2026, 10, 11),
+        date=_dt2.date(2026, 10, 18),          # 周日：本周只剩 1 天
         habits=[_hab.HabitWeek("英语", 5, 2, 1),
-                _hab.HabitWeek("力量训练", 3, 3, 2),
                 _hab.HabitWeek("冥想", 7, 0, 0, in_list=False)])
-    _hab_lines = _rp._blk_habits(_d_hab)
-    check("习惯段：达成的 ✅、未达成的 ⚠️ 并写出还差几次",
-          any("✅ 力量训练" in x for x in _hab_lines)
-          and any("⚠️ 英语" in x and "还差 3 次" in x for x in _hab_lines),
-          " / ".join(_hab_lines))
-    check("习惯段：标准里有、列表里没有的名字如实说出来（不假装 0 次）",
-          any("冥想" in x and "找不到" in x for x in _hab_lines),
-          " / ".join(_hab_lines))
+    _hab_msg = [x for x in _rp._blk_habits(_d_hab) if x.strip()]
+    check("③ 只问一句（不再摆达成率表）", len(_hab_msg) == 1, str(_hab_msg))
+    check("③ 优先问「标准里写了、列表里却没有」的（那是假的差异）",
+          "改名" in _hab_msg[0], _hab_msg[0])
+    _d_hab2 = _rp.ReportData(date=_dt2.date(2026, 10, 18),
+                             habits=[_hab.HabitWeek("英语", 5, 2, 1)])
+    _ask_hab = "".join(_rp._blk_habits(_d_hab2))
+    check("③ 问的是「为什么不一样」，不是报数字",
+          "是标准定高了" in _ask_hab, _ask_hab)
+    # 候选落在**承诺**那一侧时，问的是"为什么没做"
+    _d_todo = _rp.ReportData(date=_dt2.date(2026, 10, 14),
+                             todos=[_rp.Todo("生成视频", False,
+                                             due=_dt2.date(2026, 10, 11))])
+    _ask_todo = "".join(_rp._blk_habits(_d_todo))
+    check("③ 候选是欠账时问「为什么没做」", "没时间" in _ask_todo, _ask_todo)
 
-    # ❓ 每天一个决定
-    _dec_sun = _rp._blk_decision(_rp.ReportData(
-        date=_dt2.date(2026, 10, 11),
-        habits=[_hab.HabitWeek("英语", 5, 2, 1)]))
-    _dec_msg = [x for x in _dec_sun if x.strip()]      # 去掉结尾那个空行
-    check("决定段：本周已不可能达成 → 给出「保持/降一档/删掉」",
-          len(_dec_msg) == 1 and "保持" in _dec_msg[0] and "删掉" in _dec_msg[0],
+    # ④ 下次怎么做：最多 1 件；没有候选也保留这一问（AAR 第 4 问不能缺席）
+    _dec_sun = [x for x in _rp._blk_decision(_d_hab2) if x.strip()]
+    check("④ 已不可能达成 → 给「保持 / 降一档 / 删掉」",
+          "保持" in "".join(_dec_sun) and "删掉" in "".join(_dec_sun),
           str(_dec_sun))
-    check("决定段：还追得上就不催（一次只改一件事）",
-          _rp._blk_decision(_rp.ReportData(
-              date=_dt2.date(2026, 10, 5),
-              habits=[_hab.HabitWeek("英语", 5, 2, 1)])) == [])
-    check("决定段：最多 1 件",
-          len([x for x in _rp._blk_decision(_d_hab) if x.strip()]) <= 1,
-          str(_rp._blk_decision(_d_hab)))
-    _d_none = _rp.ReportData(date=_dt2.date(2026, 10, 11))
-    check("没声明标准时两段都不出现（不猜，也不拿默认值）",
-          _rp._blk_habits(_d_none) == [] and _rp._blk_decision(_d_none) == [])
+    check("④ 一次只问一件", sum(1 for x in _dec_sun if "❓" in x) == 1,
+          str(_dec_sun))
+    _dec_none = "".join(_rp._blk_decision(_rp.ReportData(date=_dt2.date(2026, 10, 18))))
+    check("④ 没有候选也保留这一问（不静默缺席）",
+          "④" in _dec_none and "没有需要你决定" in _dec_none, _dec_none)
+    check("④ 候选是欠账时给「今天做 / 改期 / 删掉」",
+          "改期" in "".join(_rp._blk_decision(_d_todo)))
+    check("没声明标准时不编问题（③ 空、④ 仍在）",
+          _rp._blk_habits(_rp.ReportData(date=_dt2.date(2026, 10, 18))) == []
+          and "④" in _dec_none)
 finally:
     _jn_m.habit_records, _rm_m.Reminders = _sv_hj, _sv_hr
     _hab.CONFIG = _sv_cfg_h
@@ -3877,8 +3897,9 @@ check("build_report 里没有区块文案（正文全在区块里）", not _leak
 
 # ── 心跳摘要由注册表派生（原先硬编码四品类，加品类要改三处）
 _hb = _rp._heartbeat_summary(_rich, [("telegram", True, "ok")])
-check("心跳摘要含各区块的计数", "完成1" in _hb and "未完成1" in _hb
-      and "明日日程1" in _hb and "备忘1" in _hb, _hb)
+# 备忘 2026-10-14 挪到周报 → 日报的心跳里**不该**再有它（区块不在就不报数）
+check("心跳摘要含各区块的计数", "完成1" in _hb and "待办未完成1" in _hb
+      and "明日日程1" in _hb and "备忘1" not in _hb, _hb)
 check("心跳摘要仍有读取失败计数", "读取失败1" in _hb, _hb)
 check("心跳摘要仍然只报数字（不带正文）",
       "一条备忘" not in _hb and "没做完的" not in _hb, _hb)
@@ -3924,11 +3945,14 @@ check("failed() 命中同来源", _rp.ReportData(
 
 # ② 备忘提醒的天数要用**这次实际用的**，不是模块常量
 #    （实测过的正文撒谎：`--memo-days 7` 筛 7 天，正文写"3 天以上"）
-_b7d = _rp.build_report(_rp.ReportData(date=_RD, memo_nag_days=7, memos=[
-    _rp.Memo("放了很久的事", _dt2.datetime(2026, 9, 20, 9, 0))]))[1]
-check("备忘天数随 --memo-days 变（正文不撒谎）", "放了 7 天以上" in _b7d, _b7d)
+_b7d = _rp.build_report(_rp.ReportData(date=_RD, digest="weekly", memo_nag_days=7,
+                                       memos=[_rp.Memo(
+                                           "放了很久的事",
+                                           _dt2.datetime(2026, 9, 20, 9, 0))]))[1]
+check("周报备忘天数随 --memo-days 变（正文不撒谎）", "放了 7 天以上" in _b7d, _b7d)
 check("默认仍是 3 天", "放了 3 天以上" in _rp.build_report(_rp.ReportData(
-    date=_RD, memos=[_rp.Memo("x", _dt2.datetime(2026, 9, 20, 9, 0))]))[1])
+    date=_RD, digest="weekly",
+    memos=[_rp.Memo("x", _dt2.datetime(2026, 9, 20, 9, 0))]))[1])
 
 
 section("周报（周日 20:00）与「两种产物不能互相冒充」")
@@ -4018,9 +4042,10 @@ check("周报标题带周区间",
 check("周报含完成数与本周记下",
       "✅ 完成 7 件" in _bw and "📥 本周记下：待办 5 · 日程 2 · 备忘 1" in _bw, _bw)
 check("周报含连续天数", "🔥 连续 5 天有完成" in _bw, _bw)
-# 这是"同一份渲染管线、另一套区块"的实证：日报的段一个都不该漏进周报
-check("周报不带日报的段（明日日程 / 备忘提醒 / 打钩）",
-      "明日日程" not in _bw and "备忘放了" not in _bw and "打钩" not in _bw, _bw)
+# 这是"同一份渲染管线、另一套区块"的实证：日报的段不该漏进周报。
+# ⚠️ 备忘**不在**这张禁止名单里 —— 2026-10-14 起它是**周报的段**（从日报挪来的）。
+check("周报不带日报的段（明日日程 / 打钩）",
+      "明日日程" not in _bw and "打钩" not in _bw, _bw)
 # 口径必须写出来：不写清"完成数只是下限"，这份周报就在骗人
 # （你在提醒事项里删掉一条已完成的，它就从统计里消失了，而数字看起来仍然精确）
 check("周报写明口径（只数得到还在的条目）",
@@ -4684,7 +4709,11 @@ class _FakeReminders(_rem.Reminders):
     def verify_list(self):
         return 0
 
-    def all_reminders(self):
+    def all_reminders(self, with_due: bool = False):
+        # ⚠️ 必须跟上真实类的签名（2026-10-14 加了 with_due）——
+        # 替身不认识新参数时，炸的是**别的**断言（这里崩过：_read_todos 传了它）。
+        # 替身只回放假数据，所以 with_due 这里无事可做：假的 Reminder 上
+        # due 字段本来就是填好的。
         return list(self.fake)
 
 
