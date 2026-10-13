@@ -231,17 +231,27 @@ def week_status(now: dt.datetime, *, list_name: str, targets: dict[str, int],
     import reminders
 
     start = week_start(now.date())
-    span = (now.date() - start).days + 2      # 多两天：覆盖"晚一天才扫到"的
+    today = now.date()
+    span = (today - start).days + 2      # 多两天：覆盖"晚一天才扫到"的
 
     names_of: dict[str, str] = {}
+    week_ids: set[str] = set()
     days_with: dict[str, set[dt.date]] = {}
 
     def _add(hid: str, name: str, when: dt.datetime | None) -> None:
         if not hid or not name:
             return
         names_of.setdefault(hid, name)
-        if when is not None:
-            days_with.setdefault(name, set()).add(when.date())
+        if when is None:
+            return
+        # **连续天数不限本周**（连续 12 天要跨周才数得出来）。
+        days_with.setdefault(name, set()).add(when.date())
+        # ⚠️ 但**计数必须落在本周**。两个来源都是"最近 N 天"，
+        # 那不等于"本周" —— 不加这一层，周一/周二的日报会把上周日的完成
+        # 算进本周（2026-10-14 审计实测：周一 + 一条周日记录 → 1/5，应为 0/5），
+        # 而 habits_window_days 最大可到 30 天，会放得更大。
+        if start <= when.date() <= today:
+            week_ids.add(hid)
 
     for rec in journal.habit_records(days=span):
         _add(str(rec.get("habit_id") or ""), str(rec.get("name") or ""),
@@ -258,7 +268,8 @@ def week_status(now: dt.datetime, *, list_name: str, targets: dict[str, int],
 
     out: list[HabitWeek] = []
     for name, target in targets.items():
-        done = sum(1 for hid, nm in names_of.items() if nm == name)
+        done = sum(1 for hid, nm in names_of.items()
+                   if nm == name and hid in week_ids)
         out.append(HabitWeek(name=name, target=target, done=done,
                              streak=_streak(days_with.get(name, set()), now.date()),
                              in_list=(name in present) or done > 0))

@@ -3791,6 +3791,30 @@ try:
           [h.name for h in _ws] == ["英语", "力量训练"],
           str([(h.name, h.met, h.gap) for h in _ws]))
 
+    # ⚠️ 周界：两个来源都是"最近 N 天"，**都不等于"本周"**。
+    # 不筛这一层，周一/周二的日报会把上周日的完成算进本周
+    # （2026-10-14 独立审计实测：周一 + 一条周日记录 → 1/5，应为 0/5）。
+    _saved_records = _jn_m.habit_records
+    _jn_m.habit_records = lambda days=8, end=None: [
+        _hrec("sun1", "英语", "2026-10-11T20:31:00+08:00")]
+    _FakeReminders.live = []
+    _mon = _hab.week_status(_dt2.datetime(2026, 10, 12, 21, 30), list_name="习惯",
+                            targets={"英语": 5})
+    check("习惯：上周日的完成**不算**本周（周界）", _mon[0].done == 0,
+          f"done={_mon[0].done}（应为 0）")
+    _mon_w = _hab.week_status(_dt2.datetime(2026, 10, 12, 21, 30), list_name="习惯",
+                              targets={"英语": 5}, window_days=30)
+    check("习惯：读窗口放大到 30 天也不越界（窗口 ≠ 本周）", _mon_w[0].done == 0,
+          f"done={_mon_w[0].done}（应为 0）")
+    _jn_m.habit_records = _saved_records
+
+    # 这一类 bug 已经犯过两次（3eebf41 与本次）：断言依赖"真实今天"。
+    # 钉住写法本身 —— 裸时刻那三条必须显式传 base，结果才不随日期变。
+    _st_src_x = (ROOT / "src" / "selftest.py").read_text(encoding="utf-8")
+    check("裸时刻断言显式传 base（结果不随真实日期变）",
+          "parse_when(text, base=now.date())" in _st_src_x,
+          "不传 base 时它用 date.today()，断言会只在某一天为真")
+
     # 标准表的解析：读得出数字、丢掉非数字与 0（不拿默认值糊上去）
     _cfg_tmp = _P2(_tf2.mkdtemp()) / "c.json"
     _cfg_tmp.write_text('{"habits_standards": {"英语": 5, "坏的": "x", "零": 0}}',
@@ -4971,7 +4995,11 @@ _NOW = _dt2.datetime(2026, 10, 11, 10, 0)      # 上午 10 点：用来固定"�
 
 
 def _prom(text, now=_NOW):
-    w = _wh_m.parse_when(text)
+    # ⚠️ base 必须**显式**传（whens.py 的 parse_when 自己就写着"测试请显式传入"）。
+    # 不传时它用 date.today() —— 于是这三条断言只在真实日期 == 2026-10-11 时为真，
+    # 从 10-12 起恒红（三天没人发现，是 2026-10-14 的独立审计抓到的）。
+    # 同源教训已经有过一次：提交 3eebf41「修掉一条只在当天 15:00 前为真的断言」。
+    w = _wh_m.parse_when(text, base=now.date())
     return _wh_m.promote_bare_time(w, now=now) if w else None
 
 
